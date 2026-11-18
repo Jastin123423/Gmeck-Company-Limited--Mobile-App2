@@ -62,14 +62,26 @@ export function resolveProductQtyInStore(
   if (store.isShopFloor) {
     return Number(product.currentStock || 0);
   }
-  const nonFloorInShop = allStoresInShop.filter(
-    s => s.shopId === product.shopId && !s.isShopFloor && s.status === 'ACTIVE'
+  const shopWarehouseStores = allStoresInShop
+    .filter(s => s.shopId === product.shopId && !s.isShopFloor)
+    .sort((a, b) => {
+      if (a.status !== b.status) return a.status === 'ACTIVE' ? -1 : 1;
+      return (a.createdAt || '').localeCompare(b.createdAt || '');
+    });
+
+  const shopWarehouseIds = new Set(shopWarehouseStores.map(s => s.id));
+  const mappedWarehouseSum = Object.entries(product.storeStocks || {}).reduce(
+    (sum, [sid, qty]) => (shopWarehouseIds.has(sid) ? sum + Math.max(0, Number(qty || 0)) : sum),
+    0
   );
-  if (
-    nonFloorInShop.length <= 1 &&
-    (!product.storeStocks || Object.keys(product.storeStocks).length === 0)
-  ) {
-    return Number(product.storeStock || 0);
+
+  if (mappedWarehouseSum === 0 && Number(product.storeStock || 0) > 0) {
+    if (product.storeId && shopWarehouseIds.has(product.storeId)) {
+      return product.storeId === store.id ? Number(product.storeStock || 0) : 0;
+    }
+    if (shopWarehouseStores[0]?.id === store.id) {
+      return Number(product.storeStock || 0);
+    }
   }
   return 0;
 }

@@ -36,8 +36,7 @@ function yieldToMain(): Promise<void> {
 }
 
 function toSyncProductPayload(product: Product): Record<string, any> {
-  const { storeDetails: _sd, storeStocks: _ss, ...rest } = product;
-  return { ...rest, storeId: undefined };
+  return { ...product };
 }
 
 export interface ExcelProductRow {
@@ -2043,6 +2042,7 @@ export class ExcelImportService {
         const newProduct: Product = {
           id: productId,
           shopId: opts.shopId,
+          ...(isToStore && targetStore ? { storeId: targetStore.id } : {}),
           name: row.productName,
           sku,
           barcode,

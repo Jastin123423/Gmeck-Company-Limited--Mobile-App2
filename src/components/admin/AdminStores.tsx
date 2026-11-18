@@ -21,9 +21,13 @@ import {
   Download,
   FileSpreadsheet,
   RefreshCw,
+  MoreVertical,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { StoreService } from '../../services/storeService';
+import { ProductService } from '../../services/productService';
+import { db } from '../../db/storage';
+import { generateUUID } from '../../utils/crypto';
 import {
   ExcelImportService,
   ExcelParseResult,
@@ -38,7 +42,12 @@ import {
   isPlatformAdmin,
   isShopAdmin,
 } from '../../utils/permissions';
-import type { Product, Store } from '../../types';
+import type {
+  InventoryMovement,
+  Product,
+  ProductStoreStockDetail,
+  Store,
+} from '../../types';
 
 export const AdminStores: React.FC = () => {
   const { currentUser, dbState, addToast, selectedShopId, refreshStoresFromCloud } = useApp();
@@ -85,6 +94,35 @@ export const AdminStores: React.FC = () => {
 
   // Store Delete Confirmation state
   const [deletingStore, setDeletingStore] = useState<Store | null>(null);
+
+  // Store Inventory Product Click / Press-and-Hold Action Menu state
+  const [actionProduct, setActionProduct] = useState<Product | null>(null);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [editProdName, setEditProdName] = useState('');
+  const [editProdVariation, setEditProdVariation] = useState('');
+  const [editProdSku, setEditProdSku] = useState('');
+  const [editProdCategoryId, setEditProdCategoryId] = useState('');
+  const [editProdPurchasePrice, setEditProdPurchasePrice] = useState('');
+  const [editProdSellingPrice, setEditProdSellingPrice] = useState('');
+  const [editProdUnit, setEditProdUnit] = useState('pcs');
+  const [editProdMinStock, setEditProdMinStock] = useState('0');
+  const [editProdFloorStock, setEditProdFloorStock] = useState('0');
+  const [editProdStoreQtys, setEditProdStoreQtys] = useState<Record<string, string>>({});
+  const [editProdError, setEditProdError] = useState('');
+  const [isSavingProductEdit, setIsSavingProductEdit] = useState(false);
+  const [deletingProduct, setDeletingProduct] = useState<Product | null>(null);
+
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressTriggeredRef = useRef(false);
+  const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current !== null) {
+        window.clearTimeout(longPressTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -169,30 +207,153 @@ export const AdminStores: React.FC = () => {
     [dbState.products, platformAdmin, accessibleShopIdSet]
   );
 
+  const productStoreQtyCache = useMemo(() => {
+    const qtyMap = new Map<string, Record<string, number>>();
+    let hasFallbackMultiStoreAttribution = false;
+
+    const storesByShop = new Map<string, Store[]>();
+    for (const st of accessibleStores) {
+      const arr = storesByShop.get(st.shopId) || [];
+      arr.push(st);
+      storesByShop.set(st.shopId, arr);
+    }
+
+    const movementWeightsByProd = new Map<string, Map<string, number>>();
+    for (const m of dbState.movements || []) {
+      if (!m.productId || !m.storeId) continue;
+      if (m.type === 'STORE_TRANSFER' || m.type === 'INITIAL_STOCK' || m.type === 'PURCHASE') {
+        const delta = Math.abs(Number(m.newQty ?? m.changeQty ?? 0)) || 1;
+        let storeMap = movementWeightsByProd.get(m.productId);
+        if (!storeMap) {
+          storeMap = new Map<string, number>();
+          movementWeightsByProd.set(m.productId, storeMap);
+        }
+        storeMap.set(m.storeId, (storeMap.get(m.storeId) || 0) + delta);
+      }
+    }
+
+    for (const pur of dbState.purchases || []) {
+      if (!pur.storeId) continue;
+      for (const item of pur.items || []) {
+        if (!item.productId) continue;
+        let storeMap = movementWeightsByProd.get(item.productId);
+        if (!storeMap) {
+          storeMap = new Map<string, number>();
+          movementWeightsByProd.set(item.productId, storeMap);
+        }
+        storeMap.set(
+          pur.storeId,
+          (storeMap.get(pur.storeId) || 0) + Math.max(1, Number(item.quantity || 1))
+        );
+      }
+    }
+
+    for (const product of accessibleProducts) {
+      const shopStores = storesByShop.get(product.shopId) || [];
+      const shopStoreIds = new Set(shopStores.map(s => s.id));
+      const floorStores = shopStores.filter(s => s.isShopFloor);
+      const floorSet = new Set(floorStores.map(s => s.id));
+      const warehouseStores = shopStores
+        .filter(s => !s.isShopFloor)
+        .sort((a, b) => {
+          if (a.status !== b.status) return a.status === 'ACTIVE' ? -1 : 1;
+          return (a.createdAt || '').localeCompare(b.createdAt || '');
+        });
+
+      const qtyByStore: Record<string, number> = {};
+
+      // 1. Floor stores
+      for (const fl of floorStores) {
+        qtyByStore[fl.id] =
+          product.storeStocks && product.storeStocks[fl.id] !== undefined
+            ? Math.max(0, Number(product.storeStocks[fl.id] || 0))
+            : Math.max(0, Number(product.currentStock || 0));
+      }
+
+      // 2. Explicit valid per-store stock mappings for this shop
+      if (product.storeStocks) {
+        for (const [sid, qty] of Object.entries(product.storeStocks)) {
+          if (shopStoreIds.has(sid) && !floorSet.has(sid)) {
+            qtyByStore[sid] = Math.max(0, Number(qty || 0));
+          }
+        }
+      }
+
+      // 3. Recover legacy / cloud-synced products that have aggregate storeStock > 0 without per-store breakdown
+      const mappedWarehouseSum = warehouseStores.reduce(
+        (sum, s) => sum + (qtyByStore[s.id] || 0),
+        0
+      );
+      const rawStoreStock = Math.max(0, Number(product.storeStock || 0));
+
+      if (mappedWarehouseSum === 0 && rawStoreStock > 0 && warehouseStores.length > 0) {
+        const warehouseIdSet = new Set(warehouseStores.map(s => s.id));
+
+        if (product.storeId && warehouseIdSet.has(product.storeId)) {
+          qtyByStore[product.storeId] = rawStoreStock;
+        } else {
+          const weights = movementWeightsByProd.get(product.id);
+          const matchedWeights: { storeId: string; weight: number }[] = [];
+          if (weights) {
+            for (const ws of warehouseStores) {
+              const w = weights.get(ws.id) || 0;
+              if (w > 0) matchedWeights.push({ storeId: ws.id, weight: w });
+            }
+          }
+
+          if (matchedWeights.length === 1) {
+            qtyByStore[matchedWeights[0].storeId] = rawStoreStock;
+          } else if (matchedWeights.length > 1) {
+            const totalW = matchedWeights.reduce((s, e) => s + e.weight, 0);
+            let allocated = 0;
+            matchedWeights.sort((a, b) => b.weight - a.weight);
+            matchedWeights.forEach((entry, idx) => {
+              if (idx === matchedWeights.length - 1) {
+                qtyByStore[entry.storeId] = Math.max(0, rawStoreStock - allocated);
+              } else {
+                const share = Math.round((rawStoreStock * entry.weight) / totalW);
+                qtyByStore[entry.storeId] = share;
+                allocated += share;
+              }
+            });
+          } else {
+            qtyByStore[warehouseStores[0].id] = rawStoreStock;
+            if (warehouseStores.length > 1) {
+              hasFallbackMultiStoreAttribution = true;
+            }
+          }
+        }
+      }
+
+      qtyMap.set(product.id, qtyByStore);
+    }
+
+    return { qtyMap, hasFallbackMultiStoreAttribution };
+  }, [accessibleProducts, accessibleStores, dbState.movements, dbState.purchases]);
+
   const getProductQtyInStore = (product: Product, store: Store): number => {
+    const cached = productStoreQtyCache.qtyMap.get(product.id);
+    if (cached && cached[store.id] !== undefined) {
+      return cached[store.id];
+    }
     if (product.storeStocks && product.storeStocks[store.id] !== undefined) {
       return Number(product.storeStocks[store.id] || 0);
     }
     if (store.isShopFloor) {
       return Number(product.currentStock || 0);
     }
-    const nonFloorInShop = accessibleStores.filter(
-      s => s.shopId === product.shopId && !s.isShopFloor && s.status === 'ACTIVE'
-    );
-    if (nonFloorInShop.length <= 1 && (!product.storeStocks || Object.keys(product.storeStocks).length === 0)) {
-      return Number(product.storeStock || 0);
-    }
     return 0;
   };
 
   const getProductTotalTrackedUnits = (product: Product): number => {
-    if (product.storeStocks && Object.keys(product.storeStocks).length > 0) {
-      const mappedStores = Object.entries(product.storeStocks);
-      const mappedTotal = mappedStores.reduce((s, [, qty]) => s + Number(qty || 0), 0);
-      const hasFloorMapped = mappedStores.some(([sid]) =>
-        accessibleStores.find(st => st.id === sid)?.isShopFloor
+    const shopStores = accessibleStores.filter(st => st.shopId === product.shopId);
+    if (shopStores.length > 0) {
+      const storeSum = shopStores.reduce(
+        (sum, st) => sum + getProductQtyInStore(product, st),
+        0
       );
-      return hasFloorMapped ? mappedTotal : mappedTotal + Number(product.currentStock || 0);
+      const hasFloorStore = shopStores.some(st => st.isShopFloor);
+      return hasFloorStore ? storeSum : storeSum + Number(product.currentStock || 0);
     }
     return Number(product.currentStock || 0) + Number(product.storeStock || 0);
   };
@@ -253,7 +414,7 @@ export const AdminStores: React.FC = () => {
       const bQty = selectedSourceStore ? getProductQtyInStore(b, selectedSourceStore) : Number(b.storeStock || 0);
       return bQty - aQty;
     });
-  }, [accessibleProducts, selectedSourceStore, productSearch, accessibleStores]);
+  }, [accessibleProducts, selectedSourceStore, productSearch, productStoreQtyCache]);
 
   const selectedTransferProduct = useMemo(
     () => storeScopedProducts.find(p => p.id === transferProductId) || accessibleProducts.find(p => p.id === transferProductId),
@@ -326,7 +487,7 @@ export const AdminStores: React.FC = () => {
     invCategoryFilter,
     invStockedOnly,
     invSearch,
-    accessibleStores,
+    productStoreQtyCache,
   ]);
 
   const inventoryTotals = useMemo(() => {
@@ -340,9 +501,13 @@ export const AdminStores: React.FC = () => {
         const detail = p.storeDetails?.[selectedInventoryStore.id];
         totalUnits += qty;
         totalCostValue +=
-          detail?.purchaseValue !== undefined ? detail.purchaseValue : qty * (p.purchasePrice || 0);
+          detail?.importedPurchaseValue !== undefined
+            ? detail.importedPurchaseValue
+            : qty * (p.purchasePrice || 0);
         totalSaleValue +=
-          detail?.saleValue !== undefined ? detail.saleValue : qty * (p.sellingPrice || 0);
+          detail?.importedSaleValue !== undefined
+            ? detail.importedSaleValue
+            : qty * (p.sellingPrice || 0);
       } else {
         const qty = getProductTotalTrackedUnits(p);
         totalUnits += qty;
@@ -364,7 +529,7 @@ export const AdminStores: React.FC = () => {
       totalSaleValue,
       potentialProfit: totalSaleValue - totalCostValue,
     };
-  }, [inventoryProducts, selectedInventoryStore, accessibleStores]);
+  }, [inventoryProducts, selectedInventoryStore, accessibleStores, productStoreQtyCache]);
 
   // Modal handlers
   const openCreateStoreModal = () => {
@@ -719,6 +884,316 @@ export const AdminStores: React.FC = () => {
         type: 'warning',
         title: 'Nothing to Export',
         description: res.error || 'No products found to export.',
+      });
+    }
+  };
+
+  // Store Inventory Product Click / Hold Gesture & Action Handlers
+  const clearLongPressTimer = () => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+
+  const handleInventoryCardPointerDown = (
+    e: React.PointerEvent<HTMLDivElement>,
+    product: Product
+  ) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    clearLongPressTimer();
+    longPressTriggeredRef.current = false;
+    pointerStartRef.current = { x: e.clientX, y: e.clientY };
+
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTriggeredRef.current = true;
+      setActionProduct(product);
+    }, 420);
+  };
+
+  const handleInventoryCardPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!pointerStartRef.current || longPressTimerRef.current === null) return;
+    const dx = Math.abs(e.clientX - pointerStartRef.current.x);
+    const dy = Math.abs(e.clientY - pointerStartRef.current.y);
+    if (dx > 10 || dy > 10) {
+      clearLongPressTimer();
+    }
+  };
+
+  const handleInventoryCardPointerEnd = () => {
+    clearLongPressTimer();
+    pointerStartRef.current = null;
+  };
+
+  const handleInventoryCardClick = (product: Product) => {
+    if (longPressTriggeredRef.current) {
+      longPressTriggeredRef.current = false;
+      return;
+    }
+    setActionProduct(product);
+  };
+
+  const handleOpenEditProductFromAction = (product: Product) => {
+    setActionProduct(null);
+    setEditingProduct(product);
+    setEditProdName(product.name || '');
+    setEditProdVariation(product.variation || '');
+    setEditProdSku(product.sku || '');
+    setEditProdCategoryId(product.categoryId || '');
+    setEditProdPurchasePrice(String(product.purchasePrice ?? 0));
+    setEditProdSellingPrice(String(product.sellingPrice ?? 0));
+    setEditProdUnit(product.unit || 'pcs');
+    setEditProdMinStock(String(product.minStock ?? 0));
+    setEditProdFloorStock(String(product.currentStock ?? 0));
+
+    const warehouseStoresInShop = accessibleStores.filter(
+      st => st.shopId === product.shopId && !st.isShopFloor
+    );
+    const initialQtys: Record<string, string> = {};
+    for (const st of warehouseStoresInShop) {
+      initialQtys[st.id] = String(getProductQtyInStore(product, st));
+    }
+    setEditProdStoreQtys(initialQtys);
+    setEditProdError('');
+  };
+
+  const handleSaveEditedProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingProduct) return;
+    setEditProdError('');
+
+    const cleanName = editProdName.trim();
+    const cleanSku = editProdSku.trim();
+    const buyPrice = Number(editProdPurchasePrice);
+    const sellPrice = Number(editProdSellingPrice);
+    const minStk = Number(editProdMinStock);
+    const floorStk = Number(editProdFloorStock);
+
+    if (!cleanName) {
+      setEditProdError('Product name is required.');
+      return;
+    }
+    if (!cleanSku) {
+      setEditProdError('SKU is required.');
+      return;
+    }
+    if (!Number.isFinite(buyPrice) || buyPrice < 0) {
+      setEditProdError('Buying price must be 0 or greater.');
+      return;
+    }
+    if (!Number.isFinite(sellPrice) || sellPrice < 0) {
+      setEditProdError('Selling price must be 0 or greater.');
+      return;
+    }
+    if (!Number.isFinite(floorStk) || floorStk < 0) {
+      setEditProdError('Shop floor stock cannot be negative.');
+      return;
+    }
+
+    const shopStores = accessibleStores.filter(st => st.shopId === editingProduct.shopId);
+    const warehouseStoresInShop = shopStores.filter(st => !st.isShopFloor);
+    const floorStoresInShop = shopStores.filter(st => st.isShopFloor);
+
+    const nextStoreStocks: Record<string, number> = {
+      ...(editingProduct.storeStocks || {}),
+    };
+    const nextStoreDetails: Record<string, ProductStoreStockDetail> = {
+      ...(editingProduct.storeDetails || {}),
+    };
+
+    let nextStoreStockTotal = 0;
+    let primaryStoreId = editingProduct.storeId;
+    let maxStoreQty = -1;
+
+    for (const st of warehouseStoresInShop) {
+      const parsed = Number(editProdStoreQtys[st.id] ?? 0);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        setEditProdError(`Quantity for "${st.name}" cannot be negative.`);
+        return;
+      }
+      nextStoreStocks[st.id] = parsed;
+      nextStoreStockTotal += parsed;
+      if (parsed > maxStoreQty) {
+        maxStoreQty = parsed;
+        primaryStoreId = st.id;
+      }
+
+      const prevDetail = nextStoreDetails[st.id];
+      nextStoreDetails[st.id] = {
+        ...(prevDetail || {
+          storeId: st.id,
+          storeName: st.name,
+          quantity: parsed,
+          unitPurchasePrice: buyPrice,
+          unitSellingPrice: sellPrice,
+        }),
+        storeId: st.id,
+        storeName: st.name,
+        quantity: parsed,
+        unitPurchasePrice: buyPrice,
+        unitSellingPrice: sellPrice,
+        importedPurchaseValue: parsed * buyPrice,
+        importedSaleValue: parsed * sellPrice,
+        importedPotentialProfit: parsed * (sellPrice - buyPrice),
+      };
+    }
+
+    for (const fl of floorStoresInShop) {
+      nextStoreStocks[fl.id] = floorStk;
+      const prevDetail = nextStoreDetails[fl.id];
+      nextStoreDetails[fl.id] = {
+        ...(prevDetail || {
+          storeId: fl.id,
+          storeName: fl.name,
+          quantity: floorStk,
+          unitPurchasePrice: buyPrice,
+          unitSellingPrice: sellPrice,
+        }),
+        storeId: fl.id,
+        storeName: fl.name,
+        quantity: floorStk,
+        unitPurchasePrice: buyPrice,
+        unitSellingPrice: sellPrice,
+        importedPurchaseValue: floorStk * buyPrice,
+        importedSaleValue: floorStk * sellPrice,
+        importedPotentialProfit: floorStk * (sellPrice - buyPrice),
+      };
+    }
+
+    if (warehouseStoresInShop.length === 0) {
+      nextStoreStockTotal = Math.max(0, Number(editingProduct.storeStock || 0));
+    }
+
+    setIsSavingProductEdit(true);
+    try {
+      const res = await ProductService.updateProduct(
+        editingProduct.id,
+        {
+          name: cleanName,
+          variation: editProdVariation.trim() || undefined,
+          sku: cleanSku,
+          categoryId: editProdCategoryId || editingProduct.categoryId,
+          purchasePrice: buyPrice,
+          sellingPrice: sellPrice,
+          unit: editProdUnit.trim() || 'pcs',
+          minStock: Number.isFinite(minStk) && minStk >= 0 ? minStk : 0,
+          currentStock: floorStk,
+          storeId: primaryStoreId,
+          storeStock: nextStoreStockTotal,
+          storeStocks: nextStoreStocks,
+          storeDetails: nextStoreDetails,
+        },
+        currentUser
+      );
+
+      if (!res.success) {
+        setEditProdError(res.error || 'Failed to update product.');
+        return;
+      }
+
+      const oldTotal =
+        Number(editingProduct.currentStock || 0) + Number(editingProduct.storeStock || 0);
+      const newTotal = floorStk + nextStoreStockTotal;
+      if (oldTotal !== newTotal) {
+        const shopName = accessibleShops.find(s => s.id === editingProduct.shopId)?.name;
+        const adjMovement: InventoryMovement = {
+          id: generateUUID(),
+          shopId: editingProduct.shopId,
+          shopName,
+          storeId: selectedInventoryStore?.id || primaryStoreId,
+          productId: editingProduct.id,
+          productName: cleanName,
+          previousQty: oldTotal,
+          changeQty: newTotal - oldTotal,
+          newQty: newTotal,
+          type: 'ADJUSTMENT',
+          reason: `Manual edit in Stores Inventory${
+            selectedInventoryStore ? ` (${selectedInventoryStore.name})` : ''
+          }`,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          createdAt: new Date().toISOString(),
+        };
+        db.saveMovements([adjMovement, ...db.getMovements()]);
+      }
+
+      addToast({
+        type: 'success',
+        title: 'Product Updated',
+        description: `"${cleanName}" saved (${nextStoreStockTotal.toLocaleString()} in stores, ${floorStk.toLocaleString()} on floor).`,
+      });
+      setEditingProduct(null);
+    } catch (err: any) {
+      setEditProdError(err?.message || 'Unexpected error while saving product.');
+    } finally {
+      setIsSavingProductEdit(false);
+    }
+  };
+
+  const handleOpenTransferFromAction = (product: Product) => {
+    const activeWarehousesInShop = transferableStores.filter(s => s.shopId === product.shopId);
+    if (activeWarehousesInShop.length === 0) {
+      setActionProduct(null);
+      addToast({
+        type: 'warning',
+        title: 'No Warehouse Store',
+        description:
+          'Create an active warehouse store in this shop before transferring stock onto the shop floor.',
+      });
+      return;
+    }
+
+    let bestStore =
+      selectedInventoryStore &&
+      selectedInventoryStore.shopId === product.shopId &&
+      !selectedInventoryStore.isShopFloor &&
+      selectedInventoryStore.status === 'ACTIVE'
+        ? selectedInventoryStore
+        : activeWarehousesInShop[0];
+
+    if (
+      !selectedInventoryStore ||
+      selectedInventoryStore.isShopFloor ||
+      selectedInventoryStore.shopId !== product.shopId
+    ) {
+      let bestQty = -1;
+      for (const st of activeWarehousesInShop) {
+        const q = getProductQtyInStore(product, st);
+        if (q > bestQty) {
+          bestQty = q;
+          bestStore = st;
+        }
+      }
+    }
+
+    setSourceStoreId(bestStore.id);
+    setDestShopId(product.shopId);
+    setTransferProductId(product.id);
+    setProductSearch('');
+    setTransferQty('');
+    setTransferError('');
+    setActionProduct(null);
+    setActiveSubTab('transfer');
+  };
+
+  const handleConfirmDeleteProduct = () => {
+    if (!deletingProduct) return;
+    const res = ProductService.deleteProduct(deletingProduct.id, currentUser);
+    if (res.success) {
+      addToast({
+        type: 'success',
+        title: 'Product Deleted',
+        description: `"${deletingProduct.name}" has been deleted and queued for sync.`,
+      });
+      if (transferProductId === deletingProduct.id) {
+        setTransferProductId('');
+      }
+      setDeletingProduct(null);
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Delete Failed',
+        description: res.error || 'Could not delete product.',
       });
     }
   };
@@ -1155,6 +1630,16 @@ export const AdminStores: React.FC = () => {
             </div>
           </div>
 
+          {/* Legacy unmapped multi-store notice */}
+          {productStoreQtyCache.hasFallbackMultiStoreAttribution && (
+            <div className="bg-amber-950/30 border border-amber-500/30 rounded-xl px-3.5 py-2.5 flex items-start gap-2.5 text-[11px] text-amber-200">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <span>
+                Some synced items did not have a per-store tag and are temporarily displayed under each shop&apos;s primary store so all units remain visible. Click or hold any product to <strong>Edit</strong> store quantities or <strong>Transfer</strong> stock.
+              </span>
+            </div>
+          )}
+
           {/* Store-Scoped Inventory KPIs */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
@@ -1192,6 +1677,13 @@ export const AdminStores: React.FC = () => {
             </div>
           </div>
 
+          <div className="flex items-center justify-between text-[11px] text-slate-400 px-0.5">
+            <span>Tip: Click or press &amp; hold any product card to Edit, Transfer, or Delete.</span>
+            <span className="font-mono tabular-nums text-slate-500">
+              {inventoryProducts.length.toLocaleString()} item{inventoryProducts.length === 1 ? '' : 's'}
+            </span>
+          </div>
+
           {/* Inventory List */}
           {inventoryProducts.length === 0 ? (
             <div className="bg-slate-900 border border-slate-800 rounded-xl py-12 px-4 text-center">
@@ -1213,12 +1705,12 @@ export const AdminStores: React.FC = () => {
                   ? product.storeDetails?.[selectedInventoryStore.id]
                   : undefined;
                 const costVal =
-                  detail?.purchaseValue !== undefined
-                    ? detail.purchaseValue
+                  detail?.importedPurchaseValue !== undefined
+                    ? detail.importedPurchaseValue
                     : storeQty * (product.purchasePrice || 0);
                 const saleVal =
-                  detail?.saleValue !== undefined
-                    ? detail.saleValue
+                  detail?.importedSaleValue !== undefined
+                    ? detail.importedSaleValue
                     : storeQty * (product.sellingPrice || 0);
 
                 const customEntries = product.customFields
@@ -1238,7 +1730,21 @@ export const AdminStores: React.FC = () => {
                 return (
                   <div
                     key={product.id}
-                    className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2.5 text-xs"
+                    role="button"
+                    tabIndex={0}
+                    onPointerDown={e => handleInventoryCardPointerDown(e, product)}
+                    onPointerMove={handleInventoryCardPointerMove}
+                    onPointerUp={handleInventoryCardPointerEnd}
+                    onPointerCancel={handleInventoryCardPointerEnd}
+                    onPointerLeave={handleInventoryCardPointerEnd}
+                    onClick={() => handleInventoryCardClick(product)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setActionProduct(product);
+                      }
+                    }}
+                    className="bg-slate-900 border border-slate-800 hover:border-blue-500/50 active:bg-slate-800/70 rounded-xl p-3.5 space-y-2.5 text-xs cursor-pointer select-none transition"
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
@@ -1272,13 +1778,27 @@ export const AdminStores: React.FC = () => {
                         </div>
                       </div>
 
-                      <div className="text-right shrink-0">
-                        <div className="text-[10px] text-slate-400">
-                          {selectedInventoryStore ? selectedInventoryStore.name : 'All Stores'}
+                      <div className="flex items-start gap-2 shrink-0">
+                        <div className="text-right">
+                          <div className="text-[10px] text-slate-400">
+                            {selectedInventoryStore ? selectedInventoryStore.name : 'All Stores'}
+                          </div>
+                          <div className="text-base font-bold font-mono tabular-nums text-blue-400">
+                            {storeQty} {product.unit}
+                          </div>
                         </div>
-                        <div className="text-base font-bold font-mono tabular-nums text-blue-400">
-                          {storeQty} {product.unit}
-                        </div>
+                        <button
+                          type="button"
+                          aria-label={`Actions for ${product.name}`}
+                          onPointerDown={e => e.stopPropagation()}
+                          onClick={e => {
+                            e.stopPropagation();
+                            setActionProduct(product);
+                          }}
+                          className="p-1.5 rounded-lg bg-slate-950/70 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white transition"
+                        >
+                          <MoreVertical className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
 
@@ -1291,7 +1811,9 @@ export const AdminStores: React.FC = () => {
                             <button
                               key={st.id}
                               type="button"
-                              onClick={() => {
+                              onPointerDown={e => e.stopPropagation()}
+                              onClick={e => {
+                                e.stopPropagation();
                                 setSelectedInventoryStoreId(st.id);
                                 setInvStockedOnly(true);
                               }}
@@ -1992,6 +2514,385 @@ export const AdminStores: React.FC = () => {
           </div>
         );
       })()}
+
+      {/* Store Inventory Product Click / Hold Action Modal (Edit, Transfer, Delete) */}
+      {actionProduct && (() => {
+        const shopName = accessibleShops.find(s => s.id === actionProduct.shopId)?.name || 'Shop';
+        const contextQty = selectedInventoryStore
+          ? getProductQtyInStore(actionProduct, selectedInventoryStore)
+          : getProductTotalTrackedUnits(actionProduct);
+        return (
+          <div
+            onClick={() => setActionProduct(null)}
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4"
+          >
+            <div
+              onClick={e => e.stopPropagation()}
+              className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-sm w-full p-4 sm:p-5 shadow-2xl space-y-4"
+            >
+              <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-blue-400">
+                    {selectedInventoryStore ? selectedInventoryStore.name : shopName}
+                  </div>
+                  <h3 className="text-sm sm:text-base font-bold text-white truncate mt-0.5">
+                    {actionProduct.name}
+                  </h3>
+                  <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-400 mt-1 font-mono">
+                    <span>SKU: {actionProduct.sku}</span>
+                    <span>·</span>
+                    <span className="text-blue-300 font-semibold">
+                      {contextQty.toLocaleString()} {actionProduct.unit || 'pcs'}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActionProduct(null)}
+                  className="text-slate-400 hover:text-white p-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() => handleOpenEditProductFromAction(actionProduct)}
+                  className="w-full flex items-center gap-3 px-3.5 py-3 rounded-xl bg-blue-600/15 hover:bg-blue-600/25 border border-blue-500/30 text-left text-blue-200 transition"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-blue-600/25 border border-blue-500/40 flex items-center justify-center text-blue-300 shrink-0">
+                    <Edit3 className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-white">Edit Product &amp; Stock</div>
+                    <div className="text-[11px] text-slate-400">
+                      Update name, prices, or per-store quantities
+                    </div>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleOpenTransferFromAction(actionProduct)}
+                  className="w-full flex items-center gap-3 px-3.5 py-3 rounded-xl bg-emerald-600/15 hover:bg-emerald-600/25 border border-emerald-500/30 text-left text-emerald-200 transition"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-emerald-600/25 border border-emerald-500/40 flex items-center justify-center text-emerald-300 shrink-0">
+                    <ArrowRightLeft className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-white">Transfer Stock</div>
+                    <div className="text-[11px] text-slate-400">
+                      Move units from store warehouse to shop floor
+                    </div>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = actionProduct;
+                    setActionProduct(null);
+                    setDeletingProduct(target);
+                  }}
+                  className="w-full flex items-center gap-3 px-3.5 py-3 rounded-xl bg-rose-600/15 hover:bg-rose-600/25 border border-rose-500/30 text-left text-rose-200 transition"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-rose-600/25 border border-rose-500/40 flex items-center justify-center text-rose-300 shrink-0">
+                    <Trash2 className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-white">Delete Product</div>
+                    <div className="text-[11px] text-slate-400">
+                      Permanently remove this item from catalog &amp; stores
+                    </div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Edit Product from Store Inventory Modal */}
+      {editingProduct && (() => {
+        const warehouseStoresInShop = accessibleStores
+          .filter(st => st.shopId === editingProduct.shopId && !st.isShopFloor)
+          .sort((a, b) => {
+            if (selectedInventoryStore?.id === a.id) return -1;
+            if (selectedInventoryStore?.id === b.id) return 1;
+            return a.name.localeCompare(b.name);
+          });
+        const shopCategories = accessibleCategories.filter(
+          c => c.shopId === editingProduct.shopId
+        );
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-lg w-full p-4 sm:p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
+                <div className="flex items-center gap-2">
+                  <Edit3 className="w-5 h-5 text-blue-400" />
+                  <div>
+                    <h3 className="text-base font-bold text-white">Edit Store Product</h3>
+                    <p className="text-[11px] text-slate-400 truncate max-w-[260px]">
+                      {editingProduct.name} ({editingProduct.sku})
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSavingProductEdit}
+                  onClick={() => setEditingProduct(null)}
+                  className="text-slate-400 hover:text-white p-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {editProdError && (
+                <div className="mb-4 p-3 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{editProdError}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleSaveEditedProduct} className="space-y-3.5 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">
+                      Product Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={editProdName}
+                      onChange={e => setEditProdName(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">
+                      Variation
+                    </label>
+                    <input
+                      type="text"
+                      value={editProdVariation}
+                      onChange={e => setEditProdVariation(e.target.value)}
+                      placeholder="e.g. 500ml, Red, 12V"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">SKU *</label>
+                    <input
+                      type="text"
+                      required
+                      value={editProdSku}
+                      onChange={e => setEditProdSku(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">Unit</label>
+                    <input
+                      type="text"
+                      value={editProdUnit}
+                      onChange={e => setEditProdUnit(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="col-span-2 sm:col-span-1">
+                    <label className="block text-slate-300 font-medium mb-1">Category</label>
+                    <select
+                      value={editProdCategoryId}
+                      onChange={e => setEditProdCategoryId(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      {shopCategories.map(c => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">
+                      Buy Price *
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      required
+                      value={editProdPurchasePrice}
+                      onChange={e => setEditProdPurchasePrice(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">
+                      Sell Price *
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      required
+                      value={editProdSellingPrice}
+                      onChange={e => setEditProdSellingPrice(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">
+                      Min Alert
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={editProdMinStock}
+                      onChange={e => setEditProdMinStock(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl space-y-2.5">
+                  <div className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+                    Stock Quantities by Store
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {warehouseStoresInShop.map(st => {
+                      const isCurrent = selectedInventoryStore?.id === st.id;
+                      return (
+                        <div key={st.id}>
+                          <label
+                            className={`block text-[11px] font-medium mb-1 ${
+                              isCurrent ? 'text-blue-300 font-semibold' : 'text-slate-400'
+                            }`}
+                          >
+                            {st.name}
+                            {isCurrent ? ' (Current)' : ''}
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={editProdStoreQtys[st.id] ?? '0'}
+                            onChange={e =>
+                              setEditProdStoreQtys(prev => ({
+                                ...prev,
+                                [st.id]: e.target.value,
+                              }))
+                            }
+                            className={`w-full bg-slate-900 border rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:ring-1 focus:ring-blue-500 ${
+                              isCurrent ? 'border-blue-500/60' : 'border-slate-800'
+                            }`}
+                          />
+                        </div>
+                      );
+                    })}
+                    <div>
+                      <label className="block text-[11px] font-medium text-emerald-300 mb-1">
+                        Shop Floor (POS Stock)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={editProdFloorStock}
+                        onChange={e => setEditProdFloorStock(e.target.value)}
+                        className="w-full bg-slate-900 border border-emerald-500/40 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-3 border-t border-slate-800 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={isSavingProductEdit}
+                    onClick={() => setEditingProduct(null)}
+                    className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSavingProductEdit}
+                    className="px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold transition disabled:opacity-50"
+                  >
+                    {isSavingProductEdit ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Delete Product from Store Inventory Confirmation Modal */}
+      {deletingProduct && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4">
+          <div className="bg-slate-900 border border-rose-800/60 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-4 sm:p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5 text-rose-400">
+                <div className="p-2 rounded-xl bg-rose-950/80 border border-rose-800/50">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-bold text-white">Delete Product?</h3>
+                  <p className="text-[11px] text-slate-400 font-mono">
+                    SKU: {deletingProduct.sku}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingProduct(null)}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs text-slate-300 space-y-1.5">
+              <p>
+                Are you sure you want to permanently delete{' '}
+                <strong className="text-white">{deletingProduct.name}</strong>?
+              </p>
+              <p className="text-amber-300 text-[11px]">
+                Tracked stock: <strong className="font-mono">{getProductTotalTrackedUnits(deletingProduct).toLocaleString()}</strong>{' '}
+                {deletingProduct.unit || 'pcs'}. Deleting removes this item from all stores and POS catalog while preserving past receipts.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setDeletingProduct(null)}
+                className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteProduct}
+                className="px-4 py-2.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete Product</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -432,10 +432,7 @@ export class ProductService {
       operation: 'UPDATE_PRODUCT',
       entityType: 'PRODUCT',
       entityId: id,
-      payload: {
-        ...updatedProduct,
-        storeId: undefined,
-      },
+      payload: updatedProduct,
       status: 'PENDING',
       createdAt: new Date().toISOString(),
     });
