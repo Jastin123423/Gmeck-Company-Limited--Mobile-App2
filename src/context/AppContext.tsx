@@ -32,6 +32,7 @@ interface AppContextType {
   // Sync status
   syncStatus: { state: SyncState; pendingCount: number };
   triggerSync: () => Promise<void>;
+  refreshStoresFromCloud: (showFeedback?: boolean) => Promise<{ success: boolean; count: number; error?: string }>;
   // Settings
   updateSettings: (settings: any) => void;
   // Seller color theme
@@ -64,7 +65,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const isSyncingRef = useRef<boolean>(false);
   const isPushingRef = useRef<boolean>(false);
-  const lastPullTimeRef = useRef<number>(Date.now());
+  const lastPullTimeRef = useRef<number>(
+    (() => {
+      const saved = localStorage.getItem('omnibiz_last_synced_at');
+      const parsed = saved ? Date.parse(saved) : NaN;
+      return Number.isFinite(parsed) ? parsed : 0;
+    })()
+  );
   const PULL_INTERVAL = 900000; // 15 minutes between pulls (D1 cost optimization)
 
   const setSelectedShopId = (shopId: string) => {
@@ -181,6 +188,89 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.log('[Sync] Pull error:', error);
     } finally {
       isSyncingRef.current = false;
+    }
+  };
+
+  /**
+   * REFRESH STORES (AND SHOPS) FROM CLOUD
+   * Pushes pending store/shop mutations first so just-created local stores aren't lost,
+   * then fetches GET /api/stores + GET /api/shops (with pullSync fallback).
+   */
+  const refreshStoresFromCloud = async (
+    showFeedback: boolean = false
+  ): Promise<{ success: boolean; count: number; error?: string }> => {
+    try {
+      const online = await CloudflareApi.checkConnection();
+      if (!online) {
+        return {
+          success: false,
+          count: db.getStores().length,
+          error: 'Offline: showing locally saved stores.',
+        };
+      }
+
+      if (SyncService.getPendingCount() > 0 && !isSyncingRef.current && !isPushingRef.current) {
+        await pushPendingItems();
+      }
+
+      const [cloudShops, cloudStores] = await Promise.all([
+        CloudflareApi.getShops().catch(() => null),
+        CloudflareApi.getStores().catch(() => null),
+      ]);
+
+      if (Array.isArray(cloudShops) && cloudShops.length > 0) {
+        SyncService.applyCloudShops(cloudShops, { reconcileDeleted: true });
+      }
+
+      if (Array.isArray(cloudStores)) {
+        const merged = SyncService.applyCloudStores(cloudStores, { reconcileDeleted: true });
+        const state = db.getState();
+        setDbState({ ...state });
+        setSyncStatus(SyncService.getSyncStatus());
+
+        if (showFeedback) {
+          addToast({
+            type: 'success',
+            title: 'Stores Refreshed',
+            description: `Loaded ${merged.length} store${merged.length === 1 ? '' : 's'} from database.`,
+          });
+        }
+        return { success: true, count: merged.length };
+      }
+
+      // Fallback to /api/sync/pull if /api/stores is unavailable
+      const pullResult = await CloudflareApi.pullSync();
+      if (pullResult?.success && pullResult?.data) {
+        if (Array.isArray(pullResult.data.shops) && pullResult.data.shops.length > 0) {
+          SyncService.applyCloudShops(pullResult.data.shops);
+        }
+        const merged = Array.isArray(pullResult.data.stores)
+          ? SyncService.applyCloudStores(pullResult.data.stores, { reconcileDeleted: true })
+          : db.getStores();
+        const state = db.getState();
+        setDbState({ ...state });
+        setSyncStatus(SyncService.getSyncStatus());
+        if (showFeedback) {
+          addToast({
+            type: 'success',
+            title: 'Stores Refreshed',
+            description: `Loaded ${merged.length} store${merged.length === 1 ? '' : 's'} from database.`,
+          });
+        }
+        return { success: true, count: merged.length };
+      }
+
+      return {
+        success: false,
+        count: db.getStores().length,
+        error: 'Could not retrieve stores from server.',
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        count: db.getStores().length,
+        error: error?.message || 'Failed to refresh stores.',
+      };
     }
   };
 
@@ -474,6 +564,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         closeReceipt,
         syncStatus,
         triggerSync,
+        refreshStoresFromCloud,
         updateSettings,
         sellerColor,
       }}

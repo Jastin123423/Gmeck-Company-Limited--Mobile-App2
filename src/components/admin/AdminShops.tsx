@@ -18,15 +18,17 @@ import {
   Shield,
   UserCheck,
   UserX,
+  Trash2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ShopService } from '../../services/shopService';
+import { CloudflareApi } from '../../services/cloudflareApi';
 import { Shop, ShopStatus, User } from '../../types';
 import { formatCurrency, formatDate } from '../../utils/formatters';
 import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 export const AdminShops: React.FC = () => {
-  const { currentUser, dbState, addToast, setSelectedShopId, setActiveTab } = useApp();
+  const { currentUser, dbState, addToast, selectedShopId, setSelectedShopId, setActiveTab } = useApp();
   const settings = dbState.settings;
 
   const [search, setSearch] = useState('');
@@ -36,6 +38,8 @@ export const AdminShops: React.FC = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingShop, setEditingShop] = useState<Shop | null>(null);
   const [deactivatingShop, setDeactivatingShop] = useState<Shop | null>(null);
+  const [deletingShop, setDeletingShop] = useState<Shop | null>(null);
+  const [isDeletingShop, setIsDeletingShop] = useState(false);
   const [shopAdminModalShop, setShopAdminModalShop] = useState<Shop | null>(null);
   const [selectedAdminSellerId, setSelectedAdminSellerId] = useState<string>('');
 
@@ -212,6 +216,38 @@ export const AdminShops: React.FC = () => {
         title: 'Status Update Failed',
         description: res.error || 'Failed to toggle status.',
       });
+    }
+  };
+
+  const handleConfirmDeleteShop = async () => {
+    if (!currentUser || !deletingShop || isDeletingShop) return;
+    setIsDeletingShop(true);
+    const targetShop = deletingShop;
+    try {
+      const res = ShopService.deleteShop(targetShop.id, currentUser);
+      if (res.success) {
+        if (selectedShopId === targetShop.id) {
+          setSelectedShopId('ALL');
+        }
+        // Trigger direct API delete when online (syncQueue also retains DELETE_SHOP for offline resilience)
+        if (CloudflareApi.isOnline()) {
+          CloudflareApi.deleteShop(targetShop.id).catch(() => {});
+        }
+        addToast({
+          type: 'success',
+          title: 'Shop Deleted',
+          description: `Shop "${targetShop.name}" and its linked stores/catalog have been deleted.`,
+        });
+        setDeletingShop(null);
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Delete Failed',
+          description: res.error || 'Failed to delete shop.',
+        });
+      }
+    } finally {
+      setIsDeletingShop(false);
     }
   };
 
@@ -504,6 +540,18 @@ export const AdminShops: React.FC = () => {
                     >
                       {isActive ? <XCircle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
                     </button>
+
+                    {platformAdmin && (
+                      <button
+                        id={`btn-delete-shop-${shop.id}`}
+                        type="button"
+                        onClick={() => setDeletingShop(shop)}
+                        className="p-1.5 rounded-lg text-rose-400 hover:text-rose-300 hover:bg-rose-950/50 transition"
+                        title="Delete Shop Permanently"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -714,6 +762,82 @@ export const AdminShops: React.FC = () => {
             </div>
           </div>
         )}
+
+        {/* PERMANENT DELETE SHOP CONFIRMATION MODAL */}
+        {platformAdmin && deletingShop && (() => {
+          const shopStoresCount = (dbState.stores || []).filter(s => s.shopId === deletingShop.id).length;
+          const shopProductsCount = (dbState.products || []).filter(p => p.shopId === deletingShop.id).length;
+          const shopSalesCount = (dbState.sales || []).filter(s => s.shopId === deletingShop.id).length;
+          const shopSellersCount = (dbState.users || []).filter(
+            u => u.role === 'SELLER' && (u.assignedShopIds || []).includes(deletingShop.id)
+          ).length;
+
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3.5 sm:p-4 backdrop-blur-xs">
+              <div className="bg-slate-900 border border-rose-500/40 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150 max-h-[92vh] overflow-y-auto">
+                <div className="p-4 sm:p-5">
+                  <div className="flex items-center gap-3 mb-3 text-rose-400">
+                    <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center shrink-0">
+                      <Trash2 className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-xs sm:text-sm text-white">
+                        Delete Shop "{deletingShop.name}"?
+                      </h3>
+                      <p className="text-[11px] text-rose-300">
+                        This permanent action cannot be undone.
+                      </p>
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-slate-300 leading-relaxed mb-3">
+                    Deleting <strong className="text-white">{deletingShop.name}</strong> will permanently remove the shop and its linked database records:
+                  </p>
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px] mb-4 bg-slate-950/70 border border-slate-800 rounded-xl p-3">
+                    <div className="text-slate-400">
+                      Warehouse Stores: <strong className="text-white">{shopStoresCount}</strong>
+                    </div>
+                    <div className="text-slate-400">
+                      Products / SKUs: <strong className="text-white">{shopProductsCount}</strong>
+                    </div>
+                    <div className="text-slate-400">
+                      Sales Records: <strong className="text-white">{shopSalesCount}</strong>
+                    </div>
+                    <div className="text-slate-400">
+                      Assigned Sellers: <strong className="text-white">{shopSellersCount} unlinked</strong>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/25 rounded-lg p-2.5 mb-4">
+                    Tip: If you only want to pause operations and keep historical reports, use <strong>Deactivate</strong> instead.
+                  </p>
+
+                  <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+                    <button
+                      type="button"
+                      disabled={isDeletingShop}
+                      onClick={() => setDeletingShop(null)}
+                      className="px-3.5 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      id="btn-confirm-delete-shop"
+                      type="button"
+                      disabled={isDeletingShop}
+                      onClick={handleConfirmDeleteShop}
+                      className="px-4 py-2 rounded-lg text-xs font-semibold shadow-sm transition text-white bg-rose-600 hover:bg-rose-500 disabled:opacity-50 flex items-center gap-1.5"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{isDeletingShop ? 'Deleting...' : 'Delete Permanently'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
         {/* SET / CHANGE SHOP ADMIN MODAL */}
         {platformAdmin && shopAdminModalShop && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3.5 sm:p-4 backdrop-blur-xs">

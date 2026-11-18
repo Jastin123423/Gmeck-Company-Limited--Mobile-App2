@@ -403,6 +403,142 @@ export class SyncService {
     db.saveSyncQueue(queue);
   }
 
+  public static applyCloudShops(
+    cloudShops: any[],
+    options?: { reconcileDeleted?: boolean }
+  ): void {
+    if (!Array.isArray(cloudShops)) return;
+
+    const queue = db.getSyncQueue();
+    const pendingDeleteShopIds = new Set(
+      queue
+        .filter(q => q.status === 'PENDING' && (q.operation || q.action) === 'DELETE_SHOP')
+        .map(q => q.entityId)
+    );
+    const pendingMutateShopIds = new Set(
+      queue
+        .filter(
+          q =>
+            q.status === 'PENDING' &&
+            ['CREATE_SHOP', 'UPDATE_SHOP', 'TOGGLE_SHOP_STATUS'].includes(
+              String(q.operation || q.action)
+            )
+        )
+        .map(q => q.entityId)
+    );
+
+    const localShops = db.getShops();
+    const merged: any[] = options?.reconcileDeleted
+      ? localShops.filter(s => pendingMutateShopIds.has(s.id) && !pendingDeleteShopIds.has(s.id))
+      : localShops.filter(s => !pendingDeleteShopIds.has(s.id));
+
+    cloudShops.forEach((cloudShop: any) => {
+      if (!cloudShop?.id || pendingDeleteShopIds.has(cloudShop.id)) return;
+      const index = merged.findIndex(s => s.id === cloudShop.id);
+      if (index !== -1 && pendingMutateShopIds.has(cloudShop.id)) {
+        return;
+      }
+      const existing = index !== -1 ? merged[index] : undefined;
+      const rawStatus = String(cloudShop.status || existing?.status || 'ACTIVE').toUpperCase();
+      const shopData = {
+        id: cloudShop.id,
+        name: cloudShop.name ?? existing?.name ?? '',
+        code: cloudShop.code ?? existing?.code,
+        description: cloudShop.description ?? existing?.description,
+        address: cloudShop.address ?? existing?.address,
+        phone: cloudShop.phone ?? existing?.phone,
+        status: (rawStatus === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE') as 'ACTIVE' | 'INACTIVE',
+        color: cloudShop.color ?? existing?.color,
+        createdAt: cloudShop.created_at || cloudShop.createdAt || existing?.createdAt || new Date().toISOString(),
+        updatedAt: cloudShop.updated_at || cloudShop.updatedAt || existing?.updatedAt || new Date().toISOString(),
+      };
+
+      if (index === -1) {
+        merged.push(shopData);
+      } else {
+        merged[index] = { ...existing, ...shopData };
+      }
+    });
+
+    db.saveShops(merged);
+  }
+
+  public static applyCloudStores(
+    cloudStores: any[],
+    options?: { reconcileDeleted?: boolean }
+  ) {
+    if (!Array.isArray(cloudStores)) return db.getStores();
+
+    const queue = db.getSyncQueue();
+    const pendingDeleteStoreIds = new Set(
+      queue
+        .filter(q => q.status === 'PENDING' && (q.operation || q.action) === 'DELETE_STORE')
+        .map(q => q.entityId)
+    );
+    const pendingMutateStoreIds = new Set(
+      queue
+        .filter(
+          q =>
+            q.status === 'PENDING' &&
+            ['CREATE_STORE', 'UPDATE_STORE'].includes(String(q.operation || q.action))
+        )
+        .map(q => q.entityId)
+    );
+
+    const localStores = db.getStores();
+    const mergedStores = options?.reconcileDeleted
+      ? localStores.filter(s => pendingMutateStoreIds.has(s.id) && !pendingDeleteStoreIds.has(s.id))
+      : localStores.filter(s => !pendingDeleteStoreIds.has(s.id));
+
+    cloudStores.forEach((cloudStore: any) => {
+      if (!cloudStore?.id || pendingDeleteStoreIds.has(cloudStore.id)) return;
+      const index = mergedStores.findIndex(s => s.id === cloudStore.id);
+      if (index !== -1 && pendingMutateStoreIds.has(cloudStore.id)) {
+        return;
+      }
+
+      const existingStore = index !== -1 ? mergedStores[index] : undefined;
+      const rawStatus = String(
+        cloudStore.status || existingStore?.status || 'ACTIVE'
+      ).toUpperCase();
+      const resolvedShopId = cloudStore.shop_id || cloudStore.shopId || existingStore?.shopId || '';
+      if (!resolvedShopId) return;
+
+      const storeData = {
+        id: cloudStore.id,
+        shopId: resolvedShopId,
+        name: cloudStore.name ?? existingStore?.name ?? 'Unnamed Store',
+        location: cloudStore.location || existingStore?.location || undefined,
+        status: (rawStatus === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE') as 'ACTIVE' | 'INACTIVE',
+        isShopFloor:
+          cloudStore.is_shop_floor !== undefined
+            ? Boolean(cloudStore.is_shop_floor)
+            : cloudStore.isShopFloor !== undefined
+              ? Boolean(cloudStore.isShopFloor)
+              : existingStore?.isShopFloor,
+        createdAt:
+          cloudStore.created_at ||
+          cloudStore.createdAt ||
+          existingStore?.createdAt ||
+          new Date().toISOString(),
+        updatedAt:
+          cloudStore.updated_at ||
+          cloudStore.updatedAt ||
+          existingStore?.updatedAt ||
+          new Date().toISOString(),
+      };
+
+      if (index === -1) {
+        mergedStores.push(storeData);
+      } else {
+        mergedStores[index] = { ...existingStore, ...storeData };
+      }
+    });
+
+    db.saveStores(mergedStores);
+    return mergedStores;
+  }
+
   // ==========================================
   // APPLY CLOUD DATA TO LOCAL DATABASE
   // ==========================================
@@ -410,65 +546,13 @@ export class SyncService {
     if (!cloudData) return;
 
     // Apply shops
-    if (cloudData.shops && cloudData.shops.length > 0) {
-      const localShops = db.getShops();
-      const merged = [...localShops];
-
-      cloudData.shops.forEach((cloudShop: any) => {
-        const index = merged.findIndex(s => s.id === cloudShop.id);
-        const shopData = {
-          id: cloudShop.id,
-          name: cloudShop.name,
-          code: cloudShop.code,
-          description: cloudShop.description,
-          address: cloudShop.address,
-          phone: cloudShop.phone,
-          status: cloudShop.status,
-          color: cloudShop.color,
-          createdAt: cloudShop.created_at,
-          updatedAt: cloudShop.updated_at,
-        };
-
-        if (index === -1) {
-          merged.push(shopData);
-        } else {
-          merged[index] = { ...merged[index], ...shopData };
-        }
-      });
-
-      db.saveShops(merged);
+    if (Array.isArray(cloudData.shops) && cloudData.shops.length > 0) {
+      this.applyCloudShops(cloudData.shops);
     }
 
     // Apply stores (warehouses)
-    if (cloudData.stores && cloudData.stores.length > 0) {
-      const localStores = db.getStores();
-      const mergedStores = [...localStores];
-
-      cloudData.stores.forEach((cloudStore: any) => {
-        const index = mergedStores.findIndex(s => s.id === cloudStore.id);
-        const existingStore = index !== -1 ? mergedStores[index] : undefined;
-        const storeData = {
-          id: cloudStore.id,
-          shopId: cloudStore.shop_id || cloudStore.shopId,
-          name: cloudStore.name,
-          location: cloudStore.location || undefined,
-          status: cloudStore.status || 'ACTIVE',
-          isShopFloor:
-            cloudStore.is_shop_floor !== undefined
-              ? Boolean(cloudStore.is_shop_floor)
-              : existingStore?.isShopFloor,
-          createdAt: cloudStore.created_at || cloudStore.createdAt,
-          updatedAt: cloudStore.updated_at || cloudStore.updatedAt,
-        };
-
-        if (index === -1) {
-          mergedStores.push(storeData);
-        } else {
-          mergedStores[index] = { ...mergedStores[index], ...storeData };
-        }
-      });
-
-      db.saveStores(mergedStores);
+    if (Array.isArray(cloudData.stores) && cloudData.stores.length > 0) {
+      this.applyCloudStores(cloudData.stores);
     }
 
     // Apply users

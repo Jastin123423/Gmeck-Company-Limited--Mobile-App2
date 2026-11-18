@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Warehouse,
   ArrowRightLeft,
@@ -41,9 +41,10 @@ import {
 import type { Product, Store } from '../../types';
 
 export const AdminStores: React.FC = () => {
-  const { currentUser, dbState, addToast, selectedShopId } = useApp();
+  const { currentUser, dbState, addToast, selectedShopId, refreshStoresFromCloud } = useApp();
 
   const [activeSubTab, setActiveSubTab] = useState<'stores' | 'inventory' | 'transfer'>('stores');
+  const [isRefreshingStores, setIsRefreshingStores] = useState(false);
 
   // Create Store Modal / Form state
   const [isStoreModalOpen, setIsStoreModalOpen] = useState(false);
@@ -84,6 +85,37 @@ export const AdminStores: React.FC = () => {
 
   // Store Delete Confirmation state
   const [deletingStore, setDeletingStore] = useState<Store | null>(null);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    let cancelled = false;
+    setIsRefreshingStores(true);
+    refreshStoresFromCloud(false)
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setIsRefreshingStores(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.id]);
+
+  const handleManualRefreshStores = async () => {
+    if (isRefreshingStores) return;
+    setIsRefreshingStores(true);
+    try {
+      const res = await refreshStoresFromCloud(true);
+      if (!res.success && res.error) {
+        addToast({
+          type: 'warning',
+          title: 'Refresh Notice',
+          description: res.error,
+        });
+      }
+    } finally {
+      setIsRefreshingStores(false);
+    }
+  };
 
   if (!currentUser || !hasAdminAccess(currentUser)) return null;
 
@@ -746,6 +778,17 @@ export const AdminStores: React.FC = () => {
               <span>Transfer Stock</span>
             </button>
           </div>
+
+          <button
+            type="button"
+            onClick={handleManualRefreshStores}
+            disabled={isRefreshingStores}
+            title="Refresh stores from database"
+            className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-xs transition disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${isRefreshingStores ? 'animate-spin' : ''}`} />
+            <span>{isRefreshingStores ? 'Refreshing...' : 'Refresh'}</span>
+          </button>
 
           <button
             type="button"

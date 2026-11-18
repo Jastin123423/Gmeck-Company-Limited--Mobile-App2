@@ -465,6 +465,11 @@ export class ShopService {
     });
     db.saveUsers(updatedUsers);
 
+    // Remove stores in this shop
+    const stores = db.getStores();
+    const updatedStores = stores.filter(s => s.shopId !== shopId);
+    db.saveStores(updatedStores);
+
     // Remove products in this shop
     const products = db.getProducts();
     const updatedProducts = products.filter(p => p.shopId !== shopId);
@@ -476,6 +481,13 @@ export class ShopService {
     if (db.saveCategories) {
       db.saveCategories(updatedCategories);
     }
+
+    // Remove shop-scoped operational records locally to stay consistent with D1 cascade
+    db.saveSales(db.getSales().filter(s => s.shopId !== shopId));
+    db.savePurchases(db.getPurchases().filter(p => p.shopId !== shopId));
+    db.saveExpenses(db.getExpenses().filter(e => e.shopId !== shopId));
+    db.saveMovements(db.getMovements().filter(m => m.shopId !== shopId));
+    db.saveDebts(db.getDebts().filter(d => d.shopId !== shopId));
 
     // Sync to cloud
     db.enqueueSync({
