@@ -357,6 +357,42 @@ export class StoreService {
     return { success: true, store };
   }
 
+  private static resolveStoreAvailableQty(
+    product: {
+      shopId: string;
+      storeId?: string;
+      storeStock?: number;
+      storeStocks?: Record<string, number>;
+    },
+    store: Store,
+    allStores: Store[]
+  ): number {
+    if (product.storeStocks && product.storeStocks[store.id] !== undefined) {
+      return Math.max(0, Number(product.storeStocks[store.id] || 0));
+    }
+    const shopWarehouses = allStores
+      .filter(s => s.shopId === product.shopId && !s.isShopFloor)
+      .sort((a, b) => {
+        if (a.status !== b.status) return a.status === 'ACTIVE' ? -1 : 1;
+        return (a.createdAt || '').localeCompare(b.createdAt || '');
+      });
+    const shopWarehouseIds = new Set(shopWarehouses.map(s => s.id));
+    const mappedWarehouseSum = Object.entries(product.storeStocks || {}).reduce(
+      (sum, [sid, q]) => (shopWarehouseIds.has(sid) ? sum + Math.max(0, Number(q || 0)) : sum),
+      0
+    );
+    const rawStoreStock = Math.max(0, Number(product.storeStock || 0));
+    if (mappedWarehouseSum === 0 && rawStoreStock > 0 && shopWarehouses.length > 0) {
+      if (product.storeId && shopWarehouseIds.has(product.storeId)) {
+        return product.storeId === store.id ? rawStoreStock : 0;
+      }
+      if (shopWarehouses[0]?.id === store.id) {
+        return rawStoreStock;
+      }
+    }
+    return 0;
+  }
+
   public static transferStoreToShop(
     params: {
       storeId: string;
@@ -367,6 +403,37 @@ export class StoreService {
     },
     currentUser: User
   ): { success: boolean; transferId?: string; error?: string } {
+    const res = this.transferBatchStoreToShop(
+      {
+        storeId: params.storeId,
+        shopId: params.shopId,
+        items: [{ productId: params.productId, quantity: params.quantity }],
+        notes: params.notes,
+      },
+      currentUser
+    );
+    return {
+      success: res.success,
+      transferId: res.transferId,
+      error: res.error,
+    };
+  }
+
+  public static transferBatchStoreToShop(
+    params: {
+      storeId: string;
+      shopId: string;
+      items: { productId: string; quantity: number }[];
+      notes?: string;
+    },
+    currentUser: User
+  ): {
+    success: boolean;
+    transferId?: string;
+    transferredCount?: number;
+    totalUnits?: number;
+    error?: string;
+  } {
     if (!hasAdminAccess(currentUser)) {
       return {
         success: false,
@@ -374,13 +441,32 @@ export class StoreService {
       };
     }
 
-    const store = db.getStores().find(s => s.id === params.storeId);
+    if (!Array.isArray(params.items) || params.items.length === 0) {
+      return { success: false, error: 'Select at least one product to transfer.' };
+    }
+
+    if (params.items.length > 1000) {
+      return {
+        success: false,
+        error: 'You can transfer a maximum of 1,000 products per batch.',
+      };
+    }
+
+    const allStores = db.getStores();
+    const store = allStores.find(s => s.id === params.storeId);
     if (!store) {
       return { success: false, error: 'Selected source store does not exist.' };
     }
 
     if (store.status !== 'ACTIVE') {
       return { success: false, error: `Store "${store.name}" is inactive.` };
+    }
+
+    if (store.isShopFloor) {
+      return {
+        success: false,
+        error: `"${store.name}" is already designated as the POS Shop Floor. Select a warehouse store to transfer from.`,
+      };
     }
 
     const destShop = db.getShops().find(s => s.id === params.shopId);
@@ -401,59 +487,81 @@ export class StoreService {
     }
 
     const products = [...db.getProducts()];
-    const prodIdx = products.findIndex(p => p.id === params.productId);
-    if (prodIdx === -1) {
-      return { success: false, error: 'Selected product was not found.' };
+    const productIndexMap = new Map<string, number>();
+    products.forEach((p, idx) => productIndexMap.set(p.id, idx));
+
+    // Merge duplicate productIds if any and validate everything before mutating
+    const mergedQtyByProduct = new Map<string, number>();
+    for (const item of params.items) {
+      const q = Number(item.quantity);
+      if (!Number.isFinite(q) || q <= 0) {
+        const prodName =
+          productIndexMap.has(item.productId)
+            ? products[productIndexMap.get(item.productId)!].name
+            : item.productId;
+        return {
+          success: false,
+          error: `Transfer quantity for "${prodName}" must be greater than 0.`,
+        };
+      }
+      mergedQtyByProduct.set(item.productId, (mergedQtyByProduct.get(item.productId) || 0) + q);
     }
 
-    const product = products[prodIdx];
-    const qty = Number(params.quantity);
-    if (!Number.isFinite(qty) || qty <= 0) {
-      return { success: false, error: 'Transfer quantity must be greater than 0.' };
-    }
+    const validatedEntries: {
+      prodIdx: number;
+      qty: number;
+      availableInThisStore: number;
+    }[] = [];
 
-    if (store.isShopFloor) {
-      return {
-        success: false,
-        error: `"${store.name}" is already designated as the POS Shop Floor. Select a warehouse store to transfer from.`,
-      };
-    }
-
-    const availableInThisStore =
-      product.storeStocks && product.storeStocks[store.id] !== undefined
-        ? Number(product.storeStocks[store.id] || 0)
-        : Number(product.storeStock || 0);
-
-    if (qty > availableInThisStore) {
-      return {
-        success: false,
-        error: `Not enough stock in ${store.name}. Available: ${availableInThisStore} ${product.unit || 'pcs'}.`,
-      };
+    for (const [productId, qty] of mergedQtyByProduct.entries()) {
+      const prodIdx = productIndexMap.get(productId);
+      if (prodIdx === undefined) {
+        return { success: false, error: 'One or more selected products were not found.' };
+      }
+      const product = products[prodIdx];
+      const availableInThisStore = this.resolveStoreAvailableQty(product, store, allStores);
+      if (qty > availableInThisStore) {
+        return {
+          success: false,
+          error: `Not enough stock for "${product.name}" in ${store.name}. Available: ${availableInThisStore} ${product.unit || 'pcs'}.`,
+        };
+      }
+      validatedEntries.push({ prodIdx, qty, availableInThisStore });
     }
 
     const now = new Date().toISOString();
-    const transferId = generateUUID();
-    const currentShopStock = Number(product.currentStock || 0);
-    const totalWarehouseBefore = Number(product.storeStock || 0);
-    const newShopStock = currentShopStock + qty;
-
-    // Update per-store stock breakdown cleanly if tracked
-    const allStores = db.getStores();
+    const batchTransferId = generateUUID();
     const floorStore = allStores.find(
       s => s.shopId === destShop.id && s.isShopFloor && s.status === 'ACTIVE'
     );
-    const nextStoreStocks = product.storeStocks ? { ...product.storeStocks } : undefined;
-    const nextStoreDetails = product.storeDetails ? { ...product.storeDetails } : undefined;
+    const floorStoreIds = new Set(allStores.filter(s => s.isShopFloor).map(s => s.id));
+    const noteSuffix = params.notes?.trim() ? ` — ${params.notes.trim()}` : '';
 
-    let newWarehouseTotal = Math.max(0, totalWarehouseBefore - qty);
-    let newStoreBalForLog = Math.max(0, availableInThisStore - qty);
+    const newMovements: InventoryMovement[] = [];
+    const syncQueueItems: any[] = [];
+    let totalUnits = 0;
 
-    if (nextStoreStocks) {
+    for (const entry of validatedEntries) {
+      const product = products[entry.prodIdx];
+      const qty = entry.qty;
+      const availableInThisStore = entry.availableInThisStore;
+      const transferId = validatedEntries.length === 1 ? batchTransferId : generateUUID();
+
+      totalUnits += qty;
+      const currentShopStock = Number(product.currentStock || 0);
+      const totalWarehouseBefore = Number(product.storeStock || 0);
+      const newShopStock = currentShopStock + qty;
+
+      const nextStoreStocks: Record<string, number> = {
+        ...(product.storeStocks || {}),
+      };
+      const nextStoreDetails = product.storeDetails ? { ...product.storeDetails } : undefined;
+
       const currentInSource =
         nextStoreStocks[store.id] !== undefined
           ? Number(nextStoreStocks[store.id] || 0)
           : availableInThisStore;
-      newStoreBalForLog = Math.max(0, currentInSource - qty);
+      const newStoreBalForLog = Math.max(0, currentInSource - qty);
       nextStoreStocks[store.id] = newStoreBalForLog;
 
       if (nextStoreDetails && nextStoreDetails[store.id]) {
@@ -480,98 +588,112 @@ export class StoreService {
         }
       }
 
-      // Recompute warehouse total from all non-floor stores
-      const floorStoreIds = new Set(
-        allStores.filter(s => s.isShopFloor).map(s => s.id)
-      );
-      newWarehouseTotal = Object.entries(nextStoreStocks).reduce((sum, [sid, q]) => {
+      const mappedNonFloorSum = Object.entries(nextStoreStocks).reduce((sum, [sid, q]) => {
         return floorStoreIds.has(sid) ? sum : sum + Math.max(0, Number(q || 0));
       }, 0);
+      const newWarehouseTotal =
+        Object.keys(product.storeStocks || {}).length > 0
+          ? mappedNonFloorSum
+          : Math.max(0, totalWarehouseBefore - qty);
+
+      products[entry.prodIdx] = {
+        ...product,
+        currentStock: newShopStock,
+        storeStock: newWarehouseTotal,
+        storeStocks: nextStoreStocks,
+        ...(nextStoreDetails ? { storeDetails: nextStoreDetails } : {}),
+        updatedAt: now,
+      };
+
+      newMovements.push(
+        {
+          id: generateUUID(),
+          shopId: destShop.id,
+          shopName: destShop.name,
+          storeId: store.id,
+          productId: product.id,
+          productName: product.name,
+          previousQty: currentShopStock,
+          changeQty: qty,
+          newQty: newShopStock,
+          type: 'STORE_TRANSFER',
+          reason: `Transferred IN from ${store.name}${noteSuffix}`,
+          referenceId: transferId,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          createdAt: now,
+        },
+        {
+          id: generateUUID(),
+          shopId: destShop.id,
+          shopName: destShop.name,
+          storeId: store.id,
+          productId: product.id,
+          productName: product.name,
+          previousQty: availableInThisStore,
+          changeQty: -qty,
+          newQty: newStoreBalForLog,
+          type: 'STORE_TRANSFER',
+          reason: `Transferred OUT to ${destShop.name}${noteSuffix}`,
+          referenceId: transferId,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          createdAt: now,
+        }
+      );
+
+      syncQueueItems.push({
+        id: generateUUID(),
+        operation: 'TRANSFER_STORE_TO_SHOP',
+        entityType: 'STORE',
+        entityId: transferId,
+        payload: {
+          transferId,
+          productId: product.id,
+          storeId: store.id,
+          storeName: store.name,
+          shopId: destShop.id,
+          shopName: destShop.name,
+          quantity: qty,
+          nextStoreStocks,
+          ...(nextStoreDetails ? { nextStoreDetails } : {}),
+          transferredById: currentUser.id,
+          transferredByName: currentUser.name,
+          notes: params.notes?.trim() || undefined,
+        },
+        status: 'PENDING',
+        createdAt: now,
+      });
     }
 
-    products[prodIdx] = {
-      ...product,
-      currentStock: newShopStock,
-      storeStock: newWarehouseTotal,
-      ...(nextStoreStocks ? { storeStocks: nextStoreStocks } : {}),
-      ...(nextStoreDetails ? { storeDetails: nextStoreDetails } : {}),
-      updatedAt: now,
-    };
     db.saveProducts(products);
+    db.saveMovements([...newMovements, ...db.getMovements()]);
+    db.enqueueSyncBatch(syncQueueItems);
 
-    const noteSuffix = params.notes?.trim() ? ` — ${params.notes.trim()}` : '';
-    const inMovement: InventoryMovement = {
-      id: generateUUID(),
-      shopId: destShop.id,
-      shopName: destShop.name,
-      storeId: store.id,
-      productId: product.id,
-      productName: product.name,
-      previousQty: currentShopStock,
-      changeQty: qty,
-      newQty: newShopStock,
-      type: 'STORE_TRANSFER',
-      reason: `Transferred IN from ${store.name}${noteSuffix}`,
-      referenceId: transferId,
-      userId: currentUser.id,
-      userName: currentUser.name,
-      createdAt: now,
-    };
-
-    const outMovement: InventoryMovement = {
-      id: generateUUID(),
-      shopId: destShop.id,
-      shopName: destShop.name,
-      storeId: store.id,
-      productId: product.id,
-      productName: product.name,
-      previousQty: availableInThisStore,
-      changeQty: -qty,
-      newQty: newStoreBalForLog,
-      type: 'STORE_TRANSFER',
-      reason: `Transferred OUT to ${destShop.name}${noteSuffix}`,
-      referenceId: transferId,
-      userId: currentUser.id,
-      userName: currentUser.name,
-      createdAt: now,
-    };
-
-    db.saveMovements([inMovement, outMovement, ...db.getMovements()]);
-
-    db.enqueueSync({
-      id: generateUUID(),
-      operation: 'TRANSFER_STORE_TO_SHOP',
-      entityType: 'STORE',
-      entityId: transferId,
-      payload: {
-        transferId,
-        productId: product.id,
-        storeId: store.id,
-        storeName: store.name,
-        shopId: destShop.id,
-        shopName: destShop.name,
-        quantity: qty,
-        transferredById: currentUser.id,
-        transferredByName: currentUser.name,
-        notes: params.notes?.trim() || undefined,
-      },
-      status: 'PENDING',
-      createdAt: now,
-    });
+    const firstProdName =
+      validatedEntries.length === 1 ? products[validatedEntries[0].prodIdx].name : undefined;
 
     db.addAuditLog({
       id: generateUUID(),
       userId: currentUser.id,
       userName: currentUser.name,
       action: 'TRANSFER_STORE_TO_SHOP',
-      details: `Transferred ${qty} ${product.unit || 'pcs'} of "${product.name}" from store "${store.name}" to [${destShop.name}]${noteSuffix}`,
+      details:
+        validatedEntries.length === 1
+          ? `Transferred ${totalUnits} ${products[validatedEntries[0].prodIdx].unit || 'pcs'} of "${firstProdName}" from store "${store.name}" to [${destShop.name}]${noteSuffix}`
+          : `Bulk transferred ${totalUnits.toLocaleString()} unit(s) across ${validatedEntries.length} product(s) from store "${store.name}" to [${destShop.name}]${noteSuffix}`,
       entityType: 'STORE',
-      entityId: transferId,
+      entityId: batchTransferId,
       shopId: destShop.id,
       timestamp: now,
     });
 
-    return { success: true, transferId };
+    return {
+      success: true,
+      transferId: batchTransferId,
+      transferredCount: validatedEntries.length,
+      totalUnits,
+    };
   }
 
   /**

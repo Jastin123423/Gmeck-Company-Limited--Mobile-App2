@@ -192,7 +192,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       badgeColor: 'blue',
       category: 'operations',
     },
-    { id: 'inventory', swahiliLabel: 'Stoo na Hesabu', englishLabel: 'Stock & Inventory', icon: Boxes, badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined, category: 'operations' },
+    { id: 'inventory', swahiliLabel: 'Zilizopo Stoo/Dukani', englishLabel: 'Stock & Inventory', icon: Boxes, badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined, category: 'operations' },
     { id: 'purchases', swahiliLabel: 'Manunuzi ya Mzigo', englishLabel: 'Purchases & Stock-In', icon: Truck, category: 'operations' },
     { id: 'expenses', swahiliLabel: 'Matumizi ya Uendeshaji', englishLabel: 'Operational Expenses', icon: TrendingDown, category: 'operations' },
     { id: 'debts', swahiliLabel: 'Daftari la Madeni', englishLabel: 'Debt Management', icon: FileText, badge: overdueDebtsCount > 0 ? `${overdueDebtsCount} Overdue` : undefined, badgeColor: 'red', category: 'management' },

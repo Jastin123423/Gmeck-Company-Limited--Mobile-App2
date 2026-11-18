@@ -1502,6 +1502,8 @@ async function transferStoreToShop(db: any, transfer: any) {
     }
   }
 
+  await ensureProductStoreColumns(db);
+
   const product = await db
     .prepare(
       'SELECT current_stock, store_stock, name FROM products WHERE id = ?'
@@ -1529,6 +1531,33 @@ async function transferStoreToShop(db: any, transfer: any) {
     )
     .bind(newShopStock, newStoreStock, now, transfer.productId)
     .run();
+
+  if (transfer.nextStoreStocks || transfer.nextStoreDetails) {
+    try {
+      const storeColsOk = await ensureProductStoreColumns(db);
+      if (storeColsOk) {
+        if (transfer.nextStoreStocks && transfer.nextStoreDetails) {
+          await db
+            .prepare(
+              'UPDATE products SET store_stocks = ?, store_details = ? WHERE id = ?'
+            )
+            .bind(
+              JSON.stringify(transfer.nextStoreStocks),
+              JSON.stringify(transfer.nextStoreDetails),
+              transfer.productId
+            )
+            .run();
+        } else if (transfer.nextStoreStocks) {
+          await db
+            .prepare('UPDATE products SET store_stocks = ? WHERE id = ?')
+            .bind(JSON.stringify(transfer.nextStoreStocks), transfer.productId)
+            .run();
+        }
+      }
+    } catch {
+      // Ignore if optional store columns are unavailable
+    }
+  }
 
   await db
     .prepare(
