@@ -65,6 +65,51 @@ export interface Store {
   updatedAt: string;
 }
 
+export type StockTransferLocationType = 'STORE' | 'SHOP';
+
+export type StockTransferStatus = 'COMPLETED' | 'NOT_COMPLETED';
+
+export interface StockTransferItem {
+  id: string;
+  productId: string;
+  productName: string;
+  variation?: string;
+  sku: string;
+  unit: string;
+  quantity: number;
+  unitPrice: number;
+  subtotal: number;
+  destProductId?: string;
+}
+
+export interface StockTransfer {
+  id: string;
+  transferNumber: string;
+  transferDate: string; // YYYY-MM-DD (allows today or past dates)
+  sourceType: StockTransferLocationType;
+  sourceId: string;
+  sourceName: string;
+  sourceLocation?: string;
+  sourceShopId: string;
+  sourceShopName?: string;
+  destType: StockTransferLocationType;
+  destId: string;
+  destName: string;
+  destLocation?: string;
+  destShopId: string;
+  destShopName?: string;
+  status: StockTransferStatus;
+  shippingCharges: number;
+  notice?: string;
+  items: StockTransferItem[];
+  totalUnits: number;
+  totalAmount: number;
+  createdByUserId: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Category {
   id: string;
   shopId: string; // Specific shop this category belongs to
@@ -378,6 +423,8 @@ export type SyncOperation =
   | 'UPDATE_STORE'
   | 'DELETE_STORE'
   | 'TRANSFER_STORE_TO_SHOP'
+  | 'UPSERT_STOCK_TRANSFER'
+  | 'DELETE_STOCK_TRANSFER'
   | 'CREATE_CATEGORY'
   | 'UPDATE_CATEGORY'
   | 'CREATE_SALE_EDIT_REQUEST'

@@ -16,6 +16,7 @@ import {
   DebtRecord,
   AppNotification,
   SaleEditRequest,
+  StockTransfer,
 } from '../types';
 import {
   INITIAL_USERS,
@@ -38,6 +39,7 @@ const DB_PREFIX = 'omnibiz_pos_db_v3_';
 export interface DatabaseState {
   shops: Shop[];
   stores: Store[];
+  stockTransfers: StockTransfer[];
   users: User[];
   categories: Category[];
   products: Product[];
@@ -154,6 +156,7 @@ class LocalDatabase {
   public init(): DatabaseState {
     let shops = this.loadTable<Shop[]>('shops', INITIAL_SHOPS);
     const stores = this.loadTable<Store[]>('stores', []);
+    const stockTransfers = this.loadTable<StockTransfer[]>('stock_transfers', []);
     let users = this.loadTable<User[]>('users', INITIAL_USERS);
     let categories = this.loadTable<Category[]>('categories', INITIAL_CATEGORIES);
     let products = this.loadTable<Product[]>('products', INITIAL_PRODUCTS);
@@ -227,6 +230,7 @@ class LocalDatabase {
     this.memoryCache = {
       shops: shops || [],
       stores: stores || [],
+      stockTransfers: stockTransfers || [],
       users: users || [],
       categories: categories || [],
       products: products || [],
@@ -291,6 +295,18 @@ class LocalDatabase {
     if (!this.memoryCache) this.init();
     this.memoryCache!.stores = stores;
     this.saveTable('stores', stores);
+    this.notify();
+  }
+
+  // --- Stock Transfers ---
+  public getStockTransfers(): StockTransfer[] {
+    return this.getState().stockTransfers || [];
+  }
+
+  public saveStockTransfers(transfers: StockTransfer[]): void {
+    if (!this.memoryCache) this.init();
+    this.memoryCache!.stockTransfers = transfers;
+    this.saveTable('stock_transfers', transfers);
     this.notify();
   }
 
@@ -620,6 +636,7 @@ class LocalDatabase {
 
       this.saveTable('shops', d.shops || INITIAL_SHOPS);
       this.saveTable('stores', d.stores || []);
+      this.saveTable('stock_transfers', d.stockTransfers || []);
       this.saveTable('users', d.users);
       this.saveTable('categories', d.categories || INITIAL_CATEGORIES);
       this.saveTable('products', d.products);
@@ -765,6 +782,7 @@ class LocalDatabase {
 
     this.saveTable('shops', shops);
     this.saveTable('stores', []);
+    this.saveTable('stock_transfers', []);
     this.saveTable('users', users);
     this.saveTable('categories', []);
     this.saveTable('products', []);

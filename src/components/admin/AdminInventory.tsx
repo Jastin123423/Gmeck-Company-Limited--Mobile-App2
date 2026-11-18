@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Boxes,
   AlertTriangle,
@@ -15,10 +15,13 @@ import {
   ChevronRight,
   Loader2,
   Layers,
+  ArrowLeft,
+  Warehouse,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { InventoryService } from '../../services/inventoryService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
+import { printMovementsReportPdf } from '../../utils/movementsPrint';
 import { Product } from '../../types';
 import { ProductThumbnail } from '../common/ProductThumbnail';
 import { ProductImageViewerModal } from '../common/ProductImageViewerModal';
@@ -31,6 +34,39 @@ import {
 
 const PAGE_SIZE = 10;
 
+type ShopLocationFilter = 'ALL' | 'SHOP' | 'STORE';
+type MovementPeriod = 'DAY' | 'WEEK' | 'MONTH' | 'CUSTOM';
+
+const formatDateYMD = (d: Date): string => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+const computeMovementDateRange = (
+  period: MovementPeriod,
+  now: Date = new Date()
+): { start: string; end: string } | null => {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+
+  if (period === 'DAY') {
+    const ymd = formatDateYMD(today);
+    return { start: ymd, end: ymd };
+  }
+  if (period === 'WEEK') {
+    const start = new Date(today);
+    start.setDate(start.getDate() - 6);
+    return { start: formatDateYMD(start), end: formatDateYMD(today) };
+  }
+  if (period === 'MONTH') {
+    const start = new Date(today.getFullYear(), today.getMonth(), 1);
+    return { start: formatDateYMD(start), end: formatDateYMD(today) };
+  }
+  return null;
+};
+
 export const AdminInventory: React.FC = () => {
   const { currentUser, dbState, addToast, selectedShopId } = useApp();
   const [activeTab, setActiveTabState] = useState<'stock' | 'movements' | 'losses'>('stock');
@@ -38,6 +74,21 @@ export const AdminInventory: React.FC = () => {
   const [movementTypeFilter, setMovementTypeFilter] = useState('ALL');
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
+
+  // Per-shop inventory filter: All (default), Shop, Store
+  const [shopLocationFilters, setShopLocationFilters] = useState<
+    Record<string, ShopLocationFilter>
+  >({});
+
+  // Full-screen Movements filters (default: Month, expand step: 10)
+  const [movementPeriod, setMovementPeriod] = useState<MovementPeriod>('MONTH');
+  const [movementStartDate, setMovementStartDate] = useState(
+    () => computeMovementDateRange('MONTH')!.start
+  );
+  const [movementEndDate, setMovementEndDate] = useState(
+    () => computeMovementDateRange('MONTH')!.end
+  );
+  const [movementsVisibleCount, setMovementsVisibleCount] = useState(PAGE_SIZE);
 
   // Collapse state per shop
   const [collapsedShops, setCollapsedShops] = useState<Set<string>>(new Set());
@@ -64,6 +115,26 @@ export const AdminInventory: React.FC = () => {
   const [reasonInput, setReasonInput] = useState('');
   const [modalError, setModalError] = useState('');
 
+  useEffect(() => {
+    if (movementPeriod === 'CUSTOM') return;
+    const range = computeMovementDateRange(movementPeriod);
+    if (range) {
+      setMovementStartDate(range.start);
+      setMovementEndDate(range.end);
+    }
+  }, [movementPeriod]);
+
+  useEffect(() => {
+    setMovementsVisibleCount(PAGE_SIZE);
+  }, [
+    movementPeriod,
+    movementStartDate,
+    movementEndDate,
+    movementTypeFilter,
+    searchQuery,
+    selectedShopId,
+  ]);
+
   if (!currentUser) return null;
   if (!hasAdminAccess(currentUser) && !currentUser.permissions?.canManageInventory) return null;
 
@@ -82,16 +153,59 @@ export const AdminInventory: React.FC = () => {
   );
   const visibleProductIds = new Set(visibleProducts.map(p => p.id));
 
+  const floorStoreIdSet = new Set(
+    (dbState.stores || []).filter(st => st.isShopFloor).map(st => st.id)
+  );
+
+  const getProductStoreQty = (p: Product): number => {
+    if (typeof p.storeStock === 'number' && Number.isFinite(p.storeStock)) {
+      return Math.max(0, p.storeStock);
+    }
+    if (p.storeStocks) {
+      return Object.entries(p.storeStocks).reduce(
+        (sum, [sid, q]) =>
+          floorStoreIdSet.has(sid) ? sum : sum + Math.max(0, Number(q || 0)),
+        0
+      );
+    }
+    return 0;
+  };
+
+  const getShopLocationFilter = (shopId: string): ShopLocationFilter =>
+    shopLocationFilters[shopId] ?? 'ALL';
+
+  const handleSetShopLocationFilter = (shopId: string, next: ShopLocationFilter) => {
+    setShopLocationFilters(prev => ({
+      ...prev,
+      [shopId]: next,
+    }));
+    setVisibleCounts(prev => ({
+      ...prev,
+      [shopId]: PAGE_SIZE,
+    }));
+  };
+
   const valuation = InventoryService.getInventoryValuation(selectedShopId, currentUser);
+
+  // Exclude transfers from Movements — transfers are tracked exclusively in Stores & Transfers -> List
   const allMovements = InventoryService.getMovementHistory(
     {
       shopId: selectedShopId === 'ALL' ? undefined : selectedShopId,
       search: searchQuery,
     },
     currentUser
-  );
+  ).filter(m => m.type !== 'STORE_TRANSFER');
 
-  const movements = allMovements.filter(m => {
+  const movementsInPeriod = allMovements.filter(m => {
+    const parsed = new Date(m.createdAt);
+    if (Number.isNaN(parsed.getTime())) return false;
+    const ymd = formatDateYMD(parsed);
+    if (movementStartDate && ymd < movementStartDate) return false;
+    if (movementEndDate && ymd > movementEndDate) return false;
+    return true;
+  });
+
+  const movements = movementsInPeriod.filter(m => {
     if (movementTypeFilter === 'ALL') return true;
     return m.type === movementTypeFilter;
   });
@@ -514,12 +628,67 @@ export const AdminInventory: React.FC = () => {
     printWindow.document.close();
   };
 
+  // Print Full-Screen Movements Report (PDF)
+  const handlePrintMovementsReport = () => {
+    const periodLabel =
+      movementPeriod === 'DAY'
+        ? `Day (${movementStartDate})`
+        : movementPeriod === 'WEEK'
+          ? `Week (${movementStartDate} → ${movementEndDate})`
+          : movementPeriod === 'MONTH'
+            ? `Month (${movementStartDate} → ${movementEndDate})`
+            : `Custom (${movementStartDate || '...'} → ${movementEndDate || '...'})`;
+
+    const typeLabel =
+      movementTypeFilter === 'ALL' ? 'All Movement Types (No Transfers)' : movementTypeFilter;
+    const shopObj = selectedShopId !== 'ALL' ? shops.find(s => s.id === selectedShopId) : undefined;
+    const shopLabel = shopObj
+      ? shopObj.name
+      : shopAdmin && !platformAdmin
+        ? shops.length === 1
+          ? shops[0].name
+          : 'Managed Shops'
+        : 'All Shops';
+
+    const ok = printMovementsReportPdf(movements, settings, {
+      periodLabel,
+      typeLabel,
+      shopLabel,
+    });
+    if (!ok) {
+      addToast({
+        type: 'error',
+        title: 'Print Failed',
+        description: 'Could not prepare the movements print preview.',
+      });
+    }
+  };
+
   // ==============================
-  // MOBILE STOCK CARD
+  // STOCK CARD (Supports All, Shop, and Store filter modes)
   // ==============================
-  const renderStockCard = (p: Product) => {
-    const isLow = p.currentStock <= p.minStock;
-    const isOut = p.currentStock <= 0;
+  const renderStockCard = (p: Product, mode: ShopLocationFilter = 'ALL') => {
+    const shopQty = Math.max(0, Number(p.currentStock || 0));
+    const storeQty = getProductStoreQty(p);
+    const displayQty = mode === 'STORE' ? storeQty : shopQty;
+    const isLow = mode !== 'STORE' && shopQty <= p.minStock;
+    const isOut = displayQty <= 0;
+
+    const cardCost = displayQty * (p.purchasePrice || 0);
+    const cardRetail = displayQty * (p.sellingPrice || 0);
+
+    const warehouseStoreEntries = p.storeStocks
+      ? Object.entries(p.storeStocks).filter(([sid]) => !floorStoreIdSet.has(sid))
+      : [];
+
+    const stockLabel =
+      mode === 'SHOP'
+        ? 'Shop'
+        : mode === 'STORE'
+          ? 'Store'
+          : storeQty > 0
+            ? 'Shop / Store'
+            : 'Shop';
 
     return (
       <div key={p.id} className="p-3.5 space-y-2.5">
@@ -562,39 +731,45 @@ export const AdminInventory: React.FC = () => {
 
         <div className="grid grid-cols-3 gap-2 text-center text-xs">
           <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
-            <div className="text-[9px] text-slate-400">
-              {(p.storeStock || 0) > 0 ? 'Floor / Store' : 'Stock'}
-            </div>
+            <div className="text-[9px] text-slate-400">{stockLabel}</div>
             <div
               className={`font-mono text-[11px] font-bold ${
-                isOut ? 'text-rose-400' : isLow ? 'text-amber-300' : 'text-emerald-400'
+                mode === 'STORE'
+                  ? isOut
+                    ? 'text-rose-400'
+                    : 'text-blue-400'
+                  : isOut
+                    ? 'text-rose-400'
+                    : isLow
+                      ? 'text-amber-300'
+                      : 'text-emerald-400'
               }`}
             >
-              {p.currentStock} {p.unit}
+              {displayQty} {p.unit}
             </div>
-            {(p.storeStock || 0) > 0 && (
+            {mode === 'ALL' && storeQty > 0 && (
               <div className="font-mono text-[10px] text-blue-400 mt-0.5">
-                Store: {p.storeStock} {p.unit}
+                Store: {storeQty} {p.unit}
               </div>
             )}
           </div>
           <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
             <div className="text-[9px] text-slate-400">Cost</div>
             <div className="font-mono text-[11px] text-purple-300 font-medium truncate">
-              {formatCurrency(p.currentStock * p.purchasePrice, settings.currencySymbol)}
+              {formatCurrency(cardCost, settings.currencySymbol)}
             </div>
           </div>
           <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
             <div className="text-[9px] text-slate-400">Retail</div>
             <div className="font-mono text-[11px] text-emerald-400 font-bold truncate">
-              {formatCurrency(p.currentStock * p.sellingPrice, settings.currencySymbol)}
+              {formatCurrency(cardRetail, settings.currencySymbol)}
             </div>
           </div>
         </div>
 
-        {p.storeStocks && Object.keys(p.storeStocks).length > 0 && (
+        {mode !== 'SHOP' && warehouseStoreEntries.length > 0 && (
           <div className="flex flex-wrap gap-1 text-[10px]">
-            {Object.entries(p.storeStocks).map(([sid, qty]) => {
+            {warehouseStoreEntries.map(([sid, qty]) => {
               const st = (dbState.stores || []).find(s => s.id === sid);
               return (
                 <span
@@ -816,19 +991,72 @@ export const AdminInventory: React.FC = () => {
             <div className="space-y-4">
               {groupedByShop.map(({ shop, products: shopProducts }) => {
                 const isCollapsed = collapsedShops.has(shop.id);
-                const shopLowStock = shopProducts.filter(
+                const locationFilter = getShopLocationFilter(shop.id);
+
+                // Filter per shop: ALL (default), SHOP (shop inventory only), STORE (store inventory only)
+                const filteredShopProducts = shopProducts.filter(p => {
+                  const shopQty = Math.max(0, Number(p.currentStock || 0));
+                  const storeQty = getProductStoreQty(p);
+                  if (locationFilter === 'SHOP') {
+                    return shopQty > 0 || (showLowStockOnly && storeQty === 0);
+                  }
+                  if (locationFilter === 'STORE') {
+                    return storeQty > 0;
+                  }
+                  return true;
+                });
+
+                const shopLowStock = filteredShopProducts.filter(
                   p => p.status === 'ACTIVE' && p.currentStock <= p.minStock
                 ).length;
-                const shopValue = shopProducts.reduce(
-                  (sum, p) => sum + p.currentStock * p.purchasePrice,
-                  0
-                );
+
+                // Total Cost & Total Retail Value across all items matching the shop filter
+                const totalShopCost = filteredShopProducts.reduce((sum, p) => {
+                  const shopQty = Math.max(0, Number(p.currentStock || 0));
+                  const storeQty = getProductStoreQty(p);
+                  const qty =
+                    locationFilter === 'SHOP'
+                      ? shopQty
+                      : locationFilter === 'STORE'
+                        ? storeQty
+                        : shopQty + storeQty;
+                  return sum + qty * (p.purchasePrice || 0);
+                }, 0);
+
+                const totalShopRetail = filteredShopProducts.reduce((sum, p) => {
+                  const shopQty = Math.max(0, Number(p.currentStock || 0));
+                  const storeQty = getProductStoreQty(p);
+                  const qty =
+                    locationFilter === 'SHOP'
+                      ? shopQty
+                      : locationFilter === 'STORE'
+                        ? storeQty
+                        : shopQty + storeQty;
+                  return sum + qty * (p.sellingPrice || 0);
+                }, 0);
+
+                const totalShopUnits = filteredShopProducts.reduce((sum, p) => {
+                  const shopQty = Math.max(0, Number(p.currentStock || 0));
+                  const storeQty = getProductStoreQty(p);
+                  const qty =
+                    locationFilter === 'SHOP'
+                      ? shopQty
+                      : locationFilter === 'STORE'
+                        ? storeQty
+                        : shopQty + storeQty;
+                  return sum + qty;
+                }, 0);
+
+                const headerStockValue =
+                  locationFilter === 'STORE'
+                    ? totalShopCost
+                    : shopProducts.reduce((sum, p) => sum + p.currentStock * p.purchasePrice, 0);
 
                 // Pagination
                 const visibleCount = getVisibleCount(shop.id);
-                const visibleProducts = shopProducts.slice(0, visibleCount);
-                const hasMore = shopProducts.length > visibleCount;
-                const remaining = shopProducts.length - visibleCount;
+                const visibleProducts = filteredShopProducts.slice(0, visibleCount);
+                const hasMore = filteredShopProducts.length > visibleCount;
+                const remaining = filteredShopProducts.length - visibleCount;
                 const isLoading = loadingShops.has(shop.id);
 
                 return (
@@ -838,6 +1066,7 @@ export const AdminInventory: React.FC = () => {
                   >
                     {/* Shop Header */}
                     <button
+                      type="button"
                       onClick={() => toggleShopCollapse(shop.id)}
                       className="w-full flex items-center justify-between gap-3 p-3.5 bg-slate-900/80 hover:bg-slate-800/60 active:bg-slate-800 transition border-b border-slate-800"
                     >
@@ -855,9 +1084,9 @@ export const AdminInventory: React.FC = () => {
                             </span>
                           </div>
                           <p className="text-[11px] text-slate-400 mt-0.5">
-                            {shopProducts.length}{' '}
-                            {shopProducts.length === 1 ? 'SKU' : 'SKUs'} • Stock:{' '}
-                            {formatCurrency(shopValue, settings.currencySymbol)}
+                            {filteredShopProducts.length}{' '}
+                            {filteredShopProducts.length === 1 ? 'SKU' : 'SKUs'} • Stock:{' '}
+                            {formatCurrency(headerStockValue, settings.currencySymbol)}
                             {shopLowStock > 0 && (
                               <span className="text-amber-400 ml-1">
                                 • {shopLowStock} low
@@ -883,27 +1112,112 @@ export const AdminInventory: React.FC = () => {
 
                     {!isCollapsed && (
                       <>
-                        <div className="divide-y divide-slate-800/80">
-                          {visibleProducts.map(renderStockCard)}
+                        {/* Per-Shop Location Filter: All (default), Shop, Store */}
+                        <div className="px-3.5 py-2.5 bg-slate-950/60 border-b border-slate-800 flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                            Inventory View
+                          </span>
+                          <div className="grid grid-cols-3 gap-1.5 bg-slate-900 border border-slate-800 rounded-xl p-1 text-[11px] font-semibold">
+                            <button
+                              type="button"
+                              onClick={() => handleSetShopLocationFilter(shop.id, 'ALL')}
+                              className={`px-3 py-1.5 rounded-lg transition ${
+                                locationFilter === 'ALL'
+                                  ? 'bg-blue-600 text-white shadow-sm'
+                                  : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              All
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSetShopLocationFilter(shop.id, 'SHOP')}
+                              className={`flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg transition ${
+                                locationFilter === 'SHOP'
+                                  ? 'bg-emerald-600 text-white shadow-sm'
+                                  : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              <Store className="w-3 h-3" />
+                              <span>Shop</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSetShopLocationFilter(shop.id, 'STORE')}
+                              className={`flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg transition ${
+                                locationFilter === 'STORE'
+                                  ? 'bg-indigo-600 text-white shadow-sm'
+                                  : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              <Warehouse className="w-3 h-3" />
+                              <span>Store</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {filteredShopProducts.length === 0 ? (
+                          <div className="py-8 px-4 text-center text-xs text-slate-500">
+                            No {locationFilter === 'SHOP' ? 'shop' : locationFilter === 'STORE' ? 'store' : ''} inventory items found in {shop.name}.
+                          </div>
+                        ) : (
+                          <div className="divide-y divide-slate-800/80">
+                            {visibleProducts.map(p => renderStockCard(p, locationFilter))}
+                          </div>
+                        )}
+
+                        {/* Shop Total Cost & Retail Value (always shown right before Expand / See More) */}
+                        <div className="px-3.5 py-3 bg-slate-950/75 border-t border-slate-800/90 space-y-1.5">
+                          <div className="flex items-center justify-between text-[10px] text-slate-400">
+                            <span className="font-semibold uppercase tracking-wider">
+                              {locationFilter === 'SHOP'
+                                ? 'Shop Total Valuation'
+                                : locationFilter === 'STORE'
+                                  ? 'Store Total Valuation'
+                                  : 'Total Valuation (Shop + Store)'}
+                            </span>
+                            <span className="font-mono tabular-nums text-slate-300">
+                              {totalShopUnits.toLocaleString()} units
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2">
+                              <div className="text-[9px] text-slate-400 uppercase font-semibold">
+                                Total Cost
+                              </div>
+                              <div className="text-xs font-bold font-mono tabular-nums text-purple-300 mt-0.5 truncate">
+                                {formatCurrency(totalShopCost, settings.currencySymbol)}
+                              </div>
+                            </div>
+                            <div className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-right">
+                              <div className="text-[9px] text-slate-400 uppercase font-semibold">
+                                Total Retail Value
+                              </div>
+                              <div className="text-xs font-bold font-mono tabular-nums text-emerald-400 mt-0.5 truncate">
+                                {formatCurrency(totalShopRetail, settings.currencySymbol)}
+                              </div>
+                            </div>
+                          </div>
                         </div>
 
                         {/* Pagination Footer */}
-                        {shopProducts.length > PAGE_SIZE && (
+                        {filteredShopProducts.length > PAGE_SIZE && (
                           <div className="p-3 bg-slate-950/40 border-t border-slate-800/80 space-y-2">
                             <div className="text-[10px] text-slate-500 text-center">
                               Showing{' '}
                               <span className="text-slate-300 font-semibold">
-                                {Math.min(visibleCount, shopProducts.length)}
+                                {Math.min(visibleCount, filteredShopProducts.length)}
                               </span>{' '}
                               of{' '}
                               <span className="text-slate-300 font-semibold">
-                                {shopProducts.length}
+                                {filteredShopProducts.length}
                               </span>{' '}
                               products
                             </div>
                             <div className="flex items-center gap-2">
                               {visibleCount > PAGE_SIZE && (
                                 <button
+                                  type="button"
                                   onClick={() => handleSeeLess(shop.id)}
                                   className="flex-1 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-300 text-[11px] font-semibold transition"
                                 >
@@ -912,6 +1226,7 @@ export const AdminInventory: React.FC = () => {
                               )}
                               {hasMore && (
                                 <button
+                                  type="button"
                                   onClick={() => handleSeeMore(shop.id)}
                                   disabled={isLoading}
                                   className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-[11px] font-semibold shadow transition disabled:opacity-60 disabled:cursor-wait"
@@ -953,7 +1268,7 @@ export const AdminInventory: React.FC = () => {
                     </div>
                   </div>
                   <div className="divide-y divide-slate-800/80">
-                    {productsWithNoShop.map(renderStockCard)}
+                    {productsWithNoShop.map(p => renderStockCard(p, 'ALL'))}
                   </div>
                 </div>
               )}
@@ -962,91 +1277,327 @@ export const AdminInventory: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 2: Movement Log */}
-      {activeTab === 'movements' && (
-        <div className="space-y-3.5">
-          <select
-            value={movementTypeFilter}
-            onChange={e => setMovementTypeFilter(e.target.value)}
-            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-          >
-            <option value="ALL">All Movement Types</option>
-            <option value="DAMAGED">💥 Damaged Stock</option>
-            <option value="BROKEN">🔨 Broken Stock</option>
-            <option value="EXPIRED">⏳ Expired Items</option>
-            <option value="LOST">🔍 Lost / Missing</option>
-            <option value="CORRECTION">⚖️ Count Corrections</option>
-            <option value="RESTOCK">📦 Restock Adjustments</option>
-            <option value="SALE">🛒 Sales (Decrements)</option>
-            <option value="PURCHASE">🚚 Purchases / Stock In</option>
-            <option value="RETURN">↩️ Returns / Restocks</option>
-          </select>
+      {/* TAB 2: FULL-SCREEN MOVEMENTS PAGE (Transfers excluded, Day/Week/Month/Custom default Month, Print PDF, 10-item expand) */}
+      {activeTab === 'movements' && (() => {
+        const visibleMovements = movements.slice(0, movementsVisibleCount);
+        const remainingMovements = Math.max(0, movements.length - movementsVisibleCount);
+        const totalInUnits = movements.reduce(
+          (sum, m) => (m.changeQty > 0 ? sum + m.changeQty : sum),
+          0
+        );
+        const totalOutUnits = movements.reduce(
+          (sum, m) => (m.changeQty < 0 ? sum + Math.abs(m.changeQty) : sum),
+          0
+        );
+        const totalCostImpact = movements.reduce(
+          (sum, m) => sum + Number(m.costValue || 0),
+          0
+        );
 
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-            {movements.length === 0 ? (
-              <div className="py-12 text-center text-slate-500">
-                <History className="w-8 h-8 mx-auto mb-2 opacity-40" />
-                <p className="text-xs">No movements found matching filter.</p>
+        return (
+          <div className="fixed inset-0 z-40 bg-slate-950 text-slate-100 flex flex-col overflow-hidden">
+            {/* Full-Screen Sticky Top Bar */}
+            <div className="px-4 sm:px-6 py-3.5 bg-slate-900 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
+              <div className="flex items-center gap-3 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setActiveTabState('stock')}
+                  aria-label="Back to Inventory"
+                  className="p-2 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                </button>
+                <div className="min-w-0">
+                  <h2 className="text-base sm:text-lg font-bold text-white tracking-tight truncate">
+                    Stock Movements
+                  </h2>
+                  <p className="text-[11px] text-slate-400 truncate">
+                    Damaged, broken, expired, lost, sales, purchases &amp; adjustments (transfers excluded)
+                  </p>
+                </div>
               </div>
-            ) : (
-              <div className="divide-y divide-slate-800/80">
-                {movements.map(m => {
-                  const isPositive = m.changeQty > 0;
-                  const isLossType = ['DAMAGED', 'BROKEN', 'EXPIRED', 'LOST'].includes(m.type);
 
-                  return (
-                    <div key={m.id} className="p-3.5 space-y-2">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0 flex-1">
-                          <h4 className="font-bold text-xs text-white truncate">{m.productName}</h4>
-                          <p className="text-[10px] font-mono text-slate-400">
-                            {formatDateTime(m.createdAt)}
-                          </p>
-                        </div>
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold shrink-0 ${
-                            isLossType
-                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                              : 'bg-slate-800 text-slate-300'
-                          }`}
-                        >
-                          {m.type}
-                        </span>
-                      </div>
+              <button
+                type="button"
+                onClick={handlePrintMovementsReport}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold shadow-lg transition shrink-0"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Print PDF</span>
+              </button>
+            </div>
 
-                      <div className="flex items-center justify-between text-xs py-1">
-                        <div className="text-slate-400 text-[11px]">
-                          Qty:{' '}
-                          <strong className={isPositive ? 'text-emerald-400' : 'text-rose-400'}>
-                            {isPositive ? `+${m.changeQty}` : m.changeQty}
-                          </strong>{' '}
-                          ({m.previousQty} → {m.newQty})
-                        </div>
-                        {m.costValue !== undefined && (
-                          <div
-                            className={`font-mono text-[11px] font-semibold ${
-                              isLossType ? 'text-rose-400' : 'text-slate-300'
-                            }`}
-                          >
-                            {formatCurrency(m.costValue, settings.currencySymbol)}
-                          </div>
-                        )}
-                      </div>
+            {/* Full-Screen Scrollable Content */}
+            <div className="flex-1 overflow-y-auto p-3.5 sm:p-6 pb-20 space-y-4">
+              {/* Period Filter: Day / Week / Month (Default) / Custom + Type + Search */}
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3.5 space-y-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Calendar className="w-4 h-4 text-blue-400" />
+                    <span className="font-bold text-white uppercase tracking-wider text-[11px]">
+                      Period Filter
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    {movementStartDate === movementEndDate
+                      ? movementStartDate
+                      : `${movementStartDate || '...'} → ${movementEndDate || '...'}`}{' '}
+                    · <strong className="text-white">{movements.length.toLocaleString()}</strong>{' '}
+                    record{movements.length === 1 ? '' : 's'}
+                  </span>
+                </div>
 
-                      {m.reason && (
-                        <p className="text-[11px] text-slate-400 bg-slate-950/60 p-2 rounded-lg border border-slate-800">
-                          {m.reason}
-                        </p>
-                      )}
-                      <div className="text-[10px] text-slate-500 text-right">By {m.userName}</div>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {(
+                    [
+                      {
+                        id: 'DAY',
+                        label: 'Day',
+                        activeClass:
+                          'bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-500/30',
+                        idleClass:
+                          'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20',
+                      },
+                      {
+                        id: 'WEEK',
+                        label: 'Week',
+                        activeClass:
+                          'bg-emerald-600 border-emerald-500 text-white shadow-md shadow-emerald-500/30',
+                        idleClass:
+                          'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20',
+                      },
+                      {
+                        id: 'MONTH',
+                        label: 'Month',
+                        activeClass:
+                          'bg-violet-600 border-violet-500 text-white shadow-md shadow-violet-500/30',
+                        idleClass:
+                          'bg-violet-500/10 border-violet-500/30 text-violet-300 hover:bg-violet-500/20',
+                      },
+                      {
+                        id: 'CUSTOM',
+                        label: 'Custom',
+                        activeClass:
+                          'bg-amber-500 border-amber-400 text-white shadow-md shadow-amber-500/30',
+                        idleClass:
+                          'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20',
+                      },
+                    ] as const
+                  ).map(preset => {
+                    const isActive = movementPeriod === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => setMovementPeriod(preset.id)}
+                        className={`py-2 rounded-lg border text-[11px] font-semibold transition active:scale-95 ${
+                          isActive ? preset.activeClass : preset.idleClass
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {movementPeriod === 'CUSTOM' && (
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <div>
+                      <label className="text-[10px] text-slate-500 block mb-1">From</label>
+                      <input
+                        type="date"
+                        value={movementStartDate}
+                        onChange={e => setMovementStartDate(e.target.value)}
+                        className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white w-full focus:outline-none focus:ring-1 focus:ring-amber-500"
+                      />
                     </div>
-                  );
-                })}
+                    <div>
+                      <label className="text-[10px] text-slate-500 block mb-1">To</label>
+                      <input
+                        type="date"
+                        value={movementEndDate}
+                        onChange={e => setMovementEndDate(e.target.value)}
+                        className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white w-full focus:outline-none focus:ring-1 focus:ring-amber-500"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-slate-800/80">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={e => setSearchQuery(e.target.value)}
+                      placeholder="Search product, reason, user, or shop..."
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <select
+                    value={movementTypeFilter}
+                    onChange={e => setMovementTypeFilter(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="ALL">All Movement Types</option>
+                    <option value="DAMAGED">💥 Damaged Stock</option>
+                    <option value="BROKEN">🔨 Broken Stock</option>
+                    <option value="EXPIRED">⏳ Expired Items</option>
+                    <option value="LOST">🔍 Lost / Missing</option>
+                    <option value="CORRECTION">⚖️ Count Corrections</option>
+                    <option value="RESTOCK">📦 Restock Adjustments</option>
+                    <option value="ADJUSTMENT">🔧 Manual Adjustments</option>
+                    <option value="SALE">🛒 Sales (Decrements)</option>
+                    <option value="PURCHASE">🚚 Purchases / Stock In</option>
+                    <option value="RETURN">↩️ Returns / Restocks</option>
+                  </select>
+                </div>
               </div>
-            )}
+
+              {/* KPI Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+                  <div className="text-[10px] text-slate-400 font-semibold uppercase">Records</div>
+                  <div className="text-base font-bold text-white font-mono tabular-nums mt-0.5">
+                    {movements.length.toLocaleString()}
+                  </div>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+                  <div className="text-[10px] text-slate-400 font-semibold uppercase">Added (+)</div>
+                  <div className="text-base font-bold text-emerald-400 font-mono tabular-nums mt-0.5">
+                    +{totalInUnits.toLocaleString()}
+                  </div>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+                  <div className="text-[10px] text-slate-400 font-semibold uppercase">Deducted (-)</div>
+                  <div className="text-base font-bold text-rose-400 font-mono tabular-nums mt-0.5">
+                    -{totalOutUnits.toLocaleString()}
+                  </div>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+                  <div className="text-[10px] text-slate-400 font-semibold uppercase">Cost Impact</div>
+                  <div className="text-sm font-bold text-purple-300 font-mono tabular-nums mt-0.5 truncate">
+                    {formatCurrency(totalCostImpact, settings.currencySymbol)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Movements List (Capped at 10 initially + See More / Expand by 10) */}
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+                {movements.length === 0 ? (
+                  <div className="py-12 text-center text-slate-500">
+                    <History className="w-8 h-8 mx-auto mb-2 opacity-40" />
+                    <p className="text-xs">No movements found for this period and filter.</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="divide-y divide-slate-800/80">
+                      {visibleMovements.map(m => {
+                        const isPositive = m.changeQty > 0;
+                        const isLossType = ['DAMAGED', 'BROKEN', 'EXPIRED', 'LOST'].includes(
+                          m.type
+                        );
+
+                        return (
+                          <div key={m.id} className="p-3.5 space-y-2">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <h4 className="font-bold text-xs text-white truncate">
+                                  {m.productName}
+                                </h4>
+                                <p className="text-[10px] font-mono text-slate-400">
+                                  {formatDateTime(m.createdAt)}
+                                  {m.shopName ? ` · ${m.shopName}` : ''}
+                                </p>
+                              </div>
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold shrink-0 ${
+                                  isLossType
+                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                    : 'bg-slate-800 text-slate-300'
+                                }`}
+                              >
+                                {m.type}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center justify-between text-xs py-1">
+                              <div className="text-slate-400 text-[11px]">
+                                Qty:{' '}
+                                <strong
+                                  className={isPositive ? 'text-emerald-400' : 'text-rose-400'}
+                                >
+                                  {isPositive ? `+${m.changeQty}` : m.changeQty}
+                                </strong>{' '}
+                                ({m.previousQty} → {m.newQty})
+                              </div>
+                              {m.costValue !== undefined && (
+                                <div
+                                  className={`font-mono text-[11px] font-semibold ${
+                                    isLossType ? 'text-rose-400' : 'text-slate-300'
+                                  }`}
+                                >
+                                  {formatCurrency(m.costValue, settings.currencySymbol)}
+                                </div>
+                              )}
+                            </div>
+
+                            {m.reason && (
+                              <p className="text-[11px] text-slate-400 bg-slate-950/60 p-2 rounded-lg border border-slate-800">
+                                {m.reason}
+                              </p>
+                            )}
+                            <div className="text-[10px] text-slate-500 text-right">
+                              By {m.userName}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Expand / Pagination Footer (10 items per page) */}
+                    {movements.length > PAGE_SIZE && (
+                      <div className="p-3 bg-slate-950/50 border-t border-slate-800/80 space-y-2">
+                        <div className="text-[10px] text-slate-500 text-center">
+                          Showing{' '}
+                          <span className="text-slate-300 font-semibold">
+                            {Math.min(movementsVisibleCount, movements.length)}
+                          </span>{' '}
+                          of{' '}
+                          <span className="text-slate-300 font-semibold">{movements.length}</span>{' '}
+                          movements
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {movementsVisibleCount > PAGE_SIZE && (
+                            <button
+                              type="button"
+                              onClick={() => setMovementsVisibleCount(PAGE_SIZE)}
+                              className="flex-1 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition"
+                            >
+                              Show Less
+                            </button>
+                          )}
+                          {remainingMovements > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setMovementsVisibleCount(v => v + PAGE_SIZE)}
+                              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold shadow transition"
+                            >
+                              <ChevronDown className="w-3.5 h-3.5" />
+                              <span>See More ({Math.min(PAGE_SIZE, remainingMovements)})</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* TAB 3: Loss Report */}
       {activeTab === 'losses' && (

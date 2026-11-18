@@ -25,6 +25,11 @@ import {
   ChevronDown,
   ChevronRight,
   Calendar,
+  Printer,
+  ArrowLeft,
+  ClipboardList,
+  Truck,
+  FileText,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { StoreService } from '../../services/storeService';
@@ -38,7 +43,8 @@ import {
 } from '../../services/excelImportService';
 import { ImportProgressBar } from '../common/ImportProgressBar';
 import { ExcelExportService } from '../../services/excelExportService';
-import { formatCurrency, formatDateTime } from '../../utils/formatters';
+import { formatCurrency } from '../../utils/formatters';
+import { printStockTransferVoucher } from '../../utils/transferPrint';
 import {
   getAdminManagedShops,
   hasAdminAccess,
@@ -49,6 +55,9 @@ import type {
   InventoryMovement,
   Product,
   ProductStoreStockDetail,
+  StockTransfer,
+  StockTransferLocationType,
+  StockTransferStatus,
   Store,
 } from '../../types';
 
@@ -85,57 +94,42 @@ export const computeTransferDatePresetRange = (
   return null;
 };
 
-export const isTimestampInDateRange = (
-  isoOrTimestamp: string,
+export const isYMDInDateRange = (
+  ymd: string,
   startYMD: string,
   endYMD: string
 ): boolean => {
-  const ts = new Date(isoOrTimestamp).getTime();
-  if (Number.isNaN(ts)) return false;
-
-  if (startYMD) {
-    const [sy, sm, sd] = startYMD.split('-').map(Number);
-    if (sy && sm && sd) {
-      const startMs = new Date(sy, sm - 1, sd, 0, 0, 0, 0).getTime();
-      if (ts < startMs) return false;
-    }
-  }
-
-  if (endYMD) {
-    const [ey, em, ed] = endYMD.split('-').map(Number);
-    if (ey && em && ed) {
-      const endMs = new Date(ey, em - 1, ed, 23, 59, 59, 999).getTime();
-      if (ts > endMs) return false;
-    }
-  }
-
+  const clean = (ymd || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(clean)) return false;
+  if (startYMD && clean < startYMD) return false;
+  if (endYMD && clean > endYMD) return false;
   return true;
 };
 
-export const deduplicateStoreTransferMovements = (
-  movements: InventoryMovement[]
-): InventoryMovement[] => {
-  const byTransferProductKey = new Map<string, InventoryMovement>();
-  for (const m of movements) {
-    const key = m.referenceId
-      ? `${m.storeId || 'NO_STORE'}::${m.referenceId}::${m.productId}`
-      : m.id;
-    const existing = byTransferProductKey.get(key);
-    if (!existing) {
-      byTransferProductKey.set(key, m);
-    } else if (existing.changeQty > 0 && m.changeQty < 0) {
-      byTransferProductKey.set(key, m);
-    }
+export const encodeLocationKey = (
+  type: StockTransferLocationType,
+  id: string
+): string => `${type}:${id}`;
+
+export const decodeLocationKey = (
+  key: string
+): { type: StockTransferLocationType; id: string } | null => {
+  if (!key || !key.includes(':')) return null;
+  const sep = key.indexOf(':');
+  const rawType = key.slice(0, sep);
+  const id = key.slice(sep + 1);
+  if ((rawType === 'STORE' || rawType === 'SHOP') && id) {
+    return { type: rawType, id };
   }
-  return Array.from(byTransferProductKey.values()).sort((a, b) =>
-    (b.createdAt || '').localeCompare(a.createdAt || '')
-  );
+  return null;
 };
 
 export const AdminStores: React.FC = () => {
   const { currentUser, dbState, addToast, selectedShopId, refreshStoresFromCloud } = useApp();
 
-  const [activeSubTab, setActiveSubTab] = useState<'stores' | 'inventory' | 'transfer'>('stores');
+  const [activeSubTab, setActiveSubTab] = useState<
+    'stores' | 'inventory' | 'transfer' | 'list' | 'transfer_view'
+  >('stores');
   const [isRefreshingStores, setIsRefreshingStores] = useState(false);
 
   // Create Store Modal / Form state
@@ -158,25 +152,34 @@ export const AdminStores: React.FC = () => {
   const [invVisibleCounts, setInvVisibleCounts] = useState<Record<string, number>>({});
   const [collapsedInvStores, setCollapsedInvStores] = useState<Record<string, boolean>>({});
 
-  // Transfer Stock Form state (multi-product batch up to 1,000, paginated at 15)
-  const [sourceStoreId, setSourceStoreId] = useState('');
+  // Full-Page Stock Transfer Form state (Store->Shop, Store->Store same shop, Shop->Store)
+  const [editingTransferId, setEditingTransferId] = useState<string | null>(null);
+  const [transferDate, setTransferDate] = useState(() => formatDateYMD(new Date()));
+  const [sourceLocationKey, setSourceLocationKey] = useState('');
+  const [destLocationKey, setDestLocationKey] = useState('');
   const [selectedTransferMap, setSelectedTransferMap] = useState<Record<string, string>>({});
+  const [selectedPriceMap, setSelectedPriceMap] = useState<Record<string, string>>({});
   const [productSearch, setProductSearch] = useState('');
   const [transferStockedOnly, setTransferStockedOnly] = useState(true);
   const [transferVisibleLimit, setTransferVisibleLimit] = useState(STORE_PAGE_SIZE);
   const [selectedQueueFilter, setSelectedQueueFilter] = useState('');
   const [selectedQueueVisibleLimit, setSelectedQueueVisibleLimit] = useState(STORE_PAGE_SIZE);
   const [bulkTransferQty, setBulkTransferQty] = useState('');
-  const [destShopId, setDestShopId] = useState('');
+  const [shippingCharges, setShippingCharges] = useState('');
   const [transferNotes, setTransferNotes] = useState('');
+  const [transferStatus, setTransferStatus] = useState<StockTransferStatus>('COMPLETED');
   const [transferError, setTransferError] = useState('');
+  const [transferProgressPct, setTransferProgressPct] = useState<number | null>(null);
 
-  // Transferred History filter & store grouping state
+  // Transferred List full-page state (Today / Weekly / Month / Custom)
   const [transferDatePreset, setTransferDatePreset] = useState<TransferDatePreset>('TODAY');
   const [transferStartDate, setTransferStartDate] = useState(() => formatDateYMD(new Date()));
   const [transferEndDate, setTransferEndDate] = useState(() => formatDateYMD(new Date()));
-  const [transferLogVisibleCounts, setTransferLogVisibleCounts] = useState<Record<string, number>>({});
-  const [collapsedTransferStores, setCollapsedTransferStores] = useState<Record<string, boolean>>({});
+  const [listLocationFilter, setListLocationFilter] = useState('ALL');
+  const [listSearchQuery, setListSearchQuery] = useState('');
+  const [listVisibleLimit, setListVisibleLimit] = useState(STORE_PAGE_SIZE);
+  const [viewingTransferId, setViewingTransferId] = useState<string | null>(null);
+  const [deletingTransfer, setDeletingTransfer] = useState<StockTransfer | null>(null);
 
   // Store Excel Import Modal state
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -212,6 +215,7 @@ export const AdminStores: React.FC = () => {
   const longPressTimerRef = useRef<number | null>(null);
   const longPressTriggeredRef = useRef(false);
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
+  const transferDateInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (transferDatePreset === 'CUSTOM') return;
@@ -227,8 +231,8 @@ export const AdminStores: React.FC = () => {
   }, [invSearch, invCategoryFilter, selectedInventoryStoreId, invStockedOnly]);
 
   useEffect(() => {
-    setTransferLogVisibleCounts({});
-  }, [transferDatePreset, transferStartDate, transferEndDate]);
+    setListVisibleLimit(STORE_PAGE_SIZE);
+  }, [transferDatePreset, transferStartDate, transferEndDate, listLocationFilter, listSearchQuery]);
 
   useEffect(() => {
     return () => {
@@ -488,21 +492,153 @@ export const AdminStores: React.FC = () => {
     });
   }, [accessibleStores, shopFilter, storeSearch, accessibleShops]);
 
-  // Resolve effective source store for transfer tab (prefer warehouse stores, not POS floor)
-  const effectiveSourceStoreId =
-    sourceStoreId && transferableStores.some(s => s.id === sourceStoreId)
-      ? sourceStoreId
-      : transferableStores[0]?.id || '';
-
-  const selectedSourceStore = useMemo(
-    () => transferableStores.find(s => s.id === effectiveSourceStoreId),
-    [transferableStores, effectiveSourceStoreId]
+  const activeShops = useMemo(
+    () => accessibleShops.filter(s => s.status === 'ACTIVE'),
+    [accessibleShops]
   );
 
-  const effectiveDestShopId =
-    destShopId && accessibleShops.some(s => s.id === destShopId)
-      ? destShopId
-      : selectedSourceStore?.shopId || accessibleShops[0]?.id || '';
+  // Source Location options: active warehouse stores + active shop floors (supports Store->Shop, Store->Store, Shop->Store)
+  const sourceLocationOptions = useMemo(() => {
+    const opts: {
+      key: string;
+      type: StockTransferLocationType;
+      id: string;
+      shopId: string;
+      label: string;
+      name: string;
+      location?: string;
+    }[] = [];
+
+    for (const st of transferableStores) {
+      const sh = accessibleShops.find(s => s.id === st.shopId);
+      opts.push({
+        key: encodeLocationKey('STORE', st.id),
+        type: 'STORE',
+        id: st.id,
+        shopId: st.shopId,
+        name: st.name,
+        location: st.location || sh?.address || sh?.name,
+        label: `Store: ${st.name} (${sh?.name || 'Shop'}${st.location ? ` · ${st.location}` : ''})`,
+      });
+    }
+
+    for (const sh of activeShops) {
+      if (transferableStores.some(st => st.shopId === sh.id)) {
+        opts.push({
+          key: encodeLocationKey('SHOP', sh.id),
+          type: 'SHOP',
+          id: sh.id,
+          shopId: sh.id,
+          name: `${sh.name} (Shop Floor)`,
+          location: sh.address || sh.name,
+          label: `Shop Floor: ${sh.name}${sh.address ? ` · ${sh.address}` : ''}`,
+        });
+      }
+    }
+
+    return opts;
+  }, [transferableStores, accessibleShops, activeShops]);
+
+  const effectiveSourceLocationKey =
+    sourceLocationKey && sourceLocationOptions.some(o => o.key === sourceLocationKey)
+      ? sourceLocationKey
+      : sourceLocationOptions[0]?.key || '';
+
+  const selectedSourceLocation = useMemo(
+    () => sourceLocationOptions.find(o => o.key === effectiveSourceLocationKey),
+    [sourceLocationOptions, effectiveSourceLocationKey]
+  );
+
+  const selectedSourceStore = useMemo(
+    () =>
+      selectedSourceLocation?.type === 'STORE'
+        ? transferableStores.find(s => s.id === selectedSourceLocation.id)
+        : undefined,
+    [selectedSourceLocation, transferableStores]
+  );
+
+  // Destination Location options based on selected Location Source:
+  // - If Source is STORE -> allows SHOP (same shop first, or other active shops) OR another STORE in SAME shop
+  // - If Source is SHOP  -> allows STORE in SAME shop
+  const destLocationOptions = useMemo(() => {
+    if (!selectedSourceLocation) return [];
+    const opts: {
+      key: string;
+      type: StockTransferLocationType;
+      id: string;
+      shopId: string;
+      label: string;
+      groupLabel: string;
+      name: string;
+      location?: string;
+    }[] = [];
+
+    if (selectedSourceLocation.type === 'STORE') {
+      const sortedShops = [...activeShops].sort((a, b) => {
+        if (a.id === selectedSourceLocation.shopId) return -1;
+        if (b.id === selectedSourceLocation.shopId) return 1;
+        return a.name.localeCompare(b.name);
+      });
+      for (const sh of sortedShops) {
+        opts.push({
+          key: encodeLocationKey('SHOP', sh.id),
+          type: 'SHOP',
+          id: sh.id,
+          shopId: sh.id,
+          name: `${sh.name} (Shop Floor)`,
+          location: sh.address || sh.name,
+          groupLabel: 'Shop Floor (Store → Shop)',
+          label: `Shop: ${sh.name}${sh.id === selectedSourceLocation.shopId ? ' (Same Shop Floor)' : ''}${sh.address ? ` · ${sh.address}` : ''}`,
+        });
+      }
+
+      const sameShopOtherStores = transferableStores.filter(
+        st => st.shopId === selectedSourceLocation.shopId && st.id !== selectedSourceLocation.id
+      );
+      for (const st of sameShopOtherStores) {
+        const sh = accessibleShops.find(s => s.id === st.shopId);
+        opts.push({
+          key: encodeLocationKey('STORE', st.id),
+          type: 'STORE',
+          id: st.id,
+          shopId: st.shopId,
+          name: st.name,
+          location: st.location || sh?.address || sh?.name,
+          groupLabel: 'Store in Same Shop (Store → Store)',
+          label: `Store: ${st.name} (${sh?.name || 'Shop'}${st.location ? ` · ${st.location}` : ''})`,
+        });
+      }
+    } else {
+      const sameShopStores = transferableStores.filter(
+        st => st.shopId === selectedSourceLocation.shopId
+      );
+      for (const st of sameShopStores) {
+        const sh = accessibleShops.find(s => s.id === st.shopId);
+        opts.push({
+          key: encodeLocationKey('STORE', st.id),
+          type: 'STORE',
+          id: st.id,
+          shopId: st.shopId,
+          name: st.name,
+          location: st.location || sh?.address || sh?.name,
+          groupLabel: 'Warehouse Store (Shop → Store)',
+          label: `Store: ${st.name} (${sh?.name || 'Shop'}${st.location ? ` · ${st.location}` : ''})`,
+        });
+      }
+    }
+
+    return opts;
+  }, [selectedSourceLocation, activeShops, transferableStores, accessibleShops]);
+
+  const effectiveDestLocationKey =
+    destLocationKey && destLocationOptions.some(o => o.key === destLocationKey)
+      ? destLocationKey
+      : destLocationOptions[0]?.key || '';
+
+  const selectedDestLocation = useMemo(
+    () => destLocationOptions.find(o => o.key === effectiveDestLocationKey),
+    [destLocationOptions, effectiveDestLocationKey]
+  );
 
   const productByIdMap = useMemo(() => {
     const map = new Map<string, Product>();
@@ -512,56 +648,79 @@ export const AdminStores: React.FC = () => {
     return map;
   }, [accessibleProducts]);
 
-  // Products belonging to the selected store's shop — detects even a single searched letter
-  const storeScopedProducts = useMemo(() => {
-    const base = accessibleProducts.filter(p => {
-      if (selectedSourceStore && p.shopId !== selectedSourceStore.shopId) return false;
-      if (transferStockedOnly && selectedSourceStore) {
-        if (getProductQtyInStore(p, selectedSourceStore) <= 0) return false;
+  const editingTransferRecord = useMemo(
+    () =>
+      editingTransferId
+        ? (dbState.stockTransfers || []).find(t => t.id === editingTransferId)
+        : undefined,
+    [editingTransferId, dbState.stockTransfers]
+  );
+
+  // Available quantity at current Location Source (includes qty already held by editingTransferRecord if COMPLETED & same source)
+  const getSourceAvailableQty = (product: Product): number => {
+    if (!selectedSourceLocation) return 0;
+    let baseAvail = 0;
+    if (selectedSourceLocation.type === 'STORE' && selectedSourceStore) {
+      baseAvail = getProductQtyInStore(product, selectedSourceStore);
+    } else if (selectedSourceLocation.type === 'SHOP') {
+      baseAvail = Math.max(0, Number(product.currentStock || 0));
+    }
+
+    if (
+      editingTransferRecord &&
+      editingTransferRecord.status === 'COMPLETED' &&
+      editingTransferRecord.sourceType === selectedSourceLocation.type &&
+      editingTransferRecord.sourceId === selectedSourceLocation.id
+    ) {
+      const prevItem = editingTransferRecord.items.find(it => it.productId === product.id);
+      if (prevItem) {
+        baseAvail += Number(prevItem.quantity || 0);
       }
-      return true;
+    }
+    return baseAvail;
+  };
+
+  // Search-only products belonging to selected Location Source (only searched when productSearch has >= 1 char)
+  const storeScopedProducts = useMemo(() => {
+    const q = productSearch.trim().toLowerCase();
+    if (!q || !selectedSourceLocation) return [];
+
+    const filtered = accessibleProducts.filter(p => {
+      if (p.shopId !== selectedSourceLocation.shopId) return false;
+      if (transferStockedOnly && getSourceAvailableQty(p) <= 0) return false;
+
+      const cf = p.customFields;
+      const customMatch = cf
+        ? [cf.field1, cf.field2, cf.field3, cf.field4].some(v =>
+            (v || '').toLowerCase().includes(q)
+          )
+        : false;
+      return (
+        p.name.toLowerCase().includes(q) ||
+        (p.variation || '').toLowerCase().includes(q) ||
+        (p.sku || '').toLowerCase().includes(q) ||
+        (p.barcode || '').toLowerCase().includes(q) ||
+        customMatch
+      );
     });
 
-    const q = productSearch.trim().toLowerCase();
-    const filtered = q
-      ? base.filter(p => {
-          const cf = p.customFields;
-          const customMatch = cf
-            ? [cf.field1, cf.field2, cf.field3, cf.field4].some(v =>
-                (v || '').toLowerCase().includes(q)
-              )
-            : false;
-          return (
-            p.name.toLowerCase().includes(q) ||
-            (p.variation || '').toLowerCase().includes(q) ||
-            (p.sku || '').toLowerCase().includes(q) ||
-            (p.barcode || '').toLowerCase().includes(q) ||
-            customMatch
-          );
-        })
-      : base;
-
     return [...filtered].sort((a, b) => {
-      if (q) {
-        const aStarts = a.name.toLowerCase().startsWith(q) ? 1 : 0;
-        const bStarts = b.name.toLowerCase().startsWith(q) ? 1 : 0;
-        if (aStarts !== bStarts) return bStarts - aStarts;
-      }
-      const aQty = selectedSourceStore
-        ? getProductQtyInStore(a, selectedSourceStore)
-        : Number(a.storeStock || 0);
-      const bQty = selectedSourceStore
-        ? getProductQtyInStore(b, selectedSourceStore)
-        : Number(b.storeStock || 0);
+      const aStarts = a.name.toLowerCase().startsWith(q) ? 1 : 0;
+      const bStarts = b.name.toLowerCase().startsWith(q) ? 1 : 0;
+      if (aStarts !== bStarts) return bStarts - aStarts;
+      const aQty = getSourceAvailableQty(a);
+      const bQty = getSourceAvailableQty(b);
       if (bQty !== aQty) return bQty - aQty;
       return a.name.localeCompare(b.name);
     });
   }, [
     accessibleProducts,
+    selectedSourceLocation,
     selectedSourceStore,
     productSearch,
     transferStockedOnly,
     productStoreQtyCache,
+    editingTransferRecord,
   ]);
 
   const selectedTransferEntries = useMemo(() => {
@@ -569,143 +728,241 @@ export const AdminStores: React.FC = () => {
       product: Product;
       qtyStr: string;
       parsedQty: number;
+      priceStr: string;
+      parsedPrice: number;
+      subtotal: number;
       available: number;
       isInvalidQty: boolean;
       isExceeding: boolean;
+      isInvalidPrice: boolean;
     }[] = [];
 
     for (const [productId, rawQty] of Object.entries(selectedTransferMap)) {
       const qtyStr = typeof rawQty === 'string' ? rawQty : String(rawQty ?? '');
       const product = productByIdMap.get(productId);
       if (!product) continue;
-      if (selectedSourceStore && product.shopId !== selectedSourceStore.shopId) continue;
+      if (selectedSourceLocation && product.shopId !== selectedSourceLocation.shopId) continue;
 
-      const available = selectedSourceStore
-        ? getProductQtyInStore(product, selectedSourceStore)
-        : Number(product.storeStock || 0);
+      const available = getSourceAvailableQty(product);
       const parsedQty = Number(qtyStr);
-      const isExceeding = Number.isFinite(parsedQty) && parsedQty > available;
-      const isInvalidQty = !Number.isFinite(parsedQty) || parsedQty <= 0 || available <= 0;
+      const defaultPrice = Number(product.sellingPrice || product.purchasePrice || 0);
+      const priceStr =
+        productId in selectedPriceMap ? selectedPriceMap[productId] : String(defaultPrice);
+      const parsedPrice = Number(priceStr);
+      const isInvalidPrice = !Number.isFinite(parsedPrice) || parsedPrice < 0;
+      const safeQty = Number.isFinite(parsedQty) && parsedQty > 0 ? parsedQty : 0;
+      const safePrice = Number.isFinite(parsedPrice) && parsedPrice >= 0 ? parsedPrice : 0;
+      const subtotal = Math.round(safeQty * safePrice * 100) / 100;
+
+      const requiresStockCheck = transferStatus === 'COMPLETED';
+      const isExceeding = requiresStockCheck && Number.isFinite(parsedQty) && parsedQty > available;
+      const isInvalidQty =
+        !Number.isFinite(parsedQty) ||
+        parsedQty <= 0 ||
+        (requiresStockCheck && available <= 0);
 
       entries.push({
         product,
         qtyStr,
         parsedQty,
+        priceStr,
+        parsedPrice,
+        subtotal,
         available,
         isInvalidQty,
         isExceeding,
+        isInvalidPrice,
       });
     }
     return entries;
-  }, [selectedTransferMap, productByIdMap, selectedSourceStore, productStoreQtyCache]);
+  }, [
+    selectedTransferMap,
+    selectedPriceMap,
+    productByIdMap,
+    selectedSourceLocation,
+    selectedSourceStore,
+    productStoreQtyCache,
+    transferStatus,
+    editingTransferRecord,
+  ]);
 
   const transferSelectionSummary = useMemo(() => {
     let totalUnits = 0;
+    let totalAmount = 0;
     let invalidCount = 0;
     let exceedingCount = 0;
     for (const entry of selectedTransferEntries) {
       if (entry.isExceeding) exceedingCount++;
-      if (entry.isInvalidQty || entry.isExceeding) {
+      if (entry.isInvalidQty || entry.isExceeding || entry.isInvalidPrice) {
         invalidCount++;
       } else {
         totalUnits += entry.parsedQty;
+        totalAmount += entry.subtotal;
       }
     }
+    const shippingNum = Math.max(0, Number(shippingCharges || 0) || 0);
     return {
       selectedCount: selectedTransferEntries.length,
       totalUnits,
+      totalAmount: Math.round(totalAmount * 100) / 100,
+      shippingNum,
+      grandTotal: Math.round((totalAmount + shippingNum) * 100) / 100,
       invalidCount,
       exceedingCount,
     };
-  }, [selectedTransferEntries]);
+  }, [selectedTransferEntries, shippingCharges]);
 
-  // Store transfer logs filtered by date range, deduplicated, and grouped strictly by store
-  const transferMovementsFiltered = useMemo(() => {
-    const rawTransfers = (dbState.movements || []).filter(
-      m =>
-        m.type === 'STORE_TRANSFER' &&
-        (platformAdmin || accessibleShopIdSet.has(m.shopId)) &&
-        isTimestampInDateRange(m.createdAt, transferStartDate, transferEndDate)
+  // Consolidated Transfers List: combines persisted StockTransfers + any legacy STORE_TRANSFER movements grouped by referenceId
+  const allTransfersConsolidated = useMemo(() => {
+    const persisted = (dbState.stockTransfers || []).filter(
+      t => platformAdmin || accessibleShopIdSet.has(t.sourceShopId) || accessibleShopIdSet.has(t.destShopId)
     );
-    return deduplicateStoreTransferMovements(rawTransfers);
+    const persistedIds = new Set(persisted.map(t => t.id));
+
+    // Group any legacy movements (prior to StockTransfer records) cleanly into single consolidated batch transfers
+    const legacyGroups = new Map<string, InventoryMovement[]>();
+    for (const m of dbState.movements || []) {
+      if (m.type !== 'STORE_TRANSFER') continue;
+      if (m.referenceId && persistedIds.has(m.referenceId)) continue;
+      if (!platformAdmin && !accessibleShopIdSet.has(m.shopId)) continue;
+      const gKey = m.referenceId || m.id;
+      const arr = legacyGroups.get(gKey) || [];
+      arr.push(m);
+      legacyGroups.set(gKey, arr);
+    }
+
+    const legacyTransfers: (StockTransfer & { isLegacy?: boolean })[] = [];
+    for (const [refId, mvList] of legacyGroups.entries()) {
+      // Pick deduplicated per product
+      const byProd = new Map<string, InventoryMovement>();
+      for (const m of mvList) {
+        const existing = byProd.get(m.productId);
+        if (!existing || (existing.changeQty > 0 && m.changeQty < 0)) {
+          byProd.set(m.productId, m);
+        }
+      }
+      const uniqueRows = Array.from(byProd.values());
+      if (uniqueRows.length === 0) continue;
+
+      const sample = uniqueRows[0];
+      const st = sample.storeId
+        ? accessibleStores.find(s => s.id === sample.storeId)
+        : undefined;
+      const sh = accessibleShops.find(s => s.id === sample.shopId);
+      const createdIso = sample.createdAt || new Date().toISOString();
+
+      let totalUnits = 0;
+      let totalAmount = 0;
+      const items = uniqueRows.map(m => {
+        const prod = productByIdMap.get(m.productId);
+        const qty = Math.abs(Number(m.changeQty || 0));
+        const unitPrice = Number(prod?.sellingPrice || prod?.purchasePrice || 0);
+        const subtotal = Math.round(qty * unitPrice * 100) / 100;
+        totalUnits += qty;
+        totalAmount += subtotal;
+        return {
+          id: m.id,
+          productId: m.productId,
+          productName: m.productName,
+          variation: prod?.variation,
+          sku: prod?.sku || 'SKU',
+          unit: prod?.unit || 'pcs',
+          quantity: qty,
+          unitPrice,
+          subtotal,
+        };
+      });
+
+      legacyTransfers.push({
+        id: refId,
+        transferNumber: `TRF-LEG-${refId.slice(0, 4).toUpperCase()}`,
+        transferDate: createdIso.slice(0, 10),
+        sourceType: 'STORE',
+        sourceId: sample.storeId || '',
+        sourceName: st?.name || 'Warehouse Store',
+        sourceLocation: st?.location || sh?.address || sh?.name,
+        sourceShopId: st?.shopId || sample.shopId,
+        sourceShopName: sh?.name || sample.shopName,
+        destType: 'SHOP',
+        destId: sample.shopId,
+        destName: `${sh?.name || sample.shopName || 'Shop'} (Shop Floor)`,
+        destLocation: sh?.address || sh?.name,
+        destShopId: sample.shopId,
+        destShopName: sh?.name || sample.shopName,
+        status: 'COMPLETED',
+        shippingCharges: 0,
+        items,
+        totalUnits,
+        totalAmount: Math.round(totalAmount * 100) / 100,
+        createdByUserId: sample.userId,
+        createdByName: sample.userName,
+        createdAt: createdIso,
+        updatedAt: createdIso,
+        isLegacy: true,
+      });
+    }
+
+    return [...persisted, ...legacyTransfers].sort((a, b) => {
+      const dateCmp = (b.transferDate || '').localeCompare(a.transferDate || '');
+      if (dateCmp !== 0) return dateCmp;
+      return (b.createdAt || '').localeCompare(a.createdAt || '');
+    });
   }, [
+    dbState.stockTransfers,
     dbState.movements,
     platformAdmin,
     accessibleShopIdSet,
-    transferStartDate,
-    transferEndDate,
+    accessibleStores,
+    accessibleShops,
+    productByIdMap,
   ]);
 
-  const transferLogsByStore = useMemo(() => {
-    const storeMap = new Map<string, Store>();
-    for (const st of accessibleStores) {
-      storeMap.set(st.id, st);
-    }
-
-    const grouped = new Map<string, InventoryMovement[]>();
-    for (const m of transferMovementsFiltered) {
-      const sid = m.storeId && storeMap.has(m.storeId) ? m.storeId : '__UNASSIGNED__';
-      const arr = grouped.get(sid) || [];
-      arr.push(m);
-      grouped.set(sid, arr);
-    }
-
-    const warehouseStores = accessibleStores
-      .filter(st => !st.isShopFloor)
-      .sort((a, b) => {
-        if (a.status !== b.status) return a.status === 'ACTIVE' ? -1 : 1;
-        return (a.createdAt || '').localeCompare(b.createdAt || '') || a.name.localeCompare(b.name);
-      });
-
-    const groups: {
-      storeId: string;
-      store?: Store;
-      title: string;
-      shopName: string;
-      movements: InventoryMovement[];
-      totalUnits: number;
-    }[] = [];
-
-    const seenStoreIds = new Set<string>();
-    for (const st of warehouseStores) {
-      seenStoreIds.add(st.id);
-      const list = grouped.get(st.id) || [];
-      const shopName = accessibleShops.find(s => s.id === st.shopId)?.name || 'Shop';
-      groups.push({
-        storeId: st.id,
-        store: st,
-        title: `${st.name} Transferred`,
-        shopName,
-        movements: list,
-        totalUnits: list.reduce((sum, m) => sum + Math.abs(Number(m.changeQty || 0)), 0),
-      });
-    }
-
-    // Include any non-warehouse store or unassigned transfers if present
-    for (const [sid, list] of grouped.entries()) {
-      if (seenStoreIds.has(sid)) continue;
-      const st = storeMap.get(sid);
-      const shopName = st
-        ? accessibleShops.find(s => s.id === st.shopId)?.name || 'Shop'
-        : 'All Shops';
-      groups.push({
-        storeId: sid,
-        store: st,
-        title: st ? `${st.name} Transferred` : 'Other Store Transferred',
-        shopName,
-        movements: list,
-        totalUnits: list.reduce((sum, m) => sum + Math.abs(Number(m.changeQty || 0)), 0),
-      });
-    }
-
-    // Put stores with transfers in the selected date window first
-    return groups.sort((a, b) => {
-      if ((a.movements.length > 0) !== (b.movements.length > 0)) {
-        return a.movements.length > 0 ? -1 : 1;
+  const filteredTransferList = useMemo(() => {
+    const q = listSearchQuery.trim().toLowerCase();
+    return allTransfersConsolidated.filter(t => {
+      if (!isYMDInDateRange(t.transferDate || t.createdAt, transferStartDate, transferEndDate)) {
+        return false;
       }
-      return 0;
+      if (listLocationFilter !== 'ALL') {
+        if (
+          t.sourceId !== listLocationFilter &&
+          t.destId !== listLocationFilter &&
+          encodeLocationKey(t.sourceType, t.sourceId) !== listLocationFilter &&
+          encodeLocationKey(t.destType, t.destId) !== listLocationFilter
+        ) {
+          return false;
+        }
+      }
+      if (q) {
+        const hitHeader =
+          (t.transferNumber || '').toLowerCase().includes(q) ||
+          (t.sourceName || '').toLowerCase().includes(q) ||
+          (t.destName || '').toLowerCase().includes(q) ||
+          (t.notice || '').toLowerCase().includes(q);
+        const hitItem = (t.items || []).some(
+          it =>
+            it.productName.toLowerCase().includes(q) ||
+            (it.sku || '').toLowerCase().includes(q)
+        );
+        if (!hitHeader && !hitItem) return false;
+      }
+      return true;
     });
-  }, [transferMovementsFiltered, accessibleStores, accessibleShops]);
+  }, [
+    allTransfersConsolidated,
+    transferStartDate,
+    transferEndDate,
+    listLocationFilter,
+    listSearchQuery,
+  ]);
+
+  const viewingTransfer = useMemo(
+    () =>
+      viewingTransferId
+        ? allTransfersConsolidated.find(t => t.id === viewingTransferId)
+        : undefined,
+    [viewingTransferId, allTransfersConsolidated]
+  );
 
   // Summary metrics
   const totalStoreStockUnits = useMemo(() => {
@@ -941,8 +1198,8 @@ export const AdminStores: React.FC = () => {
       if (selectedInventoryStoreId === store.id) {
         setSelectedInventoryStoreId('ALL_COMBINED');
       }
-      if (sourceStoreId === store.id) {
-        setSourceStoreId('');
+      if (sourceLocationKey === encodeLocationKey('STORE', store.id)) {
+        setSourceLocationKey('');
       }
       if (importTargetStoreId === store.id) {
         setImportTargetStoreId('');
@@ -964,35 +1221,113 @@ export const AdminStores: React.FC = () => {
 
   const MAX_BATCH_TRANSFER_PRODUCTS = 1000;
 
-  const handleSourceStoreChange = (nextStoreId: string) => {
-    setSourceStoreId(nextStoreId);
-    const st = activeStores.find(s => s.id === nextStoreId);
-    if (st) {
-      setDestShopId(st.shopId);
+  const openNewTransferForm = (preferredStoreId?: string) => {
+    setEditingTransferId(null);
+    setTransferDate(formatDateYMD(new Date()));
+    if (preferredStoreId && transferableStores.some(s => s.id === preferredStoreId)) {
+      const st = transferableStores.find(s => s.id === preferredStoreId)!;
+      setSourceLocationKey(encodeLocationKey('STORE', st.id));
+      setDestLocationKey(encodeLocationKey('SHOP', st.shopId));
+    } else if (sourceLocationOptions[0]) {
+      const first = sourceLocationOptions[0];
+      setSourceLocationKey(first.key);
+      if (first.type === 'STORE') {
+        setDestLocationKey(encodeLocationKey('SHOP', first.shopId));
+      } else {
+        setDestLocationKey('');
+      }
     }
     setSelectedTransferMap({});
+    setSelectedPriceMap({});
+    setProductSearch('');
+    setTransferVisibleLimit(STORE_PAGE_SIZE);
+    setSelectedQueueFilter('');
+    setSelectedQueueVisibleLimit(STORE_PAGE_SIZE);
+    setBulkTransferQty('');
+    setShippingCharges('');
+    setTransferNotes('');
+    setTransferStatus('COMPLETED');
+    setTransferError('');
+    setTransferProgressPct(null);
+    setActiveSubTab('transfer');
+  };
+
+  const openEditTransferForm = (transfer: StockTransfer & { isLegacy?: boolean }) => {
+    if (transfer.isLegacy) {
+      addToast({
+        type: 'warning',
+        title: 'Legacy Record',
+        description: 'Older pre-voucher transfer history cannot be edited directly. Create a new transfer instead.',
+      });
+      return;
+    }
+    setEditingTransferId(transfer.id);
+    setTransferDate(transfer.transferDate || formatDateYMD(new Date()));
+    setSourceLocationKey(encodeLocationKey(transfer.sourceType, transfer.sourceId));
+    setDestLocationKey(encodeLocationKey(transfer.destType, transfer.destId));
+
+    const qtyMap: Record<string, string> = {};
+    const priceMap: Record<string, string> = {};
+    for (const item of transfer.items || []) {
+      qtyMap[item.productId] = String(item.quantity);
+      priceMap[item.productId] = String(item.unitPrice);
+    }
+    setSelectedTransferMap(qtyMap);
+    setSelectedPriceMap(priceMap);
+    setProductSearch('');
+    setTransferVisibleLimit(STORE_PAGE_SIZE);
+    setSelectedQueueFilter('');
+    setSelectedQueueVisibleLimit(STORE_PAGE_SIZE);
+    setBulkTransferQty('');
+    setShippingCharges(transfer.shippingCharges > 0 ? String(transfer.shippingCharges) : '');
+    setTransferNotes(transfer.notice || '');
+    setTransferStatus(transfer.status);
+    setTransferError('');
+    setTransferProgressPct(null);
+    setActiveSubTab('transfer');
+  };
+
+  const handleSourceLocationChange = (nextKey: string) => {
+    setSourceLocationKey(nextKey);
+    const decoded = decodeLocationKey(nextKey);
+    if (decoded?.type === 'STORE') {
+      const st = transferableStores.find(s => s.id === decoded.id);
+      if (st) {
+        setDestLocationKey(encodeLocationKey('SHOP', st.shopId));
+      }
+    } else if (decoded?.type === 'SHOP') {
+      const firstStore = transferableStores.find(s => s.shopId === decoded.id);
+      setDestLocationKey(firstStore ? encodeLocationKey('STORE', firstStore.id) : '');
+    }
+    setSelectedTransferMap({});
+    setSelectedPriceMap({});
+    setProductSearch('');
     setTransferVisibleLimit(STORE_PAGE_SIZE);
     setSelectedQueueVisibleLimit(STORE_PAGE_SIZE);
     setTransferError('');
   };
 
   const handleToggleTransferProduct = (product: Product) => {
-    const available = selectedSourceStore
-      ? getProductQtyInStore(product, selectedSourceStore)
-      : Number(product.storeStock || 0);
+    const available = getSourceAvailableQty(product);
+    const defaultPrice = String(Number(product.sellingPrice || product.purchasePrice || 0));
 
     setTransferError('');
     setSelectedTransferMap(prev => {
       if (product.id in prev) {
         const next = { ...prev };
         delete next[product.id];
+        setSelectedPriceMap(pm => {
+          const np = { ...pm };
+          delete np[product.id];
+          return np;
+        });
         return next;
       }
-      if (available <= 0) {
+      if (transferStatus === 'COMPLETED' && available <= 0) {
         addToast({
           type: 'warning',
-          title: 'Out of Stock in Store',
-          description: `"${product.name}" currently has 0 units in ${selectedSourceStore?.name || 'this store'}.`,
+          title: 'Out of Stock at Location Source',
+          description: `"${product.name}" currently has 0 units at ${selectedSourceLocation?.name || 'source location'}.`,
         });
         return prev;
       }
@@ -1004,6 +1339,10 @@ export const AdminStores: React.FC = () => {
         });
         return prev;
       }
+      setSelectedPriceMap(pm => ({
+        ...pm,
+        [product.id]: pm[product.id] ?? defaultPrice,
+      }));
       return {
         ...prev,
         [product.id]: '1',
@@ -1019,31 +1358,44 @@ export const AdminStores: React.FC = () => {
     }));
   };
 
+  const handleChangeSelectedTransferPrice = (productId: string, nextVal: string) => {
+    setTransferError('');
+    setSelectedPriceMap(prev => ({
+      ...prev,
+      [productId]: nextVal,
+    }));
+  };
+
   const handleSelectAllMatchingProducts = () => {
     setTransferError('');
-    const stockedMatches = storeScopedProducts.filter(p => {
-      const avail = selectedSourceStore
-        ? getProductQtyInStore(p, selectedSourceStore)
-        : Number(p.storeStock || 0);
-      return avail > 0;
-    });
-    if (stockedMatches.length === 0) return;
+    const eligibleMatches =
+      transferStatus === 'COMPLETED'
+        ? storeScopedProducts.filter(p => getSourceAvailableQty(p) > 0)
+        : storeScopedProducts;
+    if (eligibleMatches.length === 0) return;
 
     let added = 0;
     let hitCap = false;
+    const priceAdditions: Record<string, string> = {};
+
     setSelectedTransferMap(prev => {
       const next = { ...prev };
-      for (const p of stockedMatches) {
+      for (const p of eligibleMatches) {
         if (p.id in next) continue;
         if (Object.keys(next).length >= MAX_BATCH_TRANSFER_PRODUCTS) {
           hitCap = true;
           break;
         }
         next[p.id] = '1';
+        priceAdditions[p.id] = String(Number(p.sellingPrice || p.purchasePrice || 0));
         added++;
       }
       return next;
     });
+
+    if (Object.keys(priceAdditions).length > 0) {
+      setSelectedPriceMap(pm => ({ ...priceAdditions, ...pm }));
+    }
 
     if (hitCap) {
       addToast({
@@ -1062,11 +1414,15 @@ export const AdminStores: React.FC = () => {
 
   const handleDeselectMatchingProducts = () => {
     setTransferError('');
+    const matchedIds = new Set<string>(storeScopedProducts.map(p => p.id));
     setSelectedTransferMap(prev => {
       const next = { ...prev };
-      for (const p of storeScopedProducts) {
-        delete next[p.id];
-      }
+      for (const id of matchedIds) delete next[id];
+      return next;
+    });
+    setSelectedPriceMap(prev => {
+      const next = { ...prev };
+      for (const id of matchedIds) delete next[id];
       return next;
     });
   };
@@ -1082,11 +1438,9 @@ export const AdminStores: React.FC = () => {
       const next: Record<string, string> = {};
       for (const pid of Object.keys(prev)) {
         const prod = productByIdMap.get(pid);
-        const avail =
-          prod && selectedSourceStore
-            ? getProductQtyInStore(prod, selectedSourceStore)
-            : Number(prod?.storeStock || 0);
-        const clamped = avail > 0 ? Math.min(qtyNum, avail) : qtyNum;
+        const avail = prod ? getSourceAvailableQty(prod) : 0;
+        const clamped =
+          transferStatus === 'COMPLETED' && avail > 0 ? Math.min(qtyNum, avail) : qtyNum;
         next[pid] = String(clamped);
       }
       return next;
@@ -1099,26 +1453,31 @@ export const AdminStores: React.FC = () => {
       const next: Record<string, string> = {};
       for (const pid of Object.keys(prev)) {
         const prod = productByIdMap.get(pid);
-        const avail =
-          prod && selectedSourceStore
-            ? getProductQtyInStore(prod, selectedSourceStore)
-            : Number(prod?.storeStock || 0);
+        const avail = prod ? getSourceAvailableQty(prod) : 0;
         next[pid] = String(Math.max(1, avail));
       }
       return next;
     });
   };
 
-  const handleSubmitTransfer = (e: React.FormEvent) => {
+  const handleSubmitTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (transferProgressPct !== null) return;
     setTransferError('');
 
-    if (!effectiveSourceStoreId) {
-      setTransferError('Please select a source store.');
+    const srcLoc = decodeLocationKey(effectiveSourceLocationKey);
+    const dstLoc = decodeLocationKey(effectiveDestLocationKey);
+
+    if (!transferDate) {
+      setTransferError('Please select a transfer date.');
       return;
     }
-    if (!effectiveDestShopId) {
-      setTransferError('Please select a destination shop.');
+    if (!srcLoc) {
+      setTransferError('Please select a Location Source.');
+      return;
+    }
+    if (!dstLoc) {
+      setTransferError('Please select a Location Destination.');
       return;
     }
     if (selectedTransferEntries.length === 0) {
@@ -1133,12 +1492,14 @@ export const AdminStores: React.FC = () => {
     }
 
     const firstBad = selectedTransferEntries.find(
-      entry => entry.isInvalidQty || entry.isExceeding
+      entry => entry.isInvalidQty || entry.isExceeding || entry.isInvalidPrice
     );
     if (firstBad) {
-      if (firstBad.isExceeding) {
+      if (firstBad.isInvalidPrice) {
+        setTransferError(`Enter a valid price (0 or greater) for "${firstBad.product.name}".`);
+      } else if (firstBad.isExceeding) {
         setTransferError(
-          `Quantity for "${firstBad.product.name}" (${firstBad.parsedQty}) exceeds available store stock (${firstBad.available} ${firstBad.product.unit || 'pcs'}).`
+          `Quantity for "${firstBad.product.name}" (${firstBad.parsedQty}) exceeds available stock (${firstBad.available} ${firstBad.product.unit || 'pcs'}).`
         );
       } else {
         setTransferError(
@@ -1148,44 +1509,105 @@ export const AdminStores: React.FC = () => {
       return;
     }
 
-    const items = selectedTransferEntries.map(entry => ({
-      productId: entry.product.id,
-      quantity: entry.parsedQty,
-    }));
+    const parsedShipping = Number(shippingCharges || 0);
+    if (!Number.isFinite(parsedShipping) || parsedShipping < 0) {
+      setTransferError('Shipping charges must be 0 or greater.');
+      return;
+    }
 
-    const res = StoreService.transferBatchStoreToShop(
-      {
-        storeId: effectiveSourceStoreId,
-        shopId: effectiveDestShopId,
-        items,
-        notes: transferNotes.trim() || undefined,
-      },
-      currentUser
-    );
+    // Brief visual progress sequence on Transfer click
+    setTransferProgressPct(22);
+    await new Promise(resolve => window.setTimeout(resolve, 140));
+    setTransferProgressPct(68);
+    await new Promise(resolve => window.setTimeout(resolve, 160));
 
-    if (res.success) {
-      const destShopName =
-        accessibleShops.find(s => s.id === effectiveDestShopId)?.name || 'Shop Floor';
-      const movedCount = res.transferredCount || items.length;
-      const movedUnits = res.totalUnits || transferSelectionSummary.totalUnits;
+    const payload = {
+      transferDate,
+      sourceType: srcLoc.type,
+      sourceId: srcLoc.id,
+      destType: dstLoc.type,
+      destId: dstLoc.id,
+      items: selectedTransferEntries.map(entry => ({
+        productId: entry.product.id,
+        quantity: entry.parsedQty,
+        unitPrice: entry.parsedPrice,
+      })),
+      shippingCharges: parsedShipping,
+      notice: transferNotes.trim() || undefined,
+      status: transferStatus,
+    };
+
+    const res = editingTransferId
+      ? StoreService.updateStockTransfer(editingTransferId, payload, currentUser)
+      : StoreService.executeStockTransfer(payload, currentUser);
+
+    if (res.success && res.transfer) {
+      setTransferProgressPct(100);
+      await new Promise(resolve => window.setTimeout(resolve, 180));
+
+      const t = res.transfer;
       addToast({
         type: 'success',
-        title:
-          movedCount === 1
-            ? 'Stock Transferred to Shop Floor'
-            : `${movedCount.toLocaleString()} Products Transferred`,
-        description:
-          movedCount === 1
-            ? `Moved ${movedUnits.toLocaleString()} ${selectedTransferEntries[0].product.unit || 'pcs'} of "${selectedTransferEntries[0].product.name}" to ${destShopName}.`
-            : `Moved ${movedUnits.toLocaleString()} total units across ${movedCount.toLocaleString()} products to ${destShopName}.`,
+        title: editingTransferId
+          ? 'Stock Transfer Updated'
+          : t.status === 'COMPLETED'
+            ? `${t.items.length.toLocaleString()} Product${t.items.length === 1 ? '' : 's'} Transferred`
+            : 'Incomplete Transfer Saved',
+        description: `${t.sourceName} → ${t.destName} (${t.totalUnits.toLocaleString()} units · ${formatCurrency(t.totalAmount, settings.currencySymbol)})`,
       });
+
+      const wasEditing = Boolean(editingTransferId);
+      setEditingTransferId(null);
       setSelectedTransferMap({});
+      setSelectedPriceMap({});
+      setProductSearch('');
       setBulkTransferQty('');
       setSelectedQueueFilter('');
+      setShippingCharges('');
       setTransferNotes('');
       setTransferError('');
+      setTransferProgressPct(null);
+
+      if (wasEditing) {
+        setActiveSubTab('list');
+      }
     } else {
+      setTransferProgressPct(null);
       setTransferError(res.error || 'Transfer failed.');
+    }
+  };
+
+  const handleConfirmDeleteTransfer = (transfer: StockTransfer & { isLegacy?: boolean }) => {
+    if (transfer.isLegacy) {
+      addToast({
+        type: 'warning',
+        title: 'Legacy Transfer History',
+        description: 'Legacy inventory log entries from earlier versions cannot be deleted here.',
+      });
+      setDeletingTransfer(null);
+      return;
+    }
+
+    const res = StoreService.deleteStockTransfer(transfer.id, currentUser);
+    if (res.success) {
+      addToast({
+        type: 'success',
+        title: 'Transfer Deleted',
+        description: `${transfer.transferNumber} removed${
+          transfer.status === 'COMPLETED' ? ' and stock restored to source location' : ''
+        }.`,
+      });
+      if (viewingTransferId === transfer.id) {
+        setViewingTransferId(null);
+        setActiveSubTab('list');
+      }
+      setDeletingTransfer(null);
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Delete Failed',
+        description: res.error || 'Could not delete transfer record.',
+      });
     }
   };
 
@@ -1655,15 +2077,24 @@ export const AdminStores: React.FC = () => {
     }
 
     const availableHere = getProductQtyInStore(product, bestStore);
-    setSourceStoreId(bestStore.id);
-    setDestShopId(product.shopId);
+    setEditingTransferId(null);
+    setTransferDate(formatDateYMD(new Date()));
+    setSourceLocationKey(encodeLocationKey('STORE', bestStore.id));
+    setDestLocationKey(encodeLocationKey('SHOP', product.shopId));
     setSelectedTransferMap({
       [product.id]: availableHere > 0 ? '1' : '0',
     });
+    setSelectedPriceMap({
+      [product.id]: String(Number(product.sellingPrice || product.purchasePrice || 0)),
+    });
+    setShippingCharges('');
+    setTransferNotes('');
+    setTransferStatus('COMPLETED');
     setProductSearch('');
     setTransferVisibleLimit(STORE_PAGE_SIZE);
     setSelectedQueueVisibleLimit(STORE_PAGE_SIZE);
     setTransferError('');
+    setTransferProgressPct(null);
     setActionProduct(null);
     setActionStoreContext(null);
     setActiveSubTab('transfer');
@@ -1695,123 +2126,139 @@ export const AdminStores: React.FC = () => {
     }
   };
 
+  const isFullPageTransferWorkspace =
+    activeSubTab === 'transfer' ||
+    activeSubTab === 'list' ||
+    activeSubTab === 'transfer_view';
+
   return (
     <div
       id="admin-stores-view"
       className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-6"
     >
-      {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
-        <div>
-          <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
-            Stores &amp; Transfers
-          </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Manage warehouse stores assigned to shops and transfer stock onto the shop floor
-          </p>
-        </div>
+      {/* Standard Stores / Inventory Header & Overview KPIs */}
+      {!isFullPageTransferWorkspace && (
+        <>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
+            <div>
+              <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+                Stores &amp; Transfers
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Manage warehouse stores assigned to shops and transfer stock across stores &amp; shops
+              </p>
+            </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs overflow-x-auto">
-            <button
-              type="button"
-              onClick={() => setActiveSubTab('stores')}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
-                activeSubTab === 'stores'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Warehouse className="w-3.5 h-3.5" />
-              <span>Stores ({accessibleStores.length})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveSubTab('inventory')}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
-                activeSubTab === 'inventory'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Package className="w-3.5 h-3.5" />
-              <span>Inventory</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveSubTab('transfer')}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
-                activeSubTab === 'transfer'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <ArrowRightLeft className="w-3.5 h-3.5" />
-              <span>Transfer Stock</span>
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs overflow-x-auto">
+                <button
+                  type="button"
+                  onClick={() => setActiveSubTab('stores')}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
+                    activeSubTab === 'stores'
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Warehouse className="w-3.5 h-3.5" />
+                  <span>Stores ({accessibleStores.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveSubTab('inventory')}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
+                    activeSubTab === 'inventory'
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Package className="w-3.5 h-3.5" />
+                  <span>Inventory</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openNewTransferForm()}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap text-slate-300 hover:text-white hover:bg-blue-600/20"
+                >
+                  <ArrowRightLeft className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Transfer Stock</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setListLocationFilter('ALL');
+                    setActiveSubTab('list');
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap text-slate-300 hover:text-white hover:bg-emerald-600/20"
+                >
+                  <ClipboardList className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>List ({allTransfersConsolidated.length})</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleManualRefreshStores}
+                disabled={isRefreshingStores}
+                title="Refresh stores from database"
+                className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-xs transition disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${isRefreshingStores ? 'animate-spin' : ''}`} />
+                <span>{isRefreshingStores ? 'Refreshing...' : 'Refresh'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => openImportModal()}
+                disabled={activeStores.length === 0}
+                className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-semibold text-xs transition disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Import Excel</span>
+              </button>
+
+              <button
+                id="create-store-btn"
+                type="button"
+                onClick={openCreateStoreModal}
+                className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold text-xs transition"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Create Store</span>
+              </button>
+            </div>
           </div>
 
-          <button
-            type="button"
-            onClick={handleManualRefreshStores}
-            disabled={isRefreshingStores}
-            title="Refresh stores from database"
-            className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-xs transition disabled:opacity-50"
-          >
-            <RefreshCw className={`w-4 h-4 ${isRefreshingStores ? 'animate-spin' : ''}`} />
-            <span>{isRefreshingStores ? 'Refreshing...' : 'Refresh'}</span>
-          </button>
+          {/* Overview Metrics Row */}
+          <div className="grid grid-cols-3 gap-2.5 sm:gap-4 mb-5">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4">
+              <div className="text-[11px] text-slate-400 font-medium">Active Stores</div>
+              <div className="text-lg sm:text-2xl font-bold text-white font-mono tabular-nums mt-1">
+                {activeStores.length}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-0.5">
+                {accessibleShops.length} shop{accessibleShops.length === 1 ? '' : 's'}
+              </div>
+            </div>
 
-          <button
-            type="button"
-            onClick={() => openImportModal()}
-            disabled={activeStores.length === 0}
-            className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-semibold text-xs transition disabled:opacity-45 disabled:cursor-not-allowed"
-          >
-            <Upload className="w-4 h-4" />
-            <span>Import Excel</span>
-          </button>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4">
+              <div className="text-[11px] text-slate-400 font-medium">Stocked SKUs</div>
+              <div className="text-lg sm:text-2xl font-bold text-white font-mono tabular-nums mt-1">
+                {productsInStoreCount}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-0.5">In warehouse</div>
+            </div>
 
-          <button
-            id="create-store-btn"
-            type="button"
-            onClick={openCreateStoreModal}
-            className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold text-xs transition"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Create Store</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Overview Metrics Row */}
-      <div className="grid grid-cols-3 gap-2.5 sm:gap-4 mb-5">
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4">
-          <div className="text-[11px] text-slate-400 font-medium">Active Stores</div>
-          <div className="text-lg sm:text-2xl font-bold text-white font-mono tabular-nums mt-1">
-            {activeStores.length}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4">
+              <div className="text-[11px] text-slate-400 font-medium">Store Units</div>
+              <div className="text-lg sm:text-2xl font-bold text-blue-400 font-mono tabular-nums mt-1">
+                {totalStoreStockUnits.toLocaleString()}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-0.5">Ready to transfer</div>
+            </div>
           </div>
-          <div className="text-[10px] text-slate-500 mt-0.5">
-            {accessibleShops.length} shop{accessibleShops.length === 1 ? '' : 's'}
-          </div>
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4">
-          <div className="text-[11px] text-slate-400 font-medium">Stocked SKUs</div>
-          <div className="text-lg sm:text-2xl font-bold text-white font-mono tabular-nums mt-1">
-            {productsInStoreCount}
-          </div>
-          <div className="text-[10px] text-slate-500 mt-0.5">In warehouse</div>
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4">
-          <div className="text-[11px] text-slate-400 font-medium">Store Units</div>
-          <div className="text-lg sm:text-2xl font-bold text-blue-400 font-mono tabular-nums mt-1">
-            {totalStoreStockUnits.toLocaleString()}
-          </div>
-          <div className="text-[10px] text-slate-500 mt-0.5">Ready to transfer</div>
-        </div>
-      </div>
+        </>
+      )}
 
       {/* SUB-TAB 1: STORES DIRECTORY */}
       {activeSubTab === 'stores' && (
@@ -1972,17 +2419,27 @@ export const AdminStores: React.FC = () => {
                         <span>Export</span>
                       </button>
                       {isActive && !store.isShopFloor && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handleSourceStoreChange(store.id);
-                            setActiveSubTab('transfer');
-                          }}
-                          className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 font-semibold transition"
-                        >
-                          <ArrowRightLeft className="w-3.5 h-3.5" />
-                          <span>Transfer</span>
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => openNewTransferForm(store.id)}
+                            className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 font-semibold transition"
+                          >
+                            <ArrowRightLeft className="w-3.5 h-3.5" />
+                            <span>Transfer</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setListLocationFilter(store.id);
+                              setActiveSubTab('list');
+                            }}
+                            className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-indigo-600/15 hover:bg-indigo-600/25 text-indigo-300 border border-indigo-500/25 font-semibold transition"
+                          >
+                            <ClipboardList className="w-3.5 h-3.5" />
+                            <span>List</span>
+                          </button>
+                        </>
                       )}
                       <button
                         type="button"
@@ -2488,15 +2945,54 @@ export const AdminStores: React.FC = () => {
         </div>
       )}
 
-      {/* SUB-TAB 3: TRANSFER STOCK (STORE -> SHOP FLOOR) */}
+      {/* SUB-TAB 3: FULL-PAGE STOCK TRANSFER FORM */}
       {activeSubTab === 'transfer' && (
-        <div className="space-y-5">
-          {transferableStores.length === 0 ? (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl py-12 px-4 text-center">
+        <div className="space-y-4 max-w-5xl mx-auto">
+          {/* Full-Page Header */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingTransferId(null);
+                  setActiveSubTab('stores');
+                }}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+                aria-label="Back to Stores"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="min-w-0">
+                <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                  {editingTransferId ? 'Edit Stock Transfer' : 'Transfer Stock'}
+                </h2>
+                <p className="text-xs text-slate-400 truncate">
+                  Supports Store → Shop, Store → Store (same shop), and Shop → Store transfers
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setListLocationFilter('ALL');
+                setActiveSubTab('list');
+              }}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 text-xs font-semibold transition"
+            >
+              <ClipboardList className="w-4 h-4" />
+              <span>List ({allTransfersConsolidated.length})</span>
+            </button>
+          </div>
+
+          {sourceLocationOptions.length === 0 ? (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl py-12 px-4 text-center">
               <Warehouse className="w-10 h-10 mx-auto text-slate-600 mb-2.5" />
-              <h3 className="text-sm font-semibold text-white">No Active Warehouse Stores Available</h3>
+              <h3 className="text-sm font-semibold text-white">
+                No Active Stores Available for Transfer
+              </h3>
               <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                Create an active warehouse store (not a POS floor store) before transferring stock onto the shop floor.
+                Create at least one active warehouse store assigned to a shop before transferring stock.
               </p>
               <button
                 type="button"
@@ -2508,71 +3004,158 @@ export const AdminStores: React.FC = () => {
               </button>
             </div>
           ) : (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
-              <div className="flex items-center gap-2 pb-3 border-b border-slate-800 mb-4">
-                <ArrowRightLeft className="w-4 h-4 text-blue-400" />
-                <h3 className="text-sm font-bold text-white">
-                  Transfer Stock from Store to Shop Floor
-                </h3>
-              </div>
-
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl">
               {transferError && (
-                <div className="mb-4 p-3 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                <div className="mb-4 p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <span>{transferError}</span>
                 </div>
               )}
 
-              <form onSubmit={handleSubmitTransfer} className="space-y-4 text-xs">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                  {/* 1. Source Store */}
+              <form onSubmit={handleSubmitTransfer} className="space-y-5 text-xs">
+                {/* 1. Select Date (opens calendar, allows past dates) + Status */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   <div>
-                    <label className="block text-slate-300 font-medium mb-1">
-                      Select Store (Source) *
+                    <label className="block text-slate-300 font-semibold mb-1.5">
+                      Select Date *
                     </label>
-                    <select
-                      value={effectiveSourceStoreId}
-                      onChange={e => handleSourceStoreChange(e.target.value)}
-                      required
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    <div
+                      onClick={() => {
+                        const input = transferDateInputRef.current;
+                        if (input) {
+                          input.focus();
+                          const pickerFn = (input as HTMLInputElement & { showPicker?: () => void })
+                            .showPicker;
+                          if (typeof pickerFn === 'function') {
+                            try {
+                              pickerFn.call(input);
+                            } catch {
+                              // fallback to native click
+                            }
+                          }
+                        }
+                      }}
+                      className="relative cursor-pointer"
                     >
-                      {transferableStores.map(st => {
-                        const sh = accessibleShops.find(s => s.id === st.shopId);
-                        return (
-                          <option key={st.id} value={st.id}>
-                            {st.name} ({sh?.name || 'Shop'})
-                            {st.location ? ` · ${st.location}` : ''}
-                          </option>
-                        );
-                      })}
-                    </select>
+                      <Calendar className="w-4 h-4 text-blue-400 absolute left-3 top-2.5 pointer-events-none" />
+                      <input
+                        ref={transferDateInputRef}
+                        type="date"
+                        required
+                        value={transferDate}
+                        onChange={e => {
+                          setTransferDate(e.target.value);
+                          setTransferError('');
+                        }}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-white text-xs font-mono cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
                   </div>
 
-                  {/* 2. Destination Shop */}
                   <div>
-                    <label className="block text-slate-300 font-medium mb-1">
-                      Select Destination Shop *
+                    <label className="block text-slate-300 font-semibold mb-1.5">
+                      Transfer Status *
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setTransferStatus('COMPLETED')}
+                        className={`py-2.5 px-3 rounded-xl border text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
+                          transferStatus === 'COMPLETED'
+                            ? 'bg-emerald-600/25 border-emerald-500 text-emerald-200'
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Completed</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTransferStatus('NOT_COMPLETED')}
+                        className={`py-2.5 px-3 rounded-xl border text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
+                          transferStatus === 'NOT_COMPLETED'
+                            ? 'bg-amber-500/20 border-amber-500 text-amber-200'
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        <span>Not Complete</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Location Source & Location Destination */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1.5">
+                      Location Source *
                     </label>
                     <select
-                      value={effectiveDestShopId}
-                      onChange={e => setDestShopId(e.target.value)}
+                      value={effectiveSourceLocationKey}
+                      onChange={e => handleSourceLocationChange(e.target.value)}
                       required
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                     >
-                      {accessibleShops.map(sh => (
-                        <option key={sh.id} value={sh.id}>
-                          {sh.name} ({sh.code || 'UNIT'})
+                      {sourceLocationOptions.map(opt => (
+                        <option key={opt.key} value={opt.key}>
+                          {opt.label}
                         </option>
                       ))}
                     </select>
                   </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1.5">
+                      Location Destination *
+                    </label>
+                    <select
+                      value={effectiveDestLocationKey}
+                      onChange={e => {
+                        setDestLocationKey(e.target.value);
+                        setTransferError('');
+                      }}
+                      required
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      {destLocationOptions.length === 0 ? (
+                        <option value="">No valid destination available</option>
+                      ) : (
+                        destLocationOptions.map(opt => (
+                          <option key={opt.key} value={opt.key}>
+                            {opt.label}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
                 </div>
 
-                {/* 3. Live Search & Multi-Select Checkboxes (1 to 1,000 products at once) */}
-                <div className="space-y-3">
+                {selectedSourceLocation && selectedDestLocation && (
+                  <div className="px-3.5 py-2.5 rounded-xl bg-blue-950/25 border border-blue-500/25 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <span className="text-slate-300">
+                      Route:{' '}
+                      <strong className="text-white">{selectedSourceLocation.name}</strong>
+                      <span className="mx-2 text-blue-400">→</span>
+                      <strong className="text-emerald-300">{selectedDestLocation.name}</strong>
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 font-semibold">
+                      {selectedSourceLocation.type === 'STORE' &&
+                      selectedDestLocation.type === 'SHOP'
+                        ? 'Store → Shop'
+                        : selectedSourceLocation.type === 'STORE' &&
+                            selectedDestLocation.type === 'STORE'
+                          ? 'Store → Store'
+                          : 'Shop → Store'}
+                    </span>
+                  </div>
+                )}
+
+                {/* 3. Search-Only Product Selector (NO initial full list — appears ONLY when user searches) */}
+                <div className="space-y-2.5">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <label className="block text-slate-300 font-medium">
-                      Search &amp; Select Products to Transfer *
+                    <label className="block text-slate-300 font-semibold">
+                      Search Products to Transfer *
                     </label>
                     <div className="flex items-center gap-2">
                       <button
@@ -2590,14 +3173,14 @@ export const AdminStores: React.FC = () => {
                         {transferStockedOnly ? 'In Stock Only' : 'Include Out-of-Stock'}
                       </button>
                       <span className="text-[11px] font-mono tabular-nums text-blue-300">
-                        {transferSelectionSummary.selectedCount.toLocaleString()} / 1,000 selected
+                        {transferSelectionSummary.selectedCount.toLocaleString()} / 1,000 ticked
                       </span>
                     </div>
                   </div>
 
                   {/* Single-letter responsive search bar */}
                   <div className="relative">
-                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
                     <input
                       type="text"
                       value={productSearch}
@@ -2605,7 +3188,7 @@ export const AdminStores: React.FC = () => {
                         setProductSearch(e.target.value);
                         setTransferVisibleLimit(STORE_PAGE_SIZE);
                       }}
-                      placeholder="Type 1 or more letters to search by name, SKU, variation, or barcode..."
+                      placeholder="Type 1 or more letters to search by product name, SKU, variation, or barcode..."
                       className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
                     {productSearch && (
@@ -2616,175 +3199,139 @@ export const AdminStores: React.FC = () => {
                           setTransferVisibleLimit(STORE_PAGE_SIZE);
                         }}
                         aria-label="Clear search"
-                        className="absolute right-2.5 top-2 p-0.5 rounded text-slate-400 hover:text-white"
+                        className="absolute right-2.5 top-2.5 p-0.5 rounded text-slate-400 hover:text-white"
                       >
                         <X className="w-4 h-4" />
                       </button>
                     )}
                   </div>
 
-                  {/* Search Results Checklist */}
-                  <div className="bg-slate-950/70 border border-slate-800 rounded-xl overflow-hidden">
-                    <div className="px-3 py-2 bg-slate-950 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                      <span className="text-slate-400">
-                        {productSearch.trim() ? (
-                          <>
-                            Found <strong className="text-white">{storeScopedProducts.length.toLocaleString()}</strong> match
-                            {storeScopedProducts.length === 1 ? '' : 'es'} for &ldquo;{productSearch.trim()}&rdquo;
-                          </>
-                        ) : (
-                          <>
-                            Showing <strong className="text-white">{storeScopedProducts.length.toLocaleString()}</strong> product
-                            {storeScopedProducts.length === 1 ? '' : 's'} in {selectedSourceStore?.name || 'store'}
-                          </>
-                        )}
+                  {/* Matching Results List — strictly shown ONLY when productSearch has input */}
+                  {!productSearch.trim() ? (
+                    <p className="text-[11px] text-slate-500 px-1">
+                      Search above by product name or SKU to view and tick items from{' '}
+                      <span className="text-slate-300">
+                        {selectedSourceLocation?.name || 'Location Source'}
                       </span>
+                      . Ticked products appear arranged below.
+                    </p>
+                  ) : (
+                    <div className="bg-slate-950/80 border border-slate-800 rounded-xl overflow-hidden">
+                      <div className="px-3 py-2 bg-slate-950 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                        <span className="text-slate-400">
+                          Found{' '}
+                          <strong className="text-white">
+                            {storeScopedProducts.length.toLocaleString()}
+                          </strong>{' '}
+                          match{storeScopedProducts.length === 1 ? '' : 'es'} for &ldquo;
+                          {productSearch.trim()}&rdquo;
+                        </span>
 
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={handleSelectAllMatchingProducts}
-                          disabled={storeScopedProducts.length === 0}
-                          className="px-2.5 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 text-blue-300 font-semibold transition disabled:opacity-40"
-                        >
-                          Tick Matching
-                        </button>
-                        {storeScopedProducts.some(p => p.id in selectedTransferMap) && (
+                        <div className="flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={handleDeselectMatchingProducts}
-                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+                            onClick={handleSelectAllMatchingProducts}
+                            disabled={storeScopedProducts.length === 0}
+                            className="px-2.5 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 text-blue-300 font-semibold transition disabled:opacity-40"
                           >
-                            Untick Matching
+                            Tick Matching
                           </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {storeScopedProducts.length === 0 ? (
-                      <div className="py-8 px-4 text-center text-slate-500 text-xs">
-                        {productSearch.trim()
-                          ? `No products matching "${productSearch.trim()}" in ${selectedSourceStore?.name || 'this store'}.`
-                          : `No stocked products available in ${selectedSourceStore?.name || 'this store'}.`}
-                      </div>
-                    ) : (
-                      <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/70">
-                        {storeScopedProducts.slice(0, transferVisibleLimit).map(p => {
-                          const qtyHere = selectedSourceStore
-                            ? getProductQtyInStore(p, selectedSourceStore)
-                            : Number(p.storeStock || 0);
-                          const isChecked = p.id in selectedTransferMap;
-                          const enteredStr = selectedTransferMap[p.id] ?? '';
-                          const enteredNum = Number(enteredStr);
-                          const rowExceeds =
-                            isChecked && Number.isFinite(enteredNum) && enteredNum > qtyHere;
-                          const rowInvalid =
-                            isChecked && (!Number.isFinite(enteredNum) || enteredNum <= 0);
-
-                          return (
-                            <div
-                              key={p.id}
-                              onClick={() => handleToggleTransferProduct(p)}
-                              className={`px-3 py-2.5 flex items-center justify-between gap-2.5 cursor-pointer transition ${
-                                isChecked
-                                  ? 'bg-blue-600/10 hover:bg-blue-600/15'
-                                  : qtyHere <= 0
-                                    ? 'opacity-55 hover:bg-slate-900/60'
-                                    : 'hover:bg-slate-900/80'
-                              }`}
+                          {storeScopedProducts.some(p => p.id in selectedTransferMap) && (
+                            <button
+                              type="button"
+                              onClick={handleDeselectMatchingProducts}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
                             >
-                              <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                                <input
-                                  type="checkbox"
-                                  checked={isChecked}
-                                  disabled={!isChecked && qtyHere <= 0}
-                                  onChange={() => {}}
-                                  onClick={e => {
-                                    e.stopPropagation();
-                                    handleToggleTransferProduct(p);
-                                  }}
-                                  className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500 shrink-0 cursor-pointer"
-                                />
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    <span className="font-semibold text-white truncate">
-                                      {p.name}
-                                    </span>
-                                    {p.variation && (
-                                      <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[10px]">
-                                        {p.variation}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">
-                                    SKU: {p.sku} · Store:{' '}
-                                    <strong className={qtyHere > 0 ? 'text-blue-300' : 'text-rose-400'}>
-                                      {qtyHere.toLocaleString()} {p.unit}
-                                    </strong>{' '}
-                                    · Floor: {Number(p.currentStock || 0).toLocaleString()} {p.unit}
-                                  </div>
-                                </div>
-                              </div>
+                              Untick Matching
+                            </button>
+                          )}
+                        </div>
+                      </div>
 
-                              {isChecked ? (
-                                <div
-                                  onClick={e => e.stopPropagation()}
-                                  className="flex items-center gap-1.5 shrink-0"
-                                >
+                      {storeScopedProducts.length === 0 ? (
+                        <div className="py-6 px-4 text-center text-slate-500 text-xs">
+                          No products matching &ldquo;{productSearch.trim()}&rdquo; in{' '}
+                          {selectedSourceLocation?.name || 'this source location'}.
+                        </div>
+                      ) : (
+                        <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/70">
+                          {storeScopedProducts.slice(0, transferVisibleLimit).map(p => {
+                            const qtyHere = getSourceAvailableQty(p);
+                            const isChecked = p.id in selectedTransferMap;
+                            const disabledTick =
+                              !isChecked && transferStatus === 'COMPLETED' && qtyHere <= 0;
+
+                            return (
+                              <div
+                                key={p.id}
+                                onClick={() => handleToggleTransferProduct(p)}
+                                className={`px-3 py-2.5 flex items-center justify-between gap-2.5 cursor-pointer transition ${
+                                  isChecked
+                                    ? 'bg-blue-600/15 hover:bg-blue-600/20'
+                                    : disabledTick
+                                      ? 'opacity-55 hover:bg-slate-900/60'
+                                      : 'hover:bg-slate-900/80'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0 flex-1">
                                   <input
-                                    type="number"
-                                    min="1"
-                                    max={qtyHere > 0 ? qtyHere : undefined}
-                                    inputMode="numeric"
-                                    value={enteredStr}
-                                    onChange={e =>
-                                      handleChangeSelectedTransferQty(p.id, e.target.value)
-                                    }
-                                    aria-label={`Transfer quantity for ${p.name}`}
-                                    className={`w-20 bg-slate-900 border rounded-lg px-2 py-1.5 text-right text-xs font-mono text-white focus:outline-none focus:ring-1 ${
-                                      rowExceeds || rowInvalid
-                                        ? 'border-rose-500 focus:ring-rose-500'
-                                        : 'border-blue-500/60 focus:ring-blue-500'
-                                    }`}
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    disabled={disabledTick}
+                                    onChange={() => {}}
+                                    onClick={e => {
+                                      e.stopPropagation();
+                                      handleToggleTransferProduct(p);
+                                    }}
+                                    className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500 shrink-0 cursor-pointer"
                                   />
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleChangeSelectedTransferQty(p.id, String(qtyHere))
-                                    }
-                                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-semibold text-blue-300"
-                                  >
-                                    Max
-                                  </button>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="font-semibold text-white truncate">
+                                        {p.name}
+                                      </span>
+                                      {p.variation && (
+                                        <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[10px]">
+                                          {p.variation}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">
+                                      SKU: {p.sku} · Avail:{' '}
+                                      <strong
+                                        className={qtyHere > 0 ? 'text-blue-300' : 'text-rose-400'}
+                                      >
+                                        {qtyHere.toLocaleString()} {p.unit}
+                                      </strong>{' '}
+                                      · Price:{' '}
+                                      {formatCurrency(
+                                        Number(p.sellingPrice || p.purchasePrice || 0),
+                                        settings.currencySymbol
+                                      )}
+                                    </div>
+                                  </div>
                                 </div>
-                              ) : (
-                                <span className="text-[10px] font-mono text-slate-500 shrink-0">
-                                  {qtyHere > 0 ? `${qtyHere.toLocaleString()} avail` : '0 avail'}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })}
 
-                        {storeScopedProducts.length > STORE_PAGE_SIZE && (
-                          <div className="p-2.5 bg-slate-950 border-t border-slate-800/80 space-y-1.5">
-                            <div className="text-[10px] text-slate-500 text-center">
-                              Showing{' '}
-                              <span className="text-slate-300 font-semibold">
-                                {Math.min(transferVisibleLimit, storeScopedProducts.length).toLocaleString()}
-                              </span>{' '}
-                              of{' '}
-                              <span className="text-slate-300 font-semibold">
-                                {storeScopedProducts.length.toLocaleString()}
-                              </span>{' '}
-                              products
-                            </div>
-                            <div className="flex items-center gap-2">
+                                <span
+                                  className={`text-[10px] font-semibold px-2 py-0.5 rounded shrink-0 ${
+                                    isChecked
+                                      ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                                      : 'bg-slate-900 text-slate-400 border border-slate-800'
+                                  }`}
+                                >
+                                  {isChecked ? 'Selected' : 'Tick'}
+                                </span>
+                              </div>
+                            );
+                          })}
+
+                          {storeScopedProducts.length > STORE_PAGE_SIZE && (
+                            <div className="p-2.5 bg-slate-950 border-t border-slate-800/80 flex items-center gap-2">
                               {transferVisibleLimit > STORE_PAGE_SIZE && (
                                 <button
                                   type="button"
                                   onClick={() => setTransferVisibleLimit(STORE_PAGE_SIZE)}
-                                  className="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition"
+                                  className="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold"
                                 >
                                   Show Less
                                 </button>
@@ -2795,7 +3342,7 @@ export const AdminStores: React.FC = () => {
                                   onClick={() =>
                                     setTransferVisibleLimit(v => v + STORE_PAGE_SIZE)
                                   }
-                                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold transition"
+                                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold"
                                 >
                                   <ChevronDown className="w-3.5 h-3.5" />
                                   <span>
@@ -2809,14 +3356,14 @@ export const AdminStores: React.FC = () => {
                                 </button>
                               )}
                             </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
-                {/* 4. Selected Products Queue (Persists across multiple searches, 1 to 1,000 items) */}
+                {/* 4. Downward Selected Products List with Qty, Product Price, Subtotal & Live Total */}
                 {selectedTransferEntries.length > 0 && (() => {
                   const qSel = selectedQueueFilter.trim().toLowerCase();
                   const filteredSelected = qSel
@@ -2829,19 +3376,24 @@ export const AdminStores: React.FC = () => {
                     : selectedTransferEntries;
 
                   return (
-                    <div className="bg-blue-950/20 border border-blue-500/30 rounded-xl overflow-hidden">
-                      <div className="px-3.5 py-2.5 bg-slate-950/90 border-b border-blue-500/20 flex flex-wrap items-center justify-between gap-2">
+                    <div className="bg-slate-950/90 border border-blue-500/35 rounded-xl overflow-hidden">
+                      <div className="px-3.5 py-2.5 bg-blue-950/25 border-b border-blue-500/25 flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <div className="text-xs font-bold text-white">
-                            Selected Products to Transfer ({transferSelectionSummary.selectedCount.toLocaleString()} / 1,000)
+                            Selected Products ({transferSelectionSummary.selectedCount.toLocaleString()} / 1,000)
                           </div>
                           <div className="text-[11px] text-slate-400 font-mono tabular-nums">
-                            Total units: <strong className="text-emerald-400">{transferSelectionSummary.totalUnits.toLocaleString()}</strong>
-                            {transferSelectionSummary.invalidCount > 0 && (
-                              <span className="text-rose-400 ml-2">
-                                · {transferSelectionSummary.invalidCount} need valid qty
-                              </span>
-                            )}
+                            Total Units:{' '}
+                            <strong className="text-blue-300">
+                              {transferSelectionSummary.totalUnits.toLocaleString()}
+                            </strong>{' '}
+                            · Products Total:{' '}
+                            <strong className="text-emerald-400">
+                              {formatCurrency(
+                                transferSelectionSummary.totalAmount,
+                                settings.currencySymbol
+                              )}
+                            </strong>
                           </div>
                         </div>
 
@@ -2874,6 +3426,7 @@ export const AdminStores: React.FC = () => {
                             type="button"
                             onClick={() => {
                               setSelectedTransferMap({});
+                              setSelectedPriceMap({});
                               setSelectedQueueFilter('');
                               setTransferError('');
                             }}
@@ -2884,7 +3437,7 @@ export const AdminStores: React.FC = () => {
                         </div>
                       </div>
 
-                        {selectedTransferEntries.length > 10 && (
+                      {selectedTransferEntries.length > 10 && (
                         <div className="px-3 py-2 border-b border-slate-800/70 bg-slate-950/60">
                           <input
                             type="text"
@@ -2899,405 +3452,890 @@ export const AdminStores: React.FC = () => {
                         </div>
                       )}
 
-                      <div className="max-h-64 overflow-y-auto divide-y divide-slate-800/60">
-                        {filteredSelected.slice(0, selectedQueueVisibleLimit).map(entry => (
+                      <div className="divide-y divide-slate-800/70 max-h-96 overflow-y-auto">
+                        {filteredSelected.slice(0, selectedQueueVisibleLimit).map((entry, idx) => (
                           <div
                             key={entry.product.id}
-                            className="px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                            className="px-3.5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
                           >
                             <div className="min-w-0 flex-1">
-                              <div className="font-semibold text-white truncate">
-                                {entry.product.name}
-                                {entry.product.variation ? ` (${entry.product.variation})` : ''}
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] font-mono text-slate-500">
+                                  #{idx + 1}
+                                </span>
+                                <span className="font-semibold text-white truncate">
+                                  {entry.product.name}
+                                  {entry.product.variation ? ` (${entry.product.variation})` : ''}
+                                </span>
                               </div>
-                              <div className="text-[10px] text-slate-400 font-mono">
-                                {entry.product.sku} · Avail: {entry.available.toLocaleString()}{' '}
-                                {entry.product.unit || 'pcs'}
+                              <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                                {entry.product.sku} · Avail:{' '}
+                                <span
+                                  className={
+                                    entry.available > 0 ? 'text-blue-300' : 'text-amber-300'
+                                  }
+                                >
+                                  {entry.available.toLocaleString()} {entry.product.unit || 'pcs'}
+                                </span>
                               </div>
                             </div>
 
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <input
-                                type="number"
-                                min="1"
-                                max={entry.available > 0 ? entry.available : undefined}
-                                inputMode="numeric"
-                                value={entry.qtyStr}
-                                onChange={e =>
-                                  handleChangeSelectedTransferQty(entry.product.id, e.target.value)
-                                }
-                                className={`w-20 bg-slate-900 border rounded-lg px-2 py-1 text-right text-xs font-mono text-white focus:outline-none focus:ring-1 ${
-                                  entry.isExceeding || entry.isInvalidQty
-                                    ? 'border-rose-500 focus:ring-rose-500'
-                                    : 'border-slate-700 focus:ring-blue-500'
-                                }`}
-                              />
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleChangeSelectedTransferQty(
-                                    entry.product.id,
-                                    String(entry.available)
-                                  )
-                                }
-                                className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-semibold text-blue-300"
-                              >
-                                Max
-                              </button>
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                              {/* Quantity */}
+                              <div className="flex items-center gap-1">
+                                <span className="text-[10px] text-slate-400">Qty:</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max={
+                                    transferStatus === 'COMPLETED' && entry.available > 0
+                                      ? entry.available
+                                      : undefined
+                                  }
+                                  inputMode="numeric"
+                                  value={entry.qtyStr}
+                                  onChange={e =>
+                                    handleChangeSelectedTransferQty(
+                                      entry.product.id,
+                                      e.target.value
+                                    )
+                                  }
+                                  aria-label={`Quantity for ${entry.product.name}`}
+                                  className={`w-16 bg-slate-900 border rounded-lg px-2 py-1 text-right text-xs font-mono text-white focus:outline-none focus:ring-1 ${
+                                    entry.isExceeding || entry.isInvalidQty
+                                      ? 'border-rose-500 focus:ring-rose-500'
+                                      : 'border-slate-700 focus:ring-blue-500'
+                                  }`}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleChangeSelectedTransferQty(
+                                      entry.product.id,
+                                      String(Math.max(1, entry.available))
+                                    )
+                                  }
+                                  className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-semibold text-blue-300"
+                                >
+                                  Max
+                                </button>
+                              </div>
+
+                              {/* Price */}
+                              <div className="flex items-center gap-1">
+                                <span className="text-[10px] text-slate-400">Price:</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="any"
+                                  inputMode="decimal"
+                                  value={entry.priceStr}
+                                  onChange={e =>
+                                    handleChangeSelectedTransferPrice(
+                                      entry.product.id,
+                                      e.target.value
+                                    )
+                                  }
+                                  aria-label={`Price for ${entry.product.name}`}
+                                  className={`w-24 bg-slate-900 border rounded-lg px-2 py-1 text-right text-xs font-mono text-white focus:outline-none focus:ring-1 ${
+                                    entry.isInvalidPrice
+                                      ? 'border-rose-500 focus:ring-rose-500'
+                                      : 'border-slate-700 focus:ring-blue-500'
+                                  }`}
+                                />
+                              </div>
+
+                              {/* Subtotal */}
+                              <div className="min-w-[85px] text-right font-mono tabular-nums">
+                                <div className="text-[9px] text-slate-500 uppercase">Subtotal</div>
+                                <div className="font-bold text-emerald-400">
+                                  {formatCurrency(entry.subtotal, settings.currencySymbol)}
+                                </div>
+                              </div>
+
                               <button
                                 type="button"
                                 aria-label={`Remove ${entry.product.name}`}
-                                onClick={() =>
+                                onClick={() => {
                                   setSelectedTransferMap(prev => {
                                     const next = { ...prev };
                                     delete next[entry.product.id];
                                     return next;
-                                  })
-                                }
-                                className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition"
+                                  });
+                                  setSelectedPriceMap(prev => {
+                                    const next = { ...prev };
+                                    delete next[entry.product.id];
+                                    return next;
+                                  });
+                                }}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition"
                               >
                                 <X className="w-3.5 h-3.5" />
                               </button>
                             </div>
                           </div>
                         ))}
+                      </div>
 
-                        {filteredSelected.length > STORE_PAGE_SIZE && (
-                          <div className="p-2 bg-slate-950/70 flex items-center gap-2">
-                            {selectedQueueVisibleLimit > STORE_PAGE_SIZE && (
-                              <button
-                                type="button"
-                                onClick={() => setSelectedQueueVisibleLimit(STORE_PAGE_SIZE)}
-                                className="flex-1 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold"
-                              >
-                                Show Less
-                              </button>
-                            )}
-                            {filteredSelected.length > selectedQueueVisibleLimit && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setSelectedQueueVisibleLimit(v => v + STORE_PAGE_SIZE)
-                                }
-                                className="flex-1 flex items-center justify-center gap-1 px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold"
-                              >
-                                <ChevronDown className="w-3.5 h-3.5" />
-                                <span>
-                                  See More (
-                                  {Math.min(
-                                    STORE_PAGE_SIZE,
-                                    filteredSelected.length - selectedQueueVisibleLimit
-                                  )}
-                                  )
-                                </span>
-                              </button>
-                            )}
-                          </div>
-                        )}
+                      {filteredSelected.length > STORE_PAGE_SIZE && (
+                        <div className="p-2.5 bg-slate-950/70 border-t border-slate-800/80 flex items-center gap-2">
+                          {selectedQueueVisibleLimit > STORE_PAGE_SIZE && (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedQueueVisibleLimit(STORE_PAGE_SIZE)}
+                              className="flex-1 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold"
+                            >
+                              Show Less
+                            </button>
+                          )}
+                          {filteredSelected.length > selectedQueueVisibleLimit && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSelectedQueueVisibleLimit(v => v + STORE_PAGE_SIZE)
+                              }
+                              className="flex-1 flex items-center justify-center gap-1 px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold"
+                            >
+                              <ChevronDown className="w-3.5 h-3.5" />
+                              <span>
+                                See More (
+                                {Math.min(
+                                  STORE_PAGE_SIZE,
+                                  filteredSelected.length - selectedQueueVisibleLimit
+                                )}
+                                )
+                              </span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Live Running Total Footer */}
+                      <div className="px-4 py-3 bg-slate-950 border-t border-blue-500/25 flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-slate-300">
+                          Total ({transferSelectionSummary.selectedCount} product
+                          {transferSelectionSummary.selectedCount === 1 ? '' : 's'} ·{' '}
+                          {transferSelectionSummary.totalUnits.toLocaleString()} units)
+                        </span>
+                        <span className="text-base font-bold font-mono tabular-nums text-emerald-400">
+                          {formatCurrency(
+                            transferSelectionSummary.totalAmount,
+                            settings.currencySymbol
+                          )}
+                        </span>
                       </div>
                     </div>
                   );
                 })()}
 
-                {/* 5. Notes & Transfer Action */}
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Notes (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={transferNotes}
-                    onChange={e => setTransferNotes(e.target.value)}
-                    placeholder="e.g. Shelf restock for weekend rush"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
+                {/* 5. Shipping Charges (Optional) & Notice (Optional) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1.5">
+                      Shipping Charges (Optional)
+                    </label>
+                    <div className="relative">
+                      <Truck className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        inputMode="decimal"
+                        value={shippingCharges}
+                        onChange={e => setShippingCharges(e.target.value)}
+                        placeholder="0"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1.5">
+                      Notice (Optional)
+                    </label>
+                    <div className="relative">
+                      <FileText className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                      <input
+                        type="text"
+                        value={transferNotes}
+                        onChange={e => setTransferNotes(e.target.value)}
+                        placeholder="e.g. Driver Ali · Urgent branch refill"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
                 </div>
 
-                <div className="pt-2 flex justify-end">
-                  <button
-                    type="submit"
-                    disabled={
-                      !effectiveSourceStoreId ||
-                      transferSelectionSummary.selectedCount === 0 ||
-                      transferSelectionSummary.selectedCount > MAX_BATCH_TRANSFER_PRODUCTS ||
-                      transferSelectionSummary.invalidCount > 0
-                    }
-                    className="w-full sm:w-auto px-5 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold transition disabled:opacity-45 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                  >
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>
-                      {transferSelectionSummary.selectedCount > 0
-                        ? `Transfer ${transferSelectionSummary.selectedCount.toLocaleString()} Product${transferSelectionSummary.selectedCount === 1 ? '' : 's'} (${transferSelectionSummary.totalUnits.toLocaleString()} units)`
-                        : 'Select Products Above to Transfer'}
-                    </span>
-                  </button>
+                {/* Progress Indicator when submitting */}
+                {transferProgressPct !== null && (
+                  <div className="bg-slate-950 border border-blue-500/40 rounded-xl p-3 space-y-2">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold text-blue-300 flex items-center gap-1.5">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>
+                          {editingTransferId ? 'Updating transfer...' : 'Processing transfer...'}
+                        </span>
+                      </span>
+                      <span className="font-mono font-bold text-white">
+                        {transferProgressPct}%
+                      </span>
+                    </div>
+                    <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-blue-500 to-emerald-400 transition-all duration-200"
+                        style={{ width: `${transferProgressPct}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Grand Summary & Submit */}
+                <div className="pt-2 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="text-xs text-slate-300 font-mono tabular-nums space-y-0.5">
+                    <div>
+                      Products Total:{' '}
+                      <strong className="text-white">
+                        {formatCurrency(
+                          transferSelectionSummary.totalAmount,
+                          settings.currencySymbol
+                        )}
+                      </strong>
+                      {transferSelectionSummary.shippingNum > 0 && (
+                        <span className="text-slate-400">
+                          {' '}
+                          + Shipping:{' '}
+                          <strong className="text-amber-300">
+                            {formatCurrency(
+                              transferSelectionSummary.shippingNum,
+                              settings.currencySymbol
+                            )}
+                          </strong>
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-emerald-400 font-bold">
+                      Grand Total:{' '}
+                      {formatCurrency(
+                        transferSelectionSummary.grandTotal,
+                        settings.currencySymbol
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {editingTransferId && (
+                      <button
+                        type="button"
+                        disabled={transferProgressPct !== null}
+                        onClick={() => {
+                          setEditingTransferId(null);
+                          setActiveSubTab('list');
+                        }}
+                        className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+                      >
+                        Cancel Edit
+                      </button>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={
+                        transferProgressPct !== null ||
+                        !effectiveSourceLocationKey ||
+                        !effectiveDestLocationKey ||
+                        transferSelectionSummary.selectedCount === 0 ||
+                        transferSelectionSummary.selectedCount > MAX_BATCH_TRANSFER_PRODUCTS ||
+                        transferSelectionSummary.invalidCount > 0
+                      }
+                      className="flex-1 sm:flex-none px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-bold transition disabled:opacity-45 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>
+                        {transferProgressPct !== null
+                          ? `Transferring (${transferProgressPct}%)...`
+                          : editingTransferId
+                            ? 'Save Changes'
+                            : 'Transfer'}
+                      </span>
+                    </button>
+                  </div>
                 </div>
               </form>
             </div>
           )}
+        </div>
+      )}
 
-          {/* Recent Store Transfers — Colored Date Filter + Grouped by Store (15 per store + See More) */}
-          <div className="space-y-3">
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Calendar className="w-4 h-4 text-blue-400" />
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-                    Transferred Stock by Store
-                  </h3>
-                </div>
-                <span className="text-[10px] font-mono text-slate-400">
-                  {transferStartDate === transferEndDate
-                    ? transferStartDate
-                    : `${transferStartDate || '...'} → ${transferEndDate || '...'}`}
-                  {' · '}
-                  <strong className="text-white">
-                    {transferMovementsFiltered.length.toLocaleString()}
-                  </strong>{' '}
-                  item{transferMovementsFiltered.length === 1 ? '' : 's'}
+      {/* SUB-TAB 4: FULL-PAGE TRANSFERRED PRODUCTS LIST */}
+      {activeSubTab === 'list' && (
+        <div className="space-y-4">
+          {/* Full-page Header */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={() => setActiveSubTab('stores')}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+                aria-label="Back to Stores"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="min-w-0">
+                <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                  Transferred Products List
+                </h2>
+                <p className="text-xs text-slate-400 truncate">
+                  Consolidated transfer batches across Store → Shop, Store → Store, and Shop → Store
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => openNewTransferForm()}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition"
+            >
+              <ArrowRightLeft className="w-4 h-4" />
+              <span>Transfer Stock</span>
+            </button>
+          </div>
+
+          {/* Colored Period Filter (Today / Weekly / Month / Custom) + Search + Location */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3.5 space-y-3 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-blue-400" />
+                <span className="font-bold text-white uppercase tracking-wider text-[11px]">
+                  Transfer Period
                 </span>
               </div>
+              <span className="text-[11px] font-mono text-slate-400">
+                {transferStartDate === transferEndDate
+                  ? transferStartDate
+                  : `${transferStartDate || '...'} → ${transferEndDate || '...'}`}{' '}
+                ·{' '}
+                <strong className="text-white">
+                  {filteredTransferList.length.toLocaleString()}
+                </strong>{' '}
+                transfer{filteredTransferList.length === 1 ? '' : 's'}
+              </span>
+            </div>
 
-              <div className="grid grid-cols-4 gap-1.5">
-                {(
-                  [
-                    {
-                      id: 'TODAY',
-                      label: 'Today',
-                      activeClass:
-                        'bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-500/30',
-                      idleClass:
-                        'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20',
-                    },
-                    {
-                      id: 'WEEKLY',
-                      label: 'Weekly',
-                      activeClass:
-                        'bg-emerald-600 border-emerald-500 text-white shadow-md shadow-emerald-500/30',
-                      idleClass:
-                        'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20',
-                    },
-                    {
-                      id: 'MONTH',
-                      label: 'Month',
-                      activeClass:
-                        'bg-violet-600 border-violet-500 text-white shadow-md shadow-violet-500/30',
-                      idleClass:
-                        'bg-violet-500/10 border-violet-500/30 text-violet-300 hover:bg-violet-500/20',
-                    },
-                    {
-                      id: 'CUSTOM',
-                      label: 'Custom',
-                      activeClass:
-                        'bg-amber-500 border-amber-400 text-white shadow-md shadow-amber-500/30',
-                      idleClass:
-                        'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20',
-                    },
-                  ] as const
-                ).map(preset => {
-                  const isActive = transferDatePreset === preset.id;
-                  return (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      onClick={() => setTransferDatePreset(preset.id)}
-                      className={`py-2 rounded-lg border text-[11px] font-semibold transition active:scale-95 ${
-                        isActive ? preset.activeClass : preset.idleClass
-                      }`}
-                    >
-                      {preset.label}
-                    </button>
-                  );
-                })}
+            <div className="grid grid-cols-4 gap-1.5">
+              {(
+                [
+                  {
+                    id: 'TODAY',
+                    label: 'Today',
+                    activeClass:
+                      'bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-500/30',
+                    idleClass:
+                      'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20',
+                  },
+                  {
+                    id: 'WEEKLY',
+                    label: 'Weekly',
+                    activeClass:
+                      'bg-emerald-600 border-emerald-500 text-white shadow-md shadow-emerald-500/30',
+                    idleClass:
+                      'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20',
+                  },
+                  {
+                    id: 'MONTH',
+                    label: 'Month',
+                    activeClass:
+                      'bg-violet-600 border-violet-500 text-white shadow-md shadow-violet-500/30',
+                    idleClass:
+                      'bg-violet-500/10 border-violet-500/30 text-violet-300 hover:bg-violet-500/20',
+                  },
+                  {
+                    id: 'CUSTOM',
+                    label: 'Custom',
+                    activeClass:
+                      'bg-amber-500 border-amber-400 text-white shadow-md shadow-amber-500/30',
+                    idleClass:
+                      'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20',
+                  },
+                ] as const
+              ).map(preset => {
+                const isActive = transferDatePreset === preset.id;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => setTransferDatePreset(preset.id)}
+                    className={`py-2 rounded-lg border text-[11px] font-semibold transition active:scale-95 ${
+                      isActive ? preset.activeClass : preset.idleClass
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {transferDatePreset === 'CUSTOM' && (
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <div>
+                  <label className="text-[10px] text-slate-500 block mb-1">From</label>
+                  <input
+                    type="date"
+                    value={transferStartDate}
+                    onChange={e => setTransferStartDate(e.target.value)}
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white w-full focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-500 block mb-1">To</label>
+                  <input
+                    type="date"
+                    value={transferEndDate}
+                    onChange={e => setTransferEndDate(e.target.value)}
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white w-full focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-slate-800/80">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  value={listSearchQuery}
+                  onChange={e => setListSearchQuery(e.target.value)}
+                  placeholder="Search transfer #, location, notice, or product..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
               </div>
 
-              {transferDatePreset === 'CUSTOM' && (
-                <div className="grid grid-cols-2 gap-2 pt-1">
-                  <div>
-                    <label className="text-[10px] text-slate-500 block mb-1">From</label>
-                    <input
-                      type="date"
-                      value={transferStartDate}
-                      onChange={e => setTransferStartDate(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white w-full focus:outline-none focus:ring-1 focus:ring-amber-500"
-                    />
+              <select
+                value={listLocationFilter}
+                onChange={e => setListLocationFilter(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="ALL">All Stores &amp; Shop Locations</option>
+                {sourceLocationOptions.map(opt => (
+                  <option key={opt.key} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Consolidated Transfer List (1 row/card per transfer batch) */}
+          {filteredTransferList.length === 0 ? (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl py-12 px-4 text-center">
+              <ClipboardList className="w-10 h-10 mx-auto text-slate-600 mb-2" />
+              <p className="text-sm font-semibold text-white">No Transfers Found</p>
+              <p className="text-xs text-slate-400 mt-1">
+                No stock transfers recorded for the selected dates and location filter.
+              </p>
+            </div>
+          ) : (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+              {/* Desktop Table */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-950 border-b border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      <th className="py-3 px-4">Date</th>
+                      <th className="py-3 px-4">Location From</th>
+                      <th className="py-3 px-4">Location To</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4 text-right">Shipping</th>
+                      <th className="py-3 px-4 text-right">Total Amount</th>
+                      <th className="py-3 px-4 text-center">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70">
+                    {filteredTransferList.slice(0, listVisibleLimit).map(t => (
+                      <tr key={t.id} className="hover:bg-slate-800/35 transition">
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <div className="font-mono font-semibold text-white">
+                            {t.transferDate || t.createdAt.slice(0, 10)}
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-500">
+                            {t.transferNumber}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="font-semibold text-slate-100">{t.sourceName}</div>
+                          <div className="text-[10px] text-slate-400">
+                            {t.sourceLocation || t.sourceShopName || ''}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="font-semibold text-emerald-300">{t.destName}</div>
+                          <div className="text-[10px] text-slate-400">
+                            {t.destLocation || t.destShopName || ''}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                              t.status === 'COMPLETED'
+                                ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                                : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                            }`}
+                          >
+                            {t.status === 'COMPLETED' ? 'Completed' : 'Not Complete'}
+                          </span>
+                          <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                            {t.items.length} item{t.items.length === 1 ? '' : 's'} ·{' '}
+                            {t.totalUnits.toLocaleString()} units
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-300 whitespace-nowrap">
+                          {formatCurrency(t.shippingCharges || 0, settings.currencySymbol)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                          <div className="font-bold text-white">
+                            {formatCurrency(t.totalAmount || 0, settings.currencySymbol)}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              title="View"
+                              onClick={() => {
+                                setViewingTransferId(t.id);
+                                setActiveSubTab('transfer_view');
+                              }}
+                              className="p-1.5 rounded-lg bg-blue-600/15 hover:bg-blue-600/30 border border-blue-500/30 text-blue-300 transition"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              title="Print"
+                              onClick={() => printStockTransferVoucher(t, settings)}
+                              className="p-1.5 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-300 transition"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              title="Edit"
+                              onClick={() => openEditTransferForm(t)}
+                              className="p-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/30 text-amber-300 transition"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              title="Delete"
+                              onClick={() => setDeletingTransfer(t)}
+                              className="p-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 border border-rose-500/30 text-rose-300 transition"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile Cards */}
+              <div className="md:hidden divide-y divide-slate-800/80">
+                {filteredTransferList.slice(0, listVisibleLimit).map(t => (
+                  <div key={t.id} className="p-3.5 space-y-2.5 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="font-mono font-bold text-white">
+                          {t.transferDate || t.createdAt.slice(0, 10)} ·{' '}
+                          <span className="text-blue-400">{t.transferNumber}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-300 mt-1">
+                          <span className="font-semibold text-white">{t.sourceName}</span>
+                          <span className="mx-1.5 text-blue-400">→</span>
+                          <span className="font-semibold text-emerald-300">{t.destName}</span>
+                        </div>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold border shrink-0 ${
+                          t.status === 'COMPLETED'
+                            ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                            : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                        }`}
+                      >
+                        {t.status === 'COMPLETED' ? 'Completed' : 'Not Complete'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 bg-slate-950/70 border border-slate-800 rounded-lg p-2 text-[11px] font-mono tabular-nums">
+                      <div>
+                        <span className="text-[9px] text-slate-500 block uppercase">Items</span>
+                        <span className="text-slate-200 font-semibold">
+                          {t.items.length} ({t.totalUnits})
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-slate-500 block uppercase">Shipping</span>
+                        <span className="text-slate-200">
+                          {formatCurrency(t.shippingCharges || 0, settings.currencySymbol)}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-[9px] text-slate-500 block uppercase">Total</span>
+                        <span className="text-emerald-400 font-bold">
+                          {formatCurrency(t.totalAmount || 0, settings.currencySymbol)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setViewingTransferId(t.id);
+                          setActiveSubTab('transfer_view');
+                        }}
+                        className="flex items-center justify-center gap-1 py-1.5 rounded-lg bg-blue-600/15 border border-blue-500/30 text-blue-300 text-[11px] font-semibold"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>View</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => printStockTransferVoucher(t, settings)}
+                        className="flex items-center justify-center gap-1 py-1.5 rounded-lg bg-emerald-600/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>Print</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openEditTransferForm(t)}
+                        className="flex items-center justify-center gap-1 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px] font-semibold"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>Edit</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeletingTransfer(t)}
+                        className="flex items-center justify-center gap-1 py-1.5 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[11px] font-semibold"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete</span>
+                      </button>
+                    </div>
                   </div>
-                  <div>
-                    <label className="text-[10px] text-slate-500 block mb-1">To</label>
-                    <input
-                      type="date"
-                      value={transferEndDate}
-                      onChange={e => setTransferEndDate(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white w-full focus:outline-none focus:ring-1 focus:ring-amber-500"
-                    />
+                ))}
+              </div>
+
+              {/* 15-item Pagination Footer */}
+              {filteredTransferList.length > STORE_PAGE_SIZE && (
+                <div className="p-3 bg-slate-950/60 border-t border-slate-800 space-y-2">
+                  <div className="text-[10px] text-slate-500 text-center">
+                    Showing{' '}
+                    <span className="text-slate-300 font-semibold">
+                      {Math.min(listVisibleLimit, filteredTransferList.length).toLocaleString()}
+                    </span>{' '}
+                    of{' '}
+                    <span className="text-slate-300 font-semibold">
+                      {filteredTransferList.length.toLocaleString()}
+                    </span>{' '}
+                    transfers
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {listVisibleLimit > STORE_PAGE_SIZE && (
+                      <button
+                        type="button"
+                        onClick={() => setListVisibleLimit(STORE_PAGE_SIZE)}
+                        className="flex-1 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition"
+                      >
+                        Show Less
+                      </button>
+                    )}
+                    {filteredTransferList.length > listVisibleLimit && (
+                      <button
+                        type="button"
+                        onClick={() => setListVisibleLimit(v => v + STORE_PAGE_SIZE)}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold transition"
+                      >
+                        <ChevronDown className="w-3.5 h-3.5" />
+                        <span>
+                          See More (
+                          {Math.min(
+                            STORE_PAGE_SIZE,
+                            filteredTransferList.length - listVisibleLimit
+                          )}
+                          )
+                        </span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
             </div>
+          )}
+        </div>
+      )}
 
-            {transferLogsByStore.length === 0 ? (
-              <div className="bg-slate-900 border border-slate-800 rounded-xl py-10 text-center text-xs text-slate-500">
-                No warehouse stores configured yet.
+      {/* SUB-TAB 5: FULL-PAGE TRANSFER VIEW DETAILS */}
+      {activeSubTab === 'transfer_view' && viewingTransfer && (
+        <div className="space-y-4 max-w-4xl mx-auto">
+          <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={() => setActiveSubTab('list')}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+                aria-label="Back to Transfer List"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+                    Transfer {viewingTransfer.transferNumber}
+                  </h2>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                      viewingTransfer.status === 'COMPLETED'
+                        ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                        : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                    }`}
+                  >
+                    {viewingTransfer.status === 'COMPLETED' ? 'Completed' : 'Not Complete'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Date: {viewingTransfer.transferDate} · Recorded by{' '}
+                  {viewingTransfer.createdByName || 'Admin'}
+                </p>
               </div>
-            ) : (
-              <div className="space-y-3">
-                {transferLogsByStore.map(group => {
-                  const isCollapsed = !!collapsedTransferStores[group.storeId];
-                  const visibleCount =
-                    transferLogVisibleCounts[group.storeId] ?? STORE_PAGE_SIZE;
-                  const visibleMovements = group.movements.slice(0, visibleCount);
-                  const remaining = Math.max(0, group.movements.length - visibleCount);
+            </div>
 
-                  return (
-                    <div
-                      key={group.storeId}
-                      className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg"
-                    >
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setCollapsedTransferStores(prev => ({
-                            ...prev,
-                            [group.storeId]: !prev[group.storeId],
-                          }))
-                        }
-                        className="w-full flex items-center justify-between gap-2.5 px-4 py-3 bg-slate-950/60 hover:bg-slate-900/90 border-b border-slate-800 transition text-left"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 shrink-0">
-                            <ArrowRightLeft className="w-4 h-4" />
-                          </div>
-                          <div className="min-w-0">
-                            <h4 className="text-sm font-bold text-white truncate">
-                              {group.title}
-                            </h4>
-                            <p className="text-[11px] text-slate-400 truncate">
-                              {group.shopName} ·{' '}
-                              <span className="font-mono text-slate-300">
-                                {group.movements.length.toLocaleString()} item
-                                {group.movements.length === 1 ? '' : 's'}
-                              </span>{' '}
-                              ·{' '}
-                              <span className="font-mono text-amber-300 font-semibold">
-                                {group.totalUnits.toLocaleString()} units moved
-                              </span>
-                            </p>
-                          </div>
-                        </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => printStockTransferVoucher(viewingTransfer, settings)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Print</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => openEditTransferForm(viewingTransfer)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-xs font-semibold transition"
+              >
+                <Edit3 className="w-4 h-4" />
+                <span>Edit</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeletingTransfer(viewingTransfer)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-300 text-xs font-semibold transition"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 text-[10px] font-mono tabular-nums">
-                            {group.movements.length.toLocaleString()}
-                          </span>
-                          {isCollapsed ? (
-                            <ChevronRight className="w-5 h-5 text-slate-400" />
-                          ) : (
-                            <ChevronDown className="w-5 h-5 text-slate-400" />
-                          )}
-                        </div>
-                      </button>
-
-                      {!isCollapsed && (
-                        <>
-                          {group.movements.length === 0 ? (
-                            <div className="py-8 px-4 text-center text-xs text-slate-500">
-                              No transfers recorded for {group.store?.name || 'this store'} in the selected period.
-                            </div>
-                          ) : (
-                            <div className="divide-y divide-slate-800/80">
-                              {visibleMovements.map(m => {
-                                const isIncoming = m.changeQty > 0;
-                                return (
-                                  <div
-                                    key={m.id}
-                                    className="px-4 py-3 flex items-center justify-between gap-3 text-xs"
-                                  >
-                                    <div className="min-w-0 flex-1">
-                                      <div className="font-semibold text-white truncate">
-                                        {m.productName}
-                                      </div>
-                                      <div className="text-[11px] text-slate-400 mt-0.5 truncate">
-                                        {m.reason}
-                                      </div>
-                                      <div className="text-[10px] text-slate-500 font-mono mt-0.5">
-                                        {formatDateTime(m.createdAt)} · {m.userName}
-                                      </div>
-                                    </div>
-                                    <div className="text-right shrink-0 font-mono tabular-nums">
-                                      <div
-                                        className={`font-bold ${
-                                          isIncoming ? 'text-emerald-400' : 'text-amber-400'
-                                        }`}
-                                      >
-                                        {isIncoming
-                                          ? `+${m.changeQty}`
-                                          : `-${Math.abs(m.changeQty)}`}
-                                      </div>
-                                      <div className="text-[10px] text-slate-500">
-                                        Bal: {m.newQty}
-                                      </div>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-
-                          {group.movements.length > STORE_PAGE_SIZE && (
-                            <div className="p-3 bg-slate-950/40 border-t border-slate-800/80 space-y-2">
-                              <div className="text-[10px] text-slate-500 text-center">
-                                Showing{' '}
-                                <span className="text-slate-300 font-semibold">
-                                  {Math.min(visibleCount, group.movements.length).toLocaleString()}
-                                </span>{' '}
-                                of{' '}
-                                <span className="text-slate-300 font-semibold">
-                                  {group.movements.length.toLocaleString()}
-                                </span>{' '}
-                                transfers in {group.store?.name || 'store'}
-                              </div>
-                              <div className="flex items-center gap-2">
-                                {visibleCount > STORE_PAGE_SIZE && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setTransferLogVisibleCounts(prev => ({
-                                        ...prev,
-                                        [group.storeId]: STORE_PAGE_SIZE,
-                                      }))
-                                    }
-                                    className="flex-1 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition"
-                                  >
-                                    Show Less
-                                  </button>
-                                )}
-                                {remaining > 0 && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setTransferLogVisibleCounts(prev => ({
-                                        ...prev,
-                                        [group.storeId]:
-                                          (prev[group.storeId] ?? STORE_PAGE_SIZE) +
-                                          STORE_PAGE_SIZE,
-                                      }))
-                                    }
-                                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold shadow transition"
-                                  >
-                                    <ChevronDown className="w-3.5 h-3.5" />
-                                    <span>See More ({Math.min(STORE_PAGE_SIZE, remaining)})</span>
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
+          {/* Location Source & Destination Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-blue-400 mb-1">
+                Location Source (From)
               </div>
-            )}
+              <div className="text-sm font-bold text-white">{viewingTransfer.sourceName}</div>
+              <div className="text-xs text-slate-400 mt-0.5">
+                {viewingTransfer.sourceShopName || 'Shop'}
+                {viewingTransfer.sourceLocation ? ` · ${viewingTransfer.sourceLocation}` : ''}
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 mb-1">
+                Location Destination (To)
+              </div>
+              <div className="text-sm font-bold text-white">{viewingTransfer.destName}</div>
+              <div className="text-xs text-slate-400 mt-0.5">
+                {viewingTransfer.destShopName || 'Shop'}
+                {viewingTransfer.destLocation ? ` · ${viewingTransfer.destLocation}` : ''}
+              </div>
+            </div>
+          </div>
+
+          {viewingTransfer.notice && (
+            <div className="bg-amber-950/20 border border-amber-500/30 rounded-xl px-4 py-2.5 text-xs text-amber-200">
+              <strong className="text-amber-300">Notice:</strong> {viewingTransfer.notice}
+            </div>
+          )}
+
+          {/* Full Product Items Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-950 border-b border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    <th className="py-3 px-4 w-10">#</th>
+                    <th className="py-3 px-4">Product Name</th>
+                    <th className="py-3 px-4 text-right">Quantity</th>
+                    <th className="py-3 px-4 text-right">Price</th>
+                    <th className="py-3 px-4 text-right">Subtotal</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70">
+                  {viewingTransfer.items.map((item, idx) => (
+                    <tr key={item.id || `${item.productId}-${idx}`} className="hover:bg-slate-800/30">
+                      <td className="py-3 px-4 font-mono text-slate-500">{idx + 1}</td>
+                      <td className="py-3 px-4">
+                        <div className="font-semibold text-white">
+                          {item.productName}
+                          {item.variation ? ` (${item.variation})` : ''}
+                        </div>
+                        <div className="text-[10px] font-mono text-slate-400">SKU: {item.sku}</div>
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-200">
+                        {item.quantity.toLocaleString()} {item.unit || 'pcs'}
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-300">
+                        {formatCurrency(item.unitPrice, settings.currencySymbol)}
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-emerald-400">
+                        {formatCurrency(item.subtotal, settings.currencySymbol)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="p-4 bg-slate-950 border-t border-slate-800 space-y-1.5 text-xs font-mono tabular-nums">
+              <div className="flex justify-between text-slate-400">
+                <span>
+                  Total Products ({viewingTransfer.items.length} items ·{' '}
+                  {viewingTransfer.totalUnits.toLocaleString()} units)
+                </span>
+                <span className="text-white font-semibold">
+                  {formatCurrency(viewingTransfer.totalAmount, settings.currencySymbol)}
+                </span>
+              </div>
+              <div className="flex justify-between text-slate-400">
+                <span>Shipping Charges</span>
+                <span className="text-amber-300">
+                  {formatCurrency(viewingTransfer.shippingCharges || 0, settings.currencySymbol)}
+                </span>
+              </div>
+              <div className="flex justify-between pt-2 border-t border-slate-800 text-sm font-bold text-emerald-400">
+                <span>Total Price</span>
+                <span>
+                  {formatCurrency(
+                    (viewingTransfer.totalAmount || 0) + (viewingTransfer.shippingCharges || 0),
+                    settings.currencySymbol
+                  )}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -4029,6 +5067,80 @@ export const AdminStores: React.FC = () => {
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>Delete Product</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Delete Transfer Confirmation Modal */}
+      {deletingTransfer && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4">
+          <div className="bg-slate-900 border border-rose-800/60 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-4 sm:p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5 text-rose-400">
+                <div className="p-2 rounded-xl bg-rose-950/80 border border-rose-800/50">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-bold text-white">
+                    Delete Stock Transfer?
+                  </h3>
+                  <p className="text-[11px] text-slate-400 font-mono">
+                    {deletingTransfer.transferNumber} · {deletingTransfer.transferDate}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingTransfer(null)}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs text-slate-300 space-y-1.5">
+              <p>
+                Delete transfer from{' '}
+                <strong className="text-white">{deletingTransfer.sourceName}</strong> to{' '}
+                <strong className="text-emerald-300">{deletingTransfer.destName}</strong> (
+                <strong className="font-mono">
+                  {deletingTransfer.items.length} product
+                  {deletingTransfer.items.length === 1 ? '' : 's'}
+                </strong>
+                ,{' '}
+                <strong className="font-mono">
+                  {deletingTransfer.totalUnits.toLocaleString()} units
+                </strong>
+                )?
+              </p>
+              {deletingTransfer.status === 'COMPLETED' ? (
+                <p className="text-amber-300 text-[11px]">
+                  This transfer is marked <strong>Completed</strong>. Deleting it will automatically reverse and restore the transferred quantities back to{' '}
+                  <strong>{deletingTransfer.sourceName}</strong>.
+                </p>
+              ) : (
+                <p className="text-slate-400 text-[11px]">
+                  This transfer is marked Not Complete, so no stock balances will be altered.
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setDeletingTransfer(null)}
+                className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleConfirmDeleteTransfer(deletingTransfer)}
+                className="px-4 py-2.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete Transfer</span>
               </button>
             </div>
           </div>

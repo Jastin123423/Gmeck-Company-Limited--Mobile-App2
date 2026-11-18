@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Search,
   Receipt,
@@ -12,6 +12,10 @@ import {
   Check,
   Clock,
   RefreshCw,
+  ClipboardList,
+  ArrowLeft,
+  Store,
+  User as UserIcon,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { SalesService, CartItemInput } from '../../services/salesService';
@@ -21,6 +25,11 @@ import { db } from '../../db/storage';
 import { Sale, SaleEditRequest } from '../../types';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import {
+  formatSaleEditDetails,
+  printHtmlViaIframe,
+  printSaleEditsReportPdf,
+} from '../../utils/saleEditsPrint';
+import {
   getAdminManagedShops,
   getShopAdminShopIds,
   hasAdminAccess,
@@ -29,6 +38,9 @@ import {
 } from '../../utils/permissions';
 
 type DatePreset = 'TODAY' | 'WEEK' | 'MONTH' | 'YEAR' | 'CUSTOM';
+type EditListPreset = 'ALL' | DatePreset;
+
+const SALES_PAGE_SIZE = 15;
 
 export const AdminSales: React.FC = () => {
   const { currentUser, showReceipt, dbState, addToast } = useApp();
@@ -42,6 +54,19 @@ export const AdminSales: React.FC = () => {
   const [endDate, setEndDate] = useState('');
   const [isPrinting, setIsPrinting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Per-group pagination (default 15 per group, expand +15)
+  const [groupVisibleCounts, setGroupVisibleCounts] = useState<Record<string, number>>({});
+
+  // Full-page Edit List (Approved & Rejected edits)
+  const [showEditListPage, setShowEditListPage] = useState(false);
+  const [editListSearch, setEditListSearch] = useState('');
+  const [editListStatus, setEditListStatus] = useState<'ALL' | 'APPROVED' | 'REJECTED'>('ALL');
+  const [editListShopFilter, setEditListShopFilter] = useState('ALL');
+  const [editListPreset, setEditListPreset] = useState<EditListPreset>('ALL');
+  const [editListStartDate, setEditListStartDate] = useState('');
+  const [editListEndDate, setEditListEndDate] = useState('');
+  const [editListVisibleCount, setEditListVisibleCount] = useState(SALES_PAGE_SIZE);
 
   // Void Dialog
   const [voidingSale, setVoidingSale] = useState<Sale | null>(null);
@@ -104,6 +129,32 @@ export const AdminSales: React.FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [datePreset]);
+
+  // Apply Edit List preset → compute start/end
+  useEffect(() => {
+    if (editListPreset === 'ALL') {
+      setEditListStartDate('');
+      setEditListEndDate('');
+      return;
+    }
+    if (editListPreset === 'CUSTOM') return;
+    const range = computePresetRange(editListPreset);
+    if (range) {
+      setEditListStartDate(range.start);
+      setEditListEndDate(range.end);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editListPreset]);
+
+  // Reset per-group pagination when filters change
+  useEffect(() => {
+    setGroupVisibleCounts({});
+  }, [searchQuery, sellerFilter, paymentFilter, statusFilter, shopFilter, datePreset, startDate, endDate]);
+
+  // Reset Edit List pagination when its filters change
+  useEffect(() => {
+    setEditListVisibleCount(SALES_PAGE_SIZE);
+  }, [editListSearch, editListStatus, editListShopFilter, editListPreset, editListStartDate, editListEndDate]);
 
   // Permission check
   if (!currentUser) return null;
@@ -198,6 +249,15 @@ export const AdminSales: React.FC = () => {
   const products = dbState.products || [];
   const editRequests = SalesService.getSaleEditRequests(currentUser);
   const pendingRequests = editRequests.filter(r => r.status === 'PENDING');
+  const handledEditRequests = editRequests
+    .filter(r => r.status === 'APPROVED' || r.status === 'REJECTED')
+    .sort((a, b) => {
+      const tA = new Date(a.reviewedAt || a.createdAt).getTime();
+      const tB = new Date(b.reviewedAt || b.createdAt).getTime();
+      return tB - tA;
+    });
+
+  const salesById = new Map<string, Sale>((dbState.sales || []).map(s => [s.id, s]));
 
   const sales = SalesService.getSales(
     {
@@ -220,6 +280,137 @@ export const AdminSales: React.FC = () => {
     (sum, s) => (s.status === 'COMPLETED' ? sum + s.grossProfit : sum),
     0
   );
+
+  // Organize sales by Shop (Platform Admin + All Shops) or by Seller (Shop Admin + All Sellers)
+  const groupByMode: 'SHOP' | 'SELLER' | 'NONE' =
+    platformAdmin && shopFilter === 'ALL'
+      ? 'SHOP'
+      : shopAdmin && !platformAdmin && sellerFilter === 'ALL'
+        ? 'SELLER'
+        : 'NONE';
+
+  interface SalesGroup {
+    key: string;
+    label: string;
+    kind: 'SHOP' | 'SELLER' | 'SINGLE';
+    sales: Sale[];
+    totalRevenue: number;
+    totalProfit: number;
+    completedCount: number;
+  }
+
+  const salesGroups: SalesGroup[] = (() => {
+    if (sales.length === 0) return [];
+
+    if (groupByMode === 'SHOP') {
+      const grouped = new Map<string, { label: string; items: Sale[] }>();
+      for (const sale of sales) {
+        const key = sale.shopId || sale.shopName || '__UNASSIGNED_SHOP__';
+        const shopObj = shops.find(s => s.id === sale.shopId);
+        const label = shopObj?.name || sale.shopName || 'Unassigned Shop';
+        const bucket = grouped.get(key);
+        if (bucket) {
+          bucket.items.push(sale);
+        } else {
+          grouped.set(key, { label, items: [sale] });
+        }
+      }
+
+      const shopOrderIndex = new Map<string, number>(shops.map((s, idx) => [s.id, idx]));
+      return Array.from(grouped.entries())
+        .sort(([keyA, a], [keyB, b]) => {
+          const idxA = shopOrderIndex.has(keyA) ? (shopOrderIndex.get(keyA) as number) : 999999;
+          const idxB = shopOrderIndex.has(keyB) ? (shopOrderIndex.get(keyB) as number) : 999999;
+          if (idxA !== idxB) return idxA - idxB;
+          return a.label.localeCompare(b.label);
+        })
+        .map(([key, bucket]) => {
+          let rev = 0;
+          let prof = 0;
+          let completedCount = 0;
+          for (const s of bucket.items) {
+            if (s.status === 'COMPLETED') {
+              rev += s.total;
+              prof += s.grossProfit;
+              completedCount += 1;
+            }
+          }
+          return {
+            key: `shop:${key}`,
+            label: bucket.label,
+            kind: 'SHOP' as const,
+            sales: bucket.items,
+            totalRevenue: rev,
+            totalProfit: prof,
+            completedCount,
+          };
+        });
+    }
+
+    if (groupByMode === 'SELLER') {
+      const grouped = new Map<string, { label: string; items: Sale[] }>();
+      for (const sale of sales) {
+        const key = sale.sellerId || sale.sellerName || '__UNKNOWN_SELLER__';
+        const sellerObj = sellers.find(u => u.id === sale.sellerId);
+        const label = sellerObj?.name || sale.sellerName || 'Unknown Seller';
+        const bucket = grouped.get(key);
+        if (bucket) {
+          bucket.items.push(sale);
+        } else {
+          grouped.set(key, { label, items: [sale] });
+        }
+      }
+
+      const sellerOrderIndex = new Map<string, number>(sellers.map((u, idx) => [u.id, idx]));
+      return Array.from(grouped.entries())
+        .sort(([keyA, a], [keyB, b]) => {
+          const idxA = sellerOrderIndex.has(keyA) ? (sellerOrderIndex.get(keyA) as number) : 999999;
+          const idxB = sellerOrderIndex.has(keyB) ? (sellerOrderIndex.get(keyB) as number) : 999999;
+          if (idxA !== idxB) return idxA - idxB;
+          return a.label.localeCompare(b.label);
+        })
+        .map(([key, bucket]) => {
+          let rev = 0;
+          let prof = 0;
+          let completedCount = 0;
+          for (const s of bucket.items) {
+            if (s.status === 'COMPLETED') {
+              rev += s.total;
+              prof += s.grossProfit;
+              completedCount += 1;
+            }
+          }
+          return {
+            key: `seller:${key}`,
+            label: bucket.label,
+            kind: 'SELLER' as const,
+            sales: bucket.items,
+            totalRevenue: rev,
+            totalProfit: prof,
+            completedCount,
+          };
+        });
+    }
+
+    // Single scope (specific shop picked by platform admin, or specific seller picked by shop admin)
+    const label =
+      shopFilter !== 'ALL'
+        ? shops.find(s => s.id === shopFilter)?.name || 'Selected Shop'
+        : sellerFilter !== 'ALL'
+          ? sellers.find(s => s.id === sellerFilter)?.name || 'Selected Seller'
+          : 'Transactions';
+    return [
+      {
+        key: `single:${shopFilter}:${sellerFilter}`,
+        label,
+        kind: 'SINGLE' as const,
+        sales,
+        totalRevenue: totalVolume,
+        totalProfit,
+        completedCount: sales.filter(s => s.status === 'COMPLETED').length,
+      },
+    ];
+  })();
 
   const selectedShopName =
     shopFilter === 'ALL'
@@ -333,17 +524,6 @@ export const AdminSales: React.FC = () => {
 
   const handlePrint = () => {
     setIsPrinting(true);
-
-    const printWindow = window.open('', '_blank', 'width=1200,height=800');
-    if (!printWindow) {
-      addToast({
-        type: 'error',
-        title: 'Popup Blocked',
-        description: 'Please allow popups to print.',
-      });
-      setIsPrinting(false);
-      return;
-    }
 
     const printContent = `
       <!DOCTYPE html>
@@ -461,16 +641,19 @@ export const AdminSales: React.FC = () => {
           ${settings.businessName} - ${settings.address || ''} | Phone: ${settings.phone || 'N/A'}<br>
           ${settings.receiptFooterNote || 'Thank you for your business!'}
         </div>
-
-        <script>window.onload = function() { window.print(); }</script>
       </body>
       </html>
     `;
 
-    printWindow.document.write(printContent);
-    printWindow.document.close();
-
-    setTimeout(() => setIsPrinting(false), 2000);
+    const started = printHtmlViaIframe(printContent);
+    if (!started) {
+      addToast({
+        type: 'error',
+        title: 'Print Unavailable',
+        description: 'Could not open print preview in this browser.',
+      });
+    }
+    setTimeout(() => setIsPrinting(false), 1200);
   };
 
   const handleExportCSV = () => {
@@ -539,6 +722,506 @@ export const AdminSales: React.FC = () => {
     },
   ];
 
+  // Filtered handled edit requests (Approved & Rejected) for Edit List Full Page
+  const filteredHandledEdits = handledEditRequests.filter(req => {
+    if (editListStatus !== 'ALL' && req.status !== editListStatus) return false;
+
+    const sale = salesById.get(req.saleId);
+    const reqShopId =
+      sale?.shopId ||
+      req.originalValues?.items?.[0]?.shopId ||
+      req.newValues?.items?.[0]?.shopId ||
+      '';
+
+    if (editListShopFilter !== 'ALL' && reqShopId !== editListShopFilter) return false;
+
+    const targetTime = new Date(req.reviewedAt || req.createdAt).getTime();
+    if (editListStartDate) {
+      const startMs = new Date(`${editListStartDate}T00:00:00`).getTime();
+      if (targetTime < startMs) return false;
+    }
+    if (editListEndDate) {
+      const endMs = new Date(`${editListEndDate}T23:59:59.999`).getTime();
+      if (targetTime > endMs) return false;
+    }
+
+    if (editListSearch.trim()) {
+      const q = editListSearch.toLowerCase().trim();
+      const details = formatSaleEditDetails(req, sale, settings.currencySymbol);
+      const haystack = [
+        details.receiptNumber,
+        details.shopName,
+        details.sellerName,
+        req.requestedByName,
+        req.reviewedByName || '',
+        req.reason,
+        req.reviewNote || '',
+        req.status,
+        ...details.productNames,
+      ]
+        .join(' ')
+        .toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+
+    return true;
+  });
+
+  if (showEditListPage) {
+    const approvedCount = filteredHandledEdits.filter(r => r.status === 'APPROVED').length;
+    const rejectedCount = filteredHandledEdits.filter(r => r.status === 'REJECTED').length;
+    const visibleEdits = filteredHandledEdits.slice(0, editListVisibleCount);
+    const hasMoreEdits = editListVisibleCount < filteredHandledEdits.length;
+
+    const editPeriodLabel =
+      editListPreset === 'ALL'
+        ? 'All Dates'
+        : editListStartDate || editListEndDate
+          ? `${editListStartDate || 'Start'} to ${editListEndDate || 'Today'}`
+          : editListPreset;
+
+    const editShopLabel =
+      editListShopFilter === 'ALL'
+        ? selectedShopName
+        : shops.find(s => s.id === editListShopFilter)?.name || 'Selected Shop';
+
+    const editStatusLabel =
+      editListStatus === 'ALL'
+        ? 'Approved & Rejected'
+        : editListStatus === 'APPROVED'
+          ? 'Approved Only'
+          : 'Rejected Only';
+
+    const handlePrintEditList = () => {
+      const ok = printSaleEditsReportPdf(filteredHandledEdits, salesById, settings, {
+        periodLabel: editPeriodLabel,
+        statusLabel: editStatusLabel,
+        shopLabel: editShopLabel,
+      });
+      if (!ok) {
+        addToast({
+          type: 'error',
+          title: 'Print Unavailable',
+          description: 'Could not prepare print document.',
+        });
+      }
+    };
+
+    return (
+      <div
+        id="admin-sales-edit-list-page"
+        className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-6"
+      >
+        {/* Full-Page Top Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              type="button"
+              onClick={() => setShowEditListPage(false)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition shrink-0"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Back</span>
+            </button>
+            <div className="min-w-0">
+              <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight flex items-center gap-2">
+                <ClipboardList className="w-5 h-5 text-violet-400 shrink-0" />
+                <span className="truncate">Sale Edits History</span>
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                All approved and rejected sale edits handled by admin
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={refreshEditRequests}
+              disabled={isRefreshing}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span>{isRefreshing ? 'Refreshing' : 'Refresh'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handlePrintEditList}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow transition"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Print</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Summary KPI Strip */}
+        <div className="grid grid-cols-3 gap-2.5 mb-4">
+          <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl">
+            <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">
+              Total Handled
+            </span>
+            <span className="text-base font-bold text-violet-300 font-mono">
+              {filteredHandledEdits.length}
+            </span>
+          </div>
+          <div className="p-3 bg-slate-900 border border-emerald-500/20 rounded-xl">
+            <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">
+              Approved
+            </span>
+            <span className="text-base font-bold text-emerald-400 font-mono">
+              {approvedCount}
+            </span>
+          </div>
+          <div className="p-3 bg-slate-900 border border-rose-500/20 rounded-xl">
+            <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">
+              Rejected
+            </span>
+            <span className="text-base font-bold text-rose-400 font-mono">
+              {rejectedCount}
+            </span>
+          </div>
+        </div>
+
+        {/* Filters */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 mb-4 space-y-2.5 text-xs">
+          <div className="relative">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              value={editListSearch}
+              onChange={e => setEditListSearch(e.target.value)}
+              placeholder="Search product name, seller, receipt, reason..."
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+            />
+          </div>
+
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+            <button
+              type="button"
+              onClick={() => setEditListPreset('ALL')}
+              className={`py-2 rounded-lg border text-[11px] font-semibold transition ${
+                editListPreset === 'ALL'
+                  ? 'bg-slate-700 border-slate-500 text-white'
+                  : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-800'
+              }`}
+            >
+              All Dates
+            </button>
+            {presets.map(p => {
+              const isActive = editListPreset === p.id;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setEditListPreset(p.id)}
+                  className={`py-2 rounded-lg border text-[11px] font-semibold transition ${
+                    isActive ? p.activeClass : p.idleClass
+                  }`}
+                >
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {editListPreset === 'CUSTOM' && (
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <div>
+                <label className="text-[10px] text-slate-500 block mb-1">From</label>
+                <input
+                  type="date"
+                  value={editListStartDate}
+                  onChange={e => setEditListStartDate(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white w-full focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] text-slate-500 block mb-1">To</label>
+                <input
+                  type="date"
+                  value={editListEndDate}
+                  onChange={e => setEditListEndDate(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white w-full focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5 flex-1 min-w-[210px]">
+              {(['ALL', 'APPROVED', 'REJECTED'] as const).map(st => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => setEditListStatus(st)}
+                  className={`flex-1 py-2 px-2.5 rounded-lg border text-[11px] font-semibold transition ${
+                    editListStatus === st
+                      ? st === 'APPROVED'
+                        ? 'bg-emerald-600 border-emerald-500 text-white'
+                        : st === 'REJECTED'
+                          ? 'bg-rose-600 border-rose-500 text-white'
+                          : 'bg-violet-600 border-violet-500 text-white'
+                      : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-800'
+                  }`}
+                >
+                  {st === 'ALL' ? 'All Status' : st === 'APPROVED' ? 'Approved' : 'Rejected'}
+                </button>
+              ))}
+            </div>
+
+            {(platformAdmin || shops.length > 1) && (
+              <select
+                value={editListShopFilter}
+                onChange={e => setEditListShopFilter(e.target.value)}
+                className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-violet-500"
+              >
+                <option value="ALL">🏪 All Shops</option>
+                {shops.map(s => (
+                  <option key={s.id} value={s.id}>
+                    🏪 {s.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        </div>
+
+        {/* Handled Edits List */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+          {filteredHandledEdits.length === 0 ? (
+            <div className="py-12 text-center text-slate-500">
+              <ClipboardList className="w-8 h-8 mx-auto mb-2 opacity-40" />
+              <p className="text-xs">No approved or rejected sale edits found.</p>
+            </div>
+          ) : (
+            <>
+              {/* Mobile Cards (< md) */}
+              <div className="md:hidden divide-y divide-slate-800/80">
+                {visibleEdits.map(req => {
+                  const sale = salesById.get(req.saleId);
+                  const details = formatSaleEditDetails(req, sale, settings.currencySymbol);
+                  const isApproved = req.status === 'APPROVED';
+
+                  return (
+                    <div key={req.id} className="p-3.5 space-y-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono font-bold text-white text-xs">
+                              #{details.receiptNumber}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800/50 text-[10px] font-semibold">
+                              🏪 {details.shopName}
+                            </span>
+                          </div>
+                          <p className="text-[11px] font-semibold text-slate-200 mt-1">
+                            Seller: {details.sellerName}
+                          </p>
+                          <p className="text-[10px] font-mono text-slate-400">
+                            {formatDateTime(req.reviewedAt || req.createdAt)}
+                            {req.reviewedByName ? ` • By ${req.reviewedByName}` : ''}
+                          </p>
+                        </div>
+
+                        <span
+                          className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            isApproved
+                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                              : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                          }`}
+                        >
+                          {req.status}
+                        </span>
+                      </div>
+
+                      <div>
+                        <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold block mb-1">
+                          Product Name(s)
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {details.productNames.map((name, i) => (
+                            <span
+                              key={i}
+                              className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[11px] text-slate-100 font-medium"
+                            >
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 space-y-1">
+                        <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold block">
+                          Changes
+                        </span>
+                        {details.changes.map((c, idx) => (
+                          <div
+                            key={idx}
+                            className={`text-[11px] ${
+                              c.kind === 'added'
+                                ? 'text-emerald-400'
+                                : c.kind === 'removed'
+                                  ? 'text-rose-400'
+                                  : c.kind === 'total'
+                                    ? 'text-blue-300 font-bold pt-1 border-t border-slate-800'
+                                    : 'text-amber-300'
+                            }`}
+                          >
+                            <span className="font-semibold">{c.label}:</span> {c.detail}
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="text-xs text-slate-300 bg-slate-950/40 p-2 rounded-lg border border-slate-800/70">
+                        <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold block mb-0.5">
+                          Reason
+                        </span>
+                        <p>{req.reason || 'No reason provided'}</p>
+                        {req.reviewNote && (
+                          <p className="text-[10px] text-slate-400 mt-1">
+                            Admin Note: {req.reviewNote}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Desktop Table (md+) */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400">
+                      <th className="py-3 px-4 font-semibold">Date & Receipt</th>
+                      <th className="py-3 px-4 font-semibold">Product Name</th>
+                      <th className="py-3 px-4 font-semibold">Seller Name</th>
+                      <th className="py-3 px-4 text-center font-semibold">Status</th>
+                      <th className="py-3 px-4 font-semibold">Changes</th>
+                      <th className="py-3 px-4 font-semibold">Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {visibleEdits.map(req => {
+                      const sale = salesById.get(req.saleId);
+                      const details = formatSaleEditDetails(req, sale, settings.currencySymbol);
+                      const isApproved = req.status === 'APPROVED';
+
+                      return (
+                        <tr key={req.id} className="hover:bg-slate-850/60 transition align-top">
+                          <td className="py-3 px-4 whitespace-nowrap">
+                            <div className="font-mono font-bold text-white">
+                              #{details.receiptNumber}
+                            </div>
+                            <div className="text-[11px] text-slate-400 mt-0.5">
+                              {formatDateTime(req.reviewedAt || req.createdAt)}
+                            </div>
+                            <span className="inline-block mt-1 px-2 py-0.5 rounded bg-blue-950/70 text-blue-300 border border-blue-800/50 text-[10px] font-semibold">
+                              🏪 {details.shopName}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 max-w-xs">
+                            <div className="flex flex-wrap gap-1">
+                              {details.productNames.map((name, i) => (
+                                <span
+                                  key={i}
+                                  className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700/70 text-[11px] text-slate-100 font-medium"
+                                >
+                                  {name}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="font-semibold text-slate-200">{details.sellerName}</div>
+                            {req.reviewedByName && (
+                              <div className="text-[10px] text-slate-500 mt-0.5">
+                                Handled by: {req.reviewedByName}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-center">
+                            <span
+                              className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                                isApproved
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                              }`}
+                            >
+                              {req.status}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 max-w-sm">
+                            <div className="space-y-1">
+                              {details.changes.map((c, idx) => (
+                                <div
+                                  key={idx}
+                                  className={`text-[11px] ${
+                                    c.kind === 'added'
+                                      ? 'text-emerald-400'
+                                      : c.kind === 'removed'
+                                        ? 'text-rose-400'
+                                        : c.kind === 'total'
+                                          ? 'text-blue-300 font-bold pt-1 border-t border-slate-800/80'
+                                          : 'text-amber-300'
+                                  }`}
+                                >
+                                  <span className="font-semibold">{c.label}:</span> {c.detail}
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 max-w-xs text-slate-300">
+                            <p>{req.reason || 'No reason provided'}</p>
+                            {req.reviewNote && (
+                              <p className="text-[10px] text-slate-500 mt-1">
+                                Note: {req.reviewNote}
+                              </p>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {(filteredHandledEdits.length > SALES_PAGE_SIZE ||
+                editListVisibleCount > SALES_PAGE_SIZE) && (
+                <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-slate-800 bg-slate-950/60 text-xs">
+                  <span className="text-slate-400">
+                    Showing {visibleEdits.length} of {filteredHandledEdits.length} edits
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {editListVisibleCount > SALES_PAGE_SIZE && (
+                      <button
+                        type="button"
+                        onClick={() => setEditListVisibleCount(SALES_PAGE_SIZE)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition"
+                      >
+                        Show Less
+                      </button>
+                    )}
+                    {hasMoreEdits && (
+                      <button
+                        type="button"
+                        onClick={() => setEditListVisibleCount(prev => prev + SALES_PAGE_SIZE)}
+                        className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold transition"
+                      >
+                        See More (+{Math.min(SALES_PAGE_SIZE, filteredHandledEdits.length - visibleEdits.length)})
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       id="admin-sales-view"
@@ -546,13 +1229,26 @@ export const AdminSales: React.FC = () => {
     >
       {/* Header */}
       <div className="flex flex-col gap-3 mb-5 pb-4 border-b border-slate-800">
-        <div>
-          <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
-            Sales & Transactions
-          </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Audit store sales, filter by cashier or payment gateway, and manage voiding
-          </p>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+              Sales & Transactions
+            </h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Audit store sales, filter by cashier or payment gateway, and manage voiding
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowEditListPage(true)}
+            className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-xl bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white border border-violet-500/40 text-xs font-semibold transition active:scale-95"
+          >
+            <ClipboardList className="w-3.5 h-3.5" />
+            <span>Edit List</span>
+            <span className="px-1.5 py-0.5 rounded-full bg-violet-500/30 text-[10px] font-bold">
+              {handledEditRequests.length}
+            </span>
+          </button>
         </div>
 
         {/* KPI cards + Print/CSV */}
@@ -822,235 +1518,322 @@ export const AdminSales: React.FC = () => {
         )}
       </div>
 
-      {/* Sales List */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-        {sales.length === 0 ? (
-          <div className="py-12 text-center text-slate-500">
+      {/* Sales List (Grouped by Shop / Seller with 15-item See More + Group Totals before Expand) */}
+      <div className="space-y-4">
+        {salesGroups.length === 0 ? (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl py-12 text-center text-slate-500">
             <Receipt className="w-8 h-8 mx-auto mb-2 opacity-40" />
             <p className="text-xs">No transaction records found.</p>
           </div>
         ) : (
-          <>
-            {/* Mobile Cards (< md) */}
-            <div className="md:hidden divide-y divide-slate-800/80">
-              {sales.map(sale => {
-                const isVoided = sale.status === 'VOIDED';
+          salesGroups.map(group => {
+            const visibleLimit = groupVisibleCounts[group.key] ?? SALES_PAGE_SIZE;
+            const visibleSales = group.sales.slice(0, visibleLimit);
+            const hasMore = visibleLimit < group.sales.length;
+            const remaining = group.sales.length - visibleSales.length;
 
-                return (
-                  <div
-                    key={sale.id}
-                    className={`p-3.5 space-y-2.5 ${isVoided ? 'opacity-65' : ''}`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-mono font-bold text-white text-xs">
-                            #{sale.receiptNumber}
+            return (
+              <div
+                key={group.key}
+                className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl"
+              >
+                {/* Group Header */}
+                <div className="flex items-center justify-between gap-2 px-4 py-3 bg-slate-950/80 border-b border-slate-800">
+                  <div className="flex items-center gap-2 min-w-0">
+                    {group.kind === 'SELLER' ? (
+                      <UserIcon className="w-4 h-4 text-violet-400 shrink-0" />
+                    ) : (
+                      <Store className="w-4 h-4 text-blue-400 shrink-0" />
+                    )}
+                    <h3 className="text-sm font-bold text-white truncate">{group.label}</h3>
+                  </div>
+                  <span className="shrink-0 px-2.5 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-[11px] font-semibold text-slate-300">
+                    {group.sales.length} {group.sales.length === 1 ? 'sale' : 'sales'}
+                  </span>
+                </div>
+
+                {/* Mobile Cards (< md) */}
+                <div className="md:hidden divide-y divide-slate-800/80">
+                  {visibleSales.map(sale => {
+                    const isVoided = sale.status === 'VOIDED';
+
+                    return (
+                      <div
+                        key={sale.id}
+                        className={`p-3.5 space-y-2.5 ${isVoided ? 'opacity-65' : ''}`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-mono font-bold text-white text-xs">
+                                #{sale.receiptNumber}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.2 rounded-full text-[9px] font-bold ${
+                                  !isVoided
+                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                    : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                                }`}
+                              >
+                                {sale.status}
+                              </span>
+                            </div>
+                            <p className="text-[10px] font-mono text-slate-400 mt-0.5">
+                              {formatDateTime(sale.createdAt)}
+                            </p>
+                          </div>
+
+                          <div className="text-right shrink-0">
+                            <div className="font-mono font-bold text-white text-sm">
+                              {formatCurrency(sale.total, settings.currencySymbol)}
+                            </div>
+                            <div className="font-mono text-[10px] text-emerald-400">
+                              {isVoided
+                                ? formatCurrency(0, settings.currencySymbol)
+                                : `+${formatCurrency(sale.grossProfit, settings.currencySymbol)}`}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                          <span className="px-1.5 py-0.2 rounded bg-blue-950 text-blue-300 border border-blue-800/50 font-semibold">
+                            🏪 {sale.shopName || 'N/A'}
                           </span>
-                          <span
-                            className={`px-1.5 py-0.2 rounded-full text-[9px] font-bold ${
-                              !isVoided
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                          <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300">
+                            {sale.sellerName}
+                          </span>
+                          <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 uppercase">
+                            {sale.paymentMethod}
+                          </span>
+                        </div>
+
+                        <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
+                          <p className="text-[10px] text-slate-500 truncate">
+                            {(sale.items || [])
+                              .map(i => `${i.quantity}x ${i.productName}`)
+                              .join(', ')}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 pt-1.5 border-t border-slate-800/60">
+                          <button
+                            onClick={() => showReceipt(sale)}
+                            className="flex-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 text-[11px] font-semibold transition"
+                          >
+                            Receipt
+                          </button>
+
+                          {!isVoided && canEditSale && (
+                            <button
+                              onClick={() => openEditSale(sale)}
+                              className="flex-1 flex items-center justify-center gap-1 py-2 rounded-lg bg-blue-500/15 hover:bg-blue-600 active:bg-blue-700 text-blue-300 hover:text-white text-[11px] font-semibold border border-blue-500/30 transition"
+                            >
+                              <Pencil className="w-3 h-3" />
+                              Edit
+                            </button>
+                          )}
+
+                          {!isVoided && canVoidSale && (
+                            <button
+                              onClick={() => {
+                                setVoidingSale(sale);
+                                setVoidReason('');
+                              }}
+                              className="flex-1 py-2 rounded-lg bg-rose-500/15 hover:bg-rose-600 active:bg-rose-700 text-rose-300 hover:text-white text-[11px] font-semibold border border-rose-500/30 transition"
+                            >
+                              Void
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Tablet / Desktop Table (md+) */}
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400">
+                        <th className="py-3 px-4 font-semibold">Receipt</th>
+                        <th className="py-3 px-4 font-semibold">Date & Time</th>
+                        <th className="py-3 px-4 font-semibold">Shop</th>
+                        <th className="py-3 px-4 font-semibold">Seller</th>
+                        <th className="py-3 px-4 font-semibold">Products</th>
+                        <th className="py-3 px-4 font-semibold">Payment</th>
+                        <th className="py-3 px-4 text-right font-semibold">Total</th>
+                        <th className="py-3 px-4 text-right font-semibold">Profit</th>
+                        <th className="py-3 px-4 text-center font-semibold">Status</th>
+                        <th className="py-3 px-4 text-right font-semibold">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {visibleSales.map(sale => {
+                        const isVoided = sale.status === 'VOIDED';
+
+                        return (
+                          <tr
+                            key={sale.id}
+                            className={`hover:bg-slate-850/60 transition ${
+                              isVoided ? 'opacity-65' : ''
                             }`}
                           >
-                            {sale.status}
-                          </span>
-                        </div>
-                        <p className="text-[10px] font-mono text-slate-400 mt-0.5">
-                          {formatDateTime(sale.createdAt)}
-                        </p>
-                      </div>
+                            <td className="py-3 px-4 font-mono font-bold text-white">
+                              {sale.receiptNumber}
+                            </td>
+                            <td className="py-3 px-4 text-slate-400">
+                              {formatDateTime(sale.createdAt)}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="px-2 py-0.5 rounded bg-blue-950/70 text-blue-300 border border-blue-800/50 text-[10px] font-semibold">
+                                🏪 {sale.shopName || 'N/A'}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-slate-300 font-medium">
+                              {sale.sellerName}
+                            </td>
+                            <td className="py-3 px-4 max-w-xs">
+                              <div className="flex flex-wrap gap-1">
+                                {(sale.items || []).map((item, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700/60 text-[11px] text-slate-200"
+                                  >
+                                    <span className="font-bold text-blue-400">
+                                      {item.quantity}x
+                                    </span>
+                                    <span className="truncate max-w-[120px]">
+                                      {item.productName}
+                                    </span>
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] uppercase font-medium">
+                                {sale.paymentMethod}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono font-bold text-white">
+                              {formatCurrency(sale.total, settings.currencySymbol)}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono font-bold text-emerald-400">
+                              {isVoided
+                                ? formatCurrency(0, settings.currencySymbol)
+                                : `+${formatCurrency(sale.grossProfit, settings.currencySymbol)}`}
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  !isVoided
+                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                    : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                                }`}
+                              >
+                                {sale.status}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
+                              <button
+                                onClick={() => showReceipt(sale)}
+                                className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition"
+                              >
+                                Receipt
+                              </button>
+                              {!isVoided && (
+                                <>
+                                  {canEditSale && (
+                                    <button
+                                      onClick={() => openEditSale(sale)}
+                                      className="px-2 py-1.5 rounded bg-blue-500/15 hover:bg-blue-600 hover:text-white text-blue-300 text-[11px] font-semibold border border-blue-500/30 transition"
+                                    >
+                                      <Pencil className="w-3 h-3 inline mr-0.5" />
+                                      Edit
+                                    </button>
+                                  )}
+                                  {canVoidSale && (
+                                    <button
+                                      onClick={() => {
+                                        setVoidingSale(sale);
+                                        setVoidReason('');
+                                      }}
+                                      className="px-2 py-1.5 rounded bg-rose-500/15 hover:bg-rose-600 hover:text-white text-rose-300 text-[11px] font-semibold border border-rose-500/30 transition"
+                                    >
+                                      Void
+                                    </button>
+                                  )}
+                                </>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
 
-                      <div className="text-right shrink-0">
-                        <div className="font-mono font-bold text-white text-sm">
-                          {formatCurrency(sale.total, settings.currencySymbol)}
-                        </div>
-                        <div className="font-mono text-[10px] text-emerald-400">
-                          {isVoided
-                            ? formatCurrency(0, settings.currencySymbol)
-                            : `+${formatCurrency(sale.grossProfit, settings.currencySymbol)}`}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
-                      <span className="px-1.5 py-0.2 rounded bg-blue-950 text-blue-300 border border-blue-800/50 font-semibold">
-                        🏪 {sale.shopName || 'N/A'}
+                {/* Per-Group Total Sales & Profit Summary (Before Expand) */}
+                <div className="px-4 py-3 bg-slate-950/70 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-[11px] font-semibold text-slate-400">
+                    {group.label} Totals ({group.completedCount} completed)
+                  </span>
+                  <div className="flex flex-wrap items-center gap-4 text-xs">
+                    <div>
+                      <span className="text-slate-400 mr-1.5">Total Sales:</span>
+                      <span className="font-mono font-bold text-white">
+                        {formatCurrency(group.totalRevenue, settings.currencySymbol)}
                       </span>
-                      <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300">
-                        {sale.sellerName}
-                      </span>
-                      <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 uppercase">
-                        {sale.paymentMethod}
+                    </div>
+                    <div>
+                      <span className="text-slate-400 mr-1.5">Total Profit:</span>
+                      <span className="font-mono font-bold text-emerald-400">
+                        {formatCurrency(group.totalProfit, settings.currencySymbol)}
                       </span>
                     </div>
+                  </div>
+                </div>
 
-                    <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
-                      <p className="text-[10px] text-slate-500 truncate">
-                        {(sale.items || [])
-                          .map(i => `${i.quantity}x ${i.productName}`)
-                          .join(', ')}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2 pt-1.5 border-t border-slate-800/60">
-                      <button
-                        onClick={() => showReceipt(sale)}
-                        className="flex-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 text-[11px] font-semibold transition"
-                      >
-                        Receipt
-                      </button>
-
-                      {!isVoided && canEditSale && (
+                {/* Expand / See More Footer */}
+                {(group.sales.length > SALES_PAGE_SIZE || visibleLimit > SALES_PAGE_SIZE) && (
+                  <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-slate-950/90 border-t border-slate-800/80 text-xs">
+                    <span className="text-slate-400">
+                      Showing {visibleSales.length} of {group.sales.length}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {visibleLimit > SALES_PAGE_SIZE && (
                         <button
-                          onClick={() => openEditSale(sale)}
-                          className="flex-1 flex items-center justify-center gap-1 py-2 rounded-lg bg-blue-500/15 hover:bg-blue-600 active:bg-blue-700 text-blue-300 hover:text-white text-[11px] font-semibold border border-blue-500/30 transition"
+                          type="button"
+                          onClick={() =>
+                            setGroupVisibleCounts(prev => ({
+                              ...prev,
+                              [group.key]: SALES_PAGE_SIZE,
+                            }))
+                          }
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition"
                         >
-                          <Pencil className="w-3 h-3" />
-                          Edit
+                          Show Less
                         </button>
                       )}
-
-                      {!isVoided && canVoidSale && (
+                      {hasMore && (
                         <button
-                          onClick={() => {
-                            setVoidingSale(sale);
-                            setVoidReason('');
-                          }}
-                          className="flex-1 py-2 rounded-lg bg-rose-500/15 hover:bg-rose-600 active:bg-rose-700 text-rose-300 hover:text-white text-[11px] font-semibold border border-rose-500/30 transition"
+                          type="button"
+                          onClick={() =>
+                            setGroupVisibleCounts(prev => ({
+                              ...prev,
+                              [group.key]: (prev[group.key] ?? SALES_PAGE_SIZE) + SALES_PAGE_SIZE,
+                            }))
+                          }
+                          className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold transition"
                         >
-                          Void
+                          See More (+{Math.min(SALES_PAGE_SIZE, remaining)})
                         </button>
                       )}
                     </div>
                   </div>
-                );
-              })}
-            </div>
-
-            {/* Tablet / Desktop Table (md+) */}
-            <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400">
-                    <th className="py-3 px-4 font-semibold">Receipt</th>
-                    <th className="py-3 px-4 font-semibold">Date & Time</th>
-                    <th className="py-3 px-4 font-semibold">Shop</th>
-                    <th className="py-3 px-4 font-semibold">Seller</th>
-                    <th className="py-3 px-4 font-semibold">Products</th>
-                    <th className="py-3 px-4 font-semibold">Payment</th>
-                    <th className="py-3 px-4 text-right font-semibold">Total</th>
-                    <th className="py-3 px-4 text-right font-semibold">Profit</th>
-                    <th className="py-3 px-4 text-center font-semibold">Status</th>
-                    <th className="py-3 px-4 text-right font-semibold">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {sales.map(sale => {
-                    const isVoided = sale.status === 'VOIDED';
-
-                    return (
-                      <tr
-                        key={sale.id}
-                        className={`hover:bg-slate-850/60 transition ${
-                          isVoided ? 'opacity-65' : ''
-                        }`}
-                      >
-                        <td className="py-3 px-4 font-mono font-bold text-white">
-                          {sale.receiptNumber}
-                        </td>
-                        <td className="py-3 px-4 text-slate-400">
-                          {formatDateTime(sale.createdAt)}
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="px-2 py-0.5 rounded bg-blue-950/70 text-blue-300 border border-blue-800/50 text-[10px] font-semibold">
-                            🏪 {sale.shopName || 'N/A'}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-slate-300 font-medium">
-                          {sale.sellerName}
-                        </td>
-                        <td className="py-3 px-4 max-w-xs">
-                          <div className="flex flex-wrap gap-1">
-                            {(sale.items || []).map((item, idx) => (
-                              <span
-                                key={idx}
-                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700/60 text-[11px] text-slate-200"
-                              >
-                                <span className="font-bold text-blue-400">
-                                  {item.quantity}x
-                                </span>
-                                <span className="truncate max-w-[120px]">
-                                  {item.productName}
-                                </span>
-                              </span>
-                            ))}
-                          </div>
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] uppercase font-medium">
-                            {sale.paymentMethod}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-right font-mono font-bold text-white">
-                          {formatCurrency(sale.total, settings.currencySymbol)}
-                        </td>
-                        <td className="py-3 px-4 text-right font-mono font-bold text-emerald-400">
-                          {isVoided
-                            ? formatCurrency(0, settings.currencySymbol)
-                            : `+${formatCurrency(sale.grossProfit, settings.currencySymbol)}`}
-                        </td>
-                        <td className="py-3 px-4 text-center">
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                              !isVoided
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                            }`}
-                          >
-                            {sale.status}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
-                          <button
-                            onClick={() => showReceipt(sale)}
-                            className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition"
-                          >
-                            Receipt
-                          </button>
-                          {!isVoided && (
-                            <>
-                              {canEditSale && (
-                                <button
-                                  onClick={() => openEditSale(sale)}
-                                  className="px-2 py-1.5 rounded bg-blue-500/15 hover:bg-blue-600 hover:text-white text-blue-300 text-[11px] font-semibold border border-blue-500/30 transition"
-                                >
-                                  <Pencil className="w-3 h-3 inline mr-0.5" />
-                                  Edit
-                                </button>
-                              )}
-                              {canVoidSale && (
-                                <button
-                                  onClick={() => {
-                                    setVoidingSale(sale);
-                                    setVoidReason('');
-                                  }}
-                                  className="px-2 py-1.5 rounded bg-rose-500/15 hover:bg-rose-600 hover:text-white text-rose-300 text-[11px] font-semibold border border-rose-500/30 transition"
-                                >
-                                  Void
-                                </button>
-                              )}
-                            </>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
 
