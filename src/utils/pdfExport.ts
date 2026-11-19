@@ -1146,7 +1146,7 @@ export async function downloadPriceDeviationsPdf(
     pdfSafe(formatDateTime(d.createdAt)),
     pdfSafe(d.receiptNumber),
     pdfSafe(d.shopName),
-    pdfSafe(d.sellerName),
+    pdfSafe(d.sellerDisplayName || d.sellerName),
     pdfSafe(`${d.productName}${d.belowCost ? ' [LOSS]' : ''}`),
     pdfSafe(d.referencePrice > 0 ? formatCurrency(d.referencePrice, symbol) : '-'),
     pdfSafe(formatCurrency(d.soldPrice, symbol)),

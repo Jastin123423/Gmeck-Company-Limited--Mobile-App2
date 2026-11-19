@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Scale,
   Coins,
+  UserCheck,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import {
@@ -48,6 +49,8 @@ interface DeviationRow {
   shopName: string;
   sellerId: string;
   sellerName: string;
+  assistantName?: string;
+  sellerDisplayName: string;
   productId: string;
   productName: string;
   sku: string;
@@ -102,7 +105,7 @@ const MobileSectionHeader: React.FC<{
   collapsed: boolean;
   onToggleCollapsed: () => void;
   actions?: React.ReactNode;
-  accent?: 'blue' | 'rose' | 'purple' | 'amber';
+  accent?: 'blue' | 'rose' | 'purple' | 'amber' | 'emerald';
 }> = ({
   title, subtitle, icon, period, onPeriodChange,
   customStart, customEnd, onCustomStartChange, onCustomEndChange,
@@ -113,12 +116,14 @@ const MobileSectionHeader: React.FC<{
     rose: 'from-rose-950/20 via-slate-900 to-slate-900',
     purple: 'from-purple-950/20 via-slate-900 to-slate-900',
     amber: 'from-amber-950/20 via-slate-900 to-slate-900',
+    emerald: 'from-emerald-950/20 via-slate-900 to-slate-900',
   };
   const pillActive: Record<string, string> = {
     blue: 'bg-blue-600 text-white shadow-sm',
     rose: 'bg-rose-600 text-white shadow-sm',
     purple: 'bg-purple-600 text-white shadow-sm',
     amber: 'bg-amber-600 text-white shadow-sm',
+    emerald: 'bg-emerald-600 text-white shadow-sm',
   };
 
   return (
@@ -218,6 +223,10 @@ export const AdminReports: React.FC = () => {
   const [sellerStart, setSellerStart] = useState('');
   const [sellerEnd, setSellerEnd] = useState('');
 
+  const [assistantPeriod, setAssistantPeriod] = useState<ReportPeriod>('today');
+  const [assistantStart, setAssistantStart] = useState('');
+  const [assistantEnd, setAssistantEnd] = useState('');
+
   const [pnlPeriod, setPnlPeriod] = useState<ProfitLossPeriod>('day');
   const [pnlStart, setPnlStart] = useState('');
   const [pnlEnd, setPnlEnd] = useState('');
@@ -230,10 +239,12 @@ export const AdminReports: React.FC = () => {
   const [shopsCollapsed, setShopsCollapsed] = useState(false);
   const [productsCollapsed, setProductsCollapsed] = useState(false);
   const [sellersCollapsed, setSellersCollapsed] = useState(false);
+  const [assistantsCollapsed, setAssistantsCollapsed] = useState(false);
 
   const [shopFilter, setShopFilter] = useState('ALL');
   const [productSearch, setProductSearch] = useState('');
   const [sellerSearch, setSellerSearch] = useState('');
+  const [assistantSearch, setAssistantSearch] = useState('');
   const [isPrinting, setIsPrinting] = useState(false);
   const [deviationDirection, setDeviationDirection] = useState<DeviationDirection>('ALL');
 
@@ -243,6 +254,7 @@ export const AdminReports: React.FC = () => {
   const platformAdmin = isPlatformAdmin(currentUser);
   const shopAdmin = isShopAdmin(currentUser);
   const settings = dbState.settings;
+  const salesAssistantEnabled = Boolean(settings.enableSalesAssistant);
   const allShops = dbState.shops || [];
   const shops = platformAdmin
     ? allShops
@@ -274,6 +286,7 @@ export const AdminReports: React.FC = () => {
   const shopRange = useMemo(() => computeRange(shopPeriod, shopStart, shopEnd), [shopPeriod, shopStart, shopEnd]);
   const productRange = useMemo(() => computeRange(productPeriod, productStart, productEnd), [productPeriod, productStart, productEnd]);
   const sellerRange = useMemo(() => computeRange(sellerPeriod, sellerStart, sellerEnd), [sellerPeriod, sellerStart, sellerEnd]);
+  const assistantRange = useMemo(() => computeRange(assistantPeriod, assistantStart, assistantEnd), [assistantPeriod, assistantStart, assistantEnd]);
   const pnlRange = useMemo(
     () => ReportService.computeProfitLossDateRange(pnlPeriod, pnlStart, pnlEnd),
     [pnlPeriod, pnlStart, pnlEnd]
@@ -283,6 +296,7 @@ export const AdminReports: React.FC = () => {
   const shopSummary = useMemo(() => ReportService.getFinancialSummary(shopRange, { shopId: effectiveShopFilter }, currentUser) || {}, [shopRange, currentUser, dbState, effectiveShopFilter]);
   const productSummary = useMemo(() => ReportService.getFinancialSummary(productRange, { shopId: effectiveShopFilter }, currentUser) || {}, [productRange, currentUser, dbState, effectiveShopFilter]);
   const sellerSummary = useMemo(() => ReportService.getFinancialSummary(sellerRange, { shopId: effectiveShopFilter }, currentUser) || {}, [sellerRange, currentUser, dbState, effectiveShopFilter]);
+  const assistantSummary = useMemo(() => ReportService.getFinancialSummary(assistantRange, { shopId: effectiveShopFilter }, currentUser) || {}, [assistantRange, currentUser, dbState, effectiveShopFilter]);
   const deviationSummary = useMemo(() => ReportService.getFinancialSummary(deviationRange, { shopId: effectiveShopFilter }, currentUser) || {}, [deviationRange, currentUser, dbState, effectiveShopFilter]);
 
   // Always show all accessible shops in Shop Profit & Loss so every shop's capital, profit & loss can be compared
@@ -321,6 +335,114 @@ export const AdminReports: React.FC = () => {
     const q = sellerSearch.trim().toLowerCase();
     return list.filter((s: any) => s.name.toLowerCase().includes(q));
   }, [sellerSummary, sellerSearch]);
+
+  // ─────────────────────────────────────────────────────────────
+  // Assistant Performance grouped under each Seller
+  // ─────────────────────────────────────────────────────────────
+  const assistantPerformance = useMemo(() => {
+    const sales = ((assistantSummary as any).filteredSales || []) as any[];
+    const sellerMap = new Map<
+      string,
+      {
+        sellerKey: string;
+        sellerName: string;
+        totalOrders: number;
+        totalSales: number;
+        totalProfit: number;
+        assistantsMap: Map<
+          string,
+          {
+            key: string;
+            assistantName: string;
+            orders: number;
+            itemsSold: number;
+            totalSales: number;
+            profit: number;
+          }
+        >;
+      }
+    >();
+
+    for (const sale of sales) {
+      if (sale.status === 'VOIDED') continue;
+      const rawAssistant = (sale.assistantName || '').trim();
+      if (!rawAssistant) continue;
+
+      const sellerKey = sale.sellerId || sale.sellerName || 'unknown';
+      const sellerName = sale.sellerName || 'Seller';
+      if (!sellerMap.has(sellerKey)) {
+        sellerMap.set(sellerKey, {
+          sellerKey,
+          sellerName,
+          totalOrders: 0,
+          totalSales: 0,
+          totalProfit: 0,
+          assistantsMap: new Map(),
+        });
+      }
+      const sellerGroup = sellerMap.get(sellerKey)!;
+      const saleTotal = Number(sale.total || 0);
+      const saleProfit = Number(sale.grossProfit || 0);
+      const saleUnits = (sale.items || []).reduce((sum: number, it: any) => sum + Number(it.quantity || 0), 0);
+
+      sellerGroup.totalOrders += 1;
+      sellerGroup.totalSales += saleTotal;
+      sellerGroup.totalProfit += saleProfit;
+
+      const assistantKey = rawAssistant.toLowerCase();
+      if (!sellerGroup.assistantsMap.has(assistantKey)) {
+        sellerGroup.assistantsMap.set(assistantKey, {
+          key: `${sellerKey}::${assistantKey}`,
+          assistantName: rawAssistant,
+          orders: 0,
+          itemsSold: 0,
+          totalSales: 0,
+          profit: 0,
+        });
+      }
+      const asst = sellerGroup.assistantsMap.get(assistantKey)!;
+      asst.orders += 1;
+      asst.itemsSold += saleUnits;
+      asst.totalSales += saleTotal;
+      asst.profit += saleProfit;
+    }
+
+    const q = assistantSearch.trim().toLowerCase();
+    const groups = Array.from(sellerMap.values())
+      .map(g => {
+        const allAssistants = Array.from(g.assistantsMap.values())
+          .map(a => ({
+            ...a,
+            avgOrder: a.orders > 0 ? a.totalSales / a.orders : 0,
+            sharePct: g.totalSales > 0 ? Math.min(100, Math.round((a.totalSales / g.totalSales) * 100)) : 0,
+          }))
+          .sort((a, b) => b.totalSales - a.totalSales || b.orders - a.orders);
+
+        const filteredAssistants = q
+          ? g.sellerName.toLowerCase().includes(q)
+            ? allAssistants
+            : allAssistants.filter(a => a.assistantName.toLowerCase().includes(q))
+          : allAssistants;
+
+        return {
+          sellerKey: g.sellerKey,
+          sellerName: g.sellerName,
+          totalOrders: g.totalOrders,
+          totalSales: g.totalSales,
+          totalProfit: g.totalProfit,
+          assistants: filteredAssistants,
+        };
+      })
+      .filter(g => g.assistants.length > 0)
+      .sort((a, b) => b.totalSales - a.totalSales || a.sellerName.localeCompare(b.sellerName));
+
+    const totalAssistants = groups.reduce((s, g) => s + g.assistants.length, 0);
+    const totalOrders = groups.reduce((s, g) => s + g.assistants.reduce((a, b) => a + b.orders, 0), 0);
+    const totalSales = groups.reduce((s, g) => s + g.assistants.reduce((a, b) => a + b.totalSales, 0), 0);
+    const totalProfit = groups.reduce((s, g) => s + g.assistants.reduce((a, b) => a + b.profit, 0), 0);
+
+    return { groups, totalAssistants, totalOrders, totalSales, totalProfit };
+  }, [assistantSummary, assistantSearch]);
 
   const selectedShopName =
     effectiveShopFilter === 'ALL'
@@ -379,6 +501,12 @@ export const AdminReports: React.FC = () => {
         const diff = referencePrice > 0 ? Number((soldPrice - referencePrice).toFixed(2)) : 0;
         const totalImpact = referencePrice > 0 ? Number((diff * qty).toFixed(2)) : 0;
 
+        const assistantTrimmed = (sale.assistantName || '').trim();
+        const sellerDisplayName =
+          salesAssistantEnabled && assistantTrimmed
+            ? `${sale.sellerName}/${assistantTrimmed}`
+            : sale.sellerName;
+
         rows.push({
           saleId: sale.id,
           receiptNumber: sale.receiptNumber,
@@ -387,6 +515,8 @@ export const AdminReports: React.FC = () => {
           shopName: sale.shopName || '',
           sellerId: sale.sellerId,
           sellerName: sale.sellerName,
+          assistantName: assistantTrimmed || undefined,
+          sellerDisplayName,
           productId: item.productId,
           productName: item.productName,
           sku: item.sku || product?.sku || '',
@@ -406,7 +536,7 @@ export const AdminReports: React.FC = () => {
 
     rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     return rows;
-  }, [deviationSummary, products]);
+  }, [deviationSummary, products, salesAssistantEnabled]);
 
   const deviations = useMemo(() => {
     if (deviationDirection === 'ALL') return allDeviations;
@@ -555,7 +685,7 @@ export const AdminReports: React.FC = () => {
     csv += `Net Impact,${deviationStats.netImpact}\n\n`;
     csv += `Date,Receipt #,Shop,Seller,Product,SKU,Selling Price,Sold At,Purchase Cost,Diff,Qty,Impact,Direction,Below Cost,Reference Source\n`;
     deviations.forEach(d => {
-      csv += `"${formatDateTime(d.createdAt)}","${d.receiptNumber}","${d.shopName}","${d.sellerName}","${d.productName}","${d.sku}",${d.referencePrice},${d.soldPrice},${d.purchasePrice},${d.diff},${d.quantity},${d.totalImpact},${d.direction},${d.belowCost ? 'YES' : 'NO'},"${d.usedSnapshot ? 'Snapshot' : 'Current price'}"\n`;
+      csv += `"${formatDateTime(d.createdAt)}","${d.receiptNumber}","${d.shopName}","${d.sellerDisplayName}","${d.productName}","${d.sku}",${d.referencePrice},${d.soldPrice},${d.purchasePrice},${d.diff},${d.quantity},${d.totalImpact},${d.direction},${d.belowCost ? 'YES' : 'NO'},"${d.usedSnapshot ? 'Snapshot' : 'Current price'}"\n`;
     });
 
     const fileName = `price_deviations_${selectedShopName.toLowerCase().replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`;
@@ -1555,11 +1685,11 @@ export const AdminReports: React.FC = () => {
                           </div>
                         </div>
 
-                        {/* Footer: receipt • seller (BOLD) • date */}
+                        {/* Footer: receipt • seller/assistant (BOLD) • date */}
                         <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800/60 text-[10px]">
                           <span className="font-mono text-slate-400 truncate">{d.receiptNumber}</span>
-                          <span className="font-bold text-slate-100 truncate max-w-[140px]" title={d.sellerName}>
-                            {d.sellerName}
+                          <span className="font-bold text-slate-100 truncate max-w-[165px]" title={d.sellerDisplayName}>
+                            {d.sellerDisplayName}
                           </span>
                           <span className="font-mono text-slate-400 shrink-0">{formatDateTime(d.createdAt).slice(5, 16)}</span>
                         </div>
@@ -1726,6 +1856,143 @@ export const AdminReports: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* ── ASSISTANT PERFORMANCE (Only shown when Sales Assistant feature is ON) ── */}
+      {salesAssistantEnabled && (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+          <MobileSectionHeader
+            title="Assistant Performance"
+            subtitle="Sales assistant performance grouped under each seller"
+            icon={<UserCheck className="w-4 h-4 text-emerald-400" />}
+            period={assistantPeriod}
+            onPeriodChange={setAssistantPeriod}
+            customStart={assistantStart}
+            customEnd={assistantEnd}
+            onCustomStartChange={setAssistantStart}
+            onCustomEndChange={setAssistantEnd}
+            collapsed={assistantsCollapsed}
+            onToggleCollapsed={() => setAssistantsCollapsed(v => !v)}
+            accent="emerald"
+          />
+          {!assistantsCollapsed && (
+            <div className="p-3.5 space-y-3">
+              {/* Summary Strip */}
+              <div className="grid grid-cols-3 gap-2">
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5">
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider">Assistants</div>
+                  <div className="text-sm font-extrabold text-white font-mono mt-0.5">
+                    {assistantPerformance.totalAssistants}
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    {assistantPerformance.totalOrders} {assistantPerformance.totalOrders === 1 ? 'order' : 'orders'}
+                  </div>
+                </div>
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5">
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider">Total Sales</div>
+                  <div className="text-xs sm:text-sm font-extrabold text-blue-400 font-mono mt-0.5 truncate">
+                    {formatCurrency(assistantPerformance.totalSales, settings.currencySymbol)}
+                  </div>
+                  <div className="text-[10px] text-slate-500">Assisted revenue</div>
+                </div>
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5">
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider">Total Profit</div>
+                  <div className="text-xs sm:text-sm font-extrabold text-emerald-400 font-mono mt-0.5 truncate">
+                    +{formatCurrency(assistantPerformance.totalProfit, settings.currencySymbol)}
+                  </div>
+                  <div className="text-[10px] text-slate-500">Gross margin</div>
+                </div>
+              </div>
+
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                <input
+                  type="text"
+                  value={assistantSearch}
+                  onChange={e => setAssistantSearch(e.target.value)}
+                  placeholder="Filter by assistant or seller name..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              {assistantPerformance.groups.length === 0 ? (
+                <div className="py-6 text-center text-slate-500 text-xs">
+                  No sales recorded with a Sales Assistant (Jina la Muuzaji) in this period.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {assistantPerformance.groups.map(group => (
+                    <div
+                      key={group.sellerKey}
+                      className="rounded-xl bg-slate-950/80 border border-slate-800 overflow-hidden"
+                    >
+                      {/* Seller Group Header */}
+                      <div className="px-3 py-2 bg-slate-950 border-b border-slate-800/80 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                          <span className="text-xs font-bold text-white truncate">
+                            Seller: {group.sellerName}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono shrink-0">
+                            {group.assistants.length} {group.assistants.length === 1 ? 'assistant' : 'assistants'}
+                          </span>
+                        </div>
+                        <div className="text-right shrink-0 text-[11px] font-mono">
+                          <span className="text-slate-300 font-semibold">
+                            {formatCurrency(group.totalSales, settings.currencySymbol)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Assistants under this Seller */}
+                      <div className="divide-y divide-slate-800/60 px-3">
+                        {group.assistants.map(asst => (
+                          <div key={asst.key} className="py-2.5 space-y-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-xs font-semibold text-white truncate">
+                                  {asst.assistantName}
+                                </span>
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 font-mono truncate">
+                                  {group.sellerName}/{asst.assistantName}
+                                </span>
+                              </div>
+                              <span className="font-mono font-bold text-emerald-400 text-xs shrink-0">
+                                +{formatCurrency(asst.profit, settings.currencySymbol)}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center justify-between text-[11px] text-slate-400">
+                              <span>
+                                {asst.orders} {asst.orders === 1 ? 'order' : 'orders'} · {Number(asst.itemsSold.toFixed(2))} units · Avg {formatCurrency(asst.avgOrder, settings.currencySymbol)}
+                              </span>
+                              <span className="font-mono font-semibold text-slate-200 shrink-0">
+                                {formatCurrency(asst.totalSales, settings.currencySymbol)}
+                              </span>
+                            </div>
+
+                            {/* Performance share bar under Seller */}
+                            <div className="flex items-center gap-2">
+                              <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                                <div
+                                  className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-400"
+                                  style={{ width: `${Math.max(4, asst.sharePct)}%` }}
+                                />
+                              </div>
+                              <span className="text-[10px] font-mono text-slate-500 w-8 text-right shrink-0">
+                                {asst.sharePct}%
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

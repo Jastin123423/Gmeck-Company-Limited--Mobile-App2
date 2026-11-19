@@ -67,6 +67,7 @@ export const NewSalePOS: React.FC = () => {
   const [overallDiscount, setOverallDiscount] = useState<number>(0);
   const [amountReceived, setAmountReceived] = useState<string>('');
   const [saleNotes, setSaleNotes] = useState<string>('');
+  const [assistantName, setAssistantName] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
@@ -82,6 +83,12 @@ export const NewSalePOS: React.FC = () => {
   // Pagination
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+
+  // Quick-add search directly inside/above Cart
+  const [cartSearchQuery, setCartSearchQuery] = useState('');
+  const [cartSearchVisibleCount, setCartSearchVisibleCount] = useState(PAGE_SIZE);
+  const cartListRef = useRef<HTMLDivElement>(null);
+  const cartSearchInputRef = useRef<HTMLInputElement>(null);
 
   const barcodeInputRef = useRef<HTMLInputElement>(null);
   const settings = dbState.settings;
@@ -152,6 +159,33 @@ export const NewSalePOS: React.FC = () => {
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
   }, [searchQuery, selectedCategory]);
+
+  // Quick-add search results for the search bar above the cart
+  const cartSearchResults = useMemo(() => {
+    const q = cartSearchQuery.toLowerCase().trim();
+    if (!q) return [];
+
+    const matched = products.filter(p => {
+      return (
+        p.name.toLowerCase().includes(q) ||
+        p.sku.toLowerCase().includes(q) ||
+        p.barcode.toLowerCase().includes(q) ||
+        (p.variation && p.variation.toLowerCase().includes(q))
+      );
+    });
+
+    return [...matched].sort((a, b) => {
+      const aSales = salesCountMap.get(a.id) || 0;
+      const bSales = salesCountMap.get(b.id) || 0;
+      if (bSales !== aSales) return bSales - aSales;
+      if (b.currentStock !== a.currentStock) return b.currentStock - a.currentStock;
+      return a.name.localeCompare(b.name);
+    });
+  }, [products, cartSearchQuery, salesCountMap]);
+
+  useEffect(() => {
+    setCartSearchVisibleCount(PAGE_SIZE);
+  }, [cartSearchQuery]);
 
   const visibleProducts = filteredProducts.slice(0, visibleCount);
   const hasMore = filteredProducts.length > visibleCount;
@@ -234,8 +268,9 @@ export const NewSalePOS: React.FC = () => {
       setIsMobileCartOpen(true);
     }
 
-    // Clear search after adding so they can search for the next item quickly
+    // Clear searches after adding so seller can immediately search for the next item
     setSearchQuery('');
+    setCartSearchQuery('');
 
     setCart(prev => {
       const existing = prev.find(item => item.product.id === product.id);
@@ -260,6 +295,15 @@ export const NewSalePOS: React.FC = () => {
       }
 
       const initialQty = isDecimalUnit(product.unit) ? 0.25 : 1;
+
+      window.setTimeout(() => {
+        if (cartListRef.current) {
+          cartListRef.current.scrollTo({
+            top: cartListRef.current.scrollHeight,
+            behavior: 'smooth',
+          });
+        }
+      }, 60);
 
       return [
         ...prev,
@@ -548,7 +592,33 @@ export const NewSalePOS: React.FC = () => {
     setOverallDiscount(0);
     setAmountReceived('');
     setSaleNotes('');
+    setAssistantName('');
+    setCartSearchQuery('');
     setIsMobileCartOpen(false);
+  };
+
+  const handleCartSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      setCartSearchQuery('');
+      return;
+    }
+    if (e.key === 'Enter' && cartSearchQuery.trim()) {
+      e.preventDefault();
+      const q = cartSearchQuery.trim().toLowerCase();
+      const exact = products.find(
+        p =>
+          p.currentStock > 0 &&
+          (p.barcode.toLowerCase() === q || p.sku.toLowerCase() === q)
+      );
+      if (exact) {
+        addToCart(exact);
+        return;
+      }
+      const inStockMatches = cartSearchResults.filter(p => p.currentStock > 0);
+      if (inStockMatches.length === 1) {
+        addToCart(inStockMatches[0]);
+      }
+    }
   };
 
   const handleBarcodeSubmit = (e: React.FormEvent) => {
@@ -642,6 +712,9 @@ export const NewSalePOS: React.FC = () => {
         discount: overallDiscount,
         amountReceived: tender,
         notes: saleNotes,
+        assistantName: settings.enableSalesAssistant
+          ? assistantName.trim() || undefined
+          : undefined,
       },
       currentUser
     );
@@ -666,10 +739,15 @@ export const NewSalePOS: React.FC = () => {
   };
 
   // Cart Items Component
-  const renderCartItemsAndCheckout = () => (
+  const renderCartItemsAndCheckout = () => {
+    const isSearchingInCart = cartSearchQuery.trim().length > 0;
+    const visibleCartSearchMatches = cartSearchResults.slice(0, cartSearchVisibleCount);
+    const hasMoreCartMatches = cartSearchResults.length > cartSearchVisibleCount;
+
+    return (
     <div className="flex flex-col h-full justify-between overflow-hidden bg-slate-900">
       {/* Cart Header */}
-      <div className="p-3.5 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between">
+      <div className="p-3.5 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
           <ShoppingCart className="w-4 h-4 text-blue-400" />
           <h3 className="text-xs font-bold text-white uppercase tracking-wider">
@@ -688,7 +766,10 @@ export const NewSalePOS: React.FC = () => {
             </button>
           )}
           <button
-            onClick={() => setIsMobileCartOpen(false)}
+            onClick={() => {
+              setCartSearchQuery('');
+              setIsMobileCartOpen(false);
+            }}
             className="lg:hidden p-1 rounded-lg text-slate-400 hover:text-white"
           >
             <X className="w-5 h-5" />
@@ -696,8 +777,156 @@ export const NewSalePOS: React.FC = () => {
         </div>
       </div>
 
-      {/* Cart Items List */}
-      <div className="flex-1 p-3 overflow-y-auto space-y-2.5">
+      {/* Quick-Add Product Search Bar Above Cart */}
+      <div className="px-3 py-2.5 bg-slate-950/90 border-b border-slate-800/90 shrink-0">
+        <div className="relative flex items-center">
+          <Search className="w-4 h-4 text-blue-400 absolute left-3 pointer-events-none" />
+          <input
+            ref={cartSearchInputRef}
+            id="pos-cart-quick-search"
+            type="text"
+            value={cartSearchQuery}
+            onChange={e => setCartSearchQuery(e.target.value)}
+            onKeyDown={handleCartSearchKeyDown}
+            placeholder="Tafuta kuongeza bidhaa nyingine (jina, SKU)..."
+            className="w-full bg-slate-900 border border-slate-700/90 hover:border-slate-600 focus:border-blue-500 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 transition shadow-inner"
+          />
+          {cartSearchQuery && (
+            <button
+              type="button"
+              onClick={() => {
+                setCartSearchQuery('');
+                cartSearchInputRef.current?.focus();
+              }}
+              aria-label="Clear product search"
+              className="absolute right-2.5 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+        {isSearchingInCart && (
+          <div className="flex items-center justify-between mt-1.5 px-0.5 text-[10px] text-slate-400">
+            <span className="flex items-center gap-1">
+              <TrendingUp className="w-3 h-3 text-emerald-400 shrink-0" />
+              <span>
+                <strong className="text-slate-200">{cartSearchResults.length}</strong>{' '}
+                {cartSearchResults.length === 1 ? 'product' : 'products'} found — tap to add
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setCartSearchQuery('')}
+              className="text-blue-400 hover:text-blue-300 font-semibold"
+            >
+              Back to Cart ({cart.length})
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Inline Search Results OR Cart Items List */}
+      {isSearchingInCart ? (
+        <div className="flex-1 p-3 overflow-y-auto space-y-2 bg-slate-950/60">
+          {cartSearchResults.length === 0 ? (
+            <div className="h-full min-h-[160px] flex flex-col items-center justify-center text-center p-6 text-slate-500">
+              <Layers className="w-9 h-9 mb-2 opacity-40" />
+              <p className="text-xs font-semibold text-slate-300">Hakuna bidhaa inayolingana</p>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Jaribu jina lingine, SKU au barcode.
+              </p>
+            </div>
+          ) : (
+            <>
+              {visibleCartSearchMatches.map(product => {
+                const isOutOfStock = product.currentStock <= 0;
+                const isLowStock =
+                  product.currentStock > 0 && product.currentStock <= product.minStock;
+                const existingInCart = cart.find(c => c.product.id === product.id);
+                const decimalUnit = isDecimalUnit(product.unit);
+
+                return (
+                  <button
+                    key={product.id}
+                    type="button"
+                    disabled={isOutOfStock}
+                    onClick={() => !isOutOfStock && addToCart(product)}
+                    className={`w-full text-left p-2.5 rounded-xl border transition-all flex items-center justify-between gap-2.5 active:scale-[0.99] ${
+                      isOutOfStock
+                        ? 'bg-slate-900/40 border-slate-800/60 opacity-50 cursor-not-allowed'
+                        : existingInCart
+                          ? 'bg-blue-950/30 border-blue-500/40 hover:border-blue-400 shadow-sm'
+                          : 'bg-slate-900 border-slate-800 hover:border-blue-500/60 hover:bg-slate-800/80 shadow-sm'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                      <ProductThumbnail product={product} size="sm" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs font-semibold text-white truncate">
+                            {product.name}
+                          </span>
+                          {existingInCart && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30 font-bold shrink-0">
+                              In Cart: {existingInCart.quantity}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5 flex-wrap">
+                          <span className="font-mono text-[10px]">{product.sku}</span>
+                          <span className="text-slate-600">•</span>
+                          <span
+                            className={
+                              isOutOfStock
+                                ? 'text-rose-400 font-bold'
+                                : isLowStock
+                                  ? 'text-amber-400 font-bold'
+                                  : 'text-slate-400'
+                            }
+                          >
+                            {isOutOfStock
+                              ? 'Out of Stock'
+                              : `${product.currentStock} ${product.unit} left`}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <div className="text-right">
+                        <div className="text-xs font-bold text-emerald-400 font-mono">
+                          {formatCurrency(product.sellingPrice, settings.currencySymbol)}
+                        </div>
+                        {decimalUnit && (
+                          <div className="text-[9px] text-slate-500">per {product.unit}</div>
+                        )}
+                      </div>
+                      <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center shadow-sm">
+                        <Plus className="w-4 h-4" />
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+
+              {hasMoreCartMatches && (
+                <button
+                  type="button"
+                  onClick={() => setCartSearchVisibleCount(prev => prev + PAGE_SIZE)}
+                  className="w-full py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition flex items-center justify-center gap-1.5"
+                >
+                  <ChevronDown className="w-3.5 h-3.5" />
+                  <span>
+                    Show More ({cartSearchResults.length - cartSearchVisibleCount} remaining)
+                  </span>
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      ) : (
+      /* Cart Items List */
+      <div ref={cartListRef} className="flex-1 p-3 overflow-y-auto space-y-2.5">
         {cart.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500">
             <ShoppingCart className="w-12 h-12 mb-3 text-slate-700" />
@@ -822,9 +1051,30 @@ export const NewSalePOS: React.FC = () => {
           })
         )}
       </div>
+      )}
 
-      {/* Checkout Panel */}
-      <div className="p-3 sm:p-3.5 bg-slate-950 border-t border-slate-800 space-y-2.5 safe-bottom">
+      {/* Checkout Panel (stays visible; compact on mobile while typing in search so results have full room above keyboard) */}
+      <div className={`p-3 sm:p-3.5 bg-slate-950 border-t border-slate-800 space-y-2.5 safe-bottom ${isSearchingInCart ? 'hidden lg:block' : ''}`}>
+        {Boolean(settings.enableSalesAssistant) && (
+          <div>
+            <label
+              htmlFor="pos-assistant-name-input"
+              className="block text-[10px] sm:text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1"
+            >
+              Jina la Muuzaji
+            </label>
+            <input
+              id="pos-assistant-name-input"
+              type="text"
+              value={assistantName}
+              onChange={e => setAssistantName(e.target.value)}
+              placeholder="Jina la Muuzaji..."
+              autoComplete="off"
+              className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
+        )}
+
         <div>
           <span className="block text-[10px] sm:text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
             Njia ya Malipo
@@ -917,7 +1167,8 @@ export const NewSalePOS: React.FC = () => {
         </button>
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <div id="pos-terminal" className="flex-1 flex flex-col lg:flex-row overflow-hidden bg-slate-950 text-slate-100 select-none relative">
@@ -1200,9 +1451,15 @@ export const NewSalePOS: React.FC = () => {
       {/* Mobile Cart & Checkout Bottom Sheet Modal */}
       {isMobileCartOpen && (
         <div className="lg:hidden fixed inset-0 z-50 flex flex-col justify-end bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="fixed inset-0" onClick={() => setIsMobileCartOpen(false)} />
-          <div className="relative bg-slate-900 border-t border-slate-800 rounded-t-3xl h-[88vh] flex flex-col shadow-2xl z-10 overflow-hidden">
-            <div className="w-12 h-1.5 bg-slate-700 rounded-full mx-auto my-2" />
+          <div
+            className="fixed inset-0"
+            onClick={() => {
+              setCartSearchQuery('');
+              setIsMobileCartOpen(false);
+            }}
+          />
+          <div className="relative bg-slate-900 border-t border-slate-800 rounded-t-3xl h-[92vh] flex flex-col shadow-2xl z-10 overflow-hidden">
+            <div className="w-12 h-1.5 bg-slate-700 rounded-full mx-auto my-2 shrink-0" />
             {renderCartItemsAndCheckout()}
           </div>
         </div>
@@ -1241,6 +1498,9 @@ export const NewSalePOS: React.FC = () => {
               discount: 0,
               amountReceived: payload.items.reduce((sum, i) => sum + (i.unitPrice * i.quantity), 0),
               notes: 'Voice AI Sale',
+              assistantName: settings.enableSalesAssistant
+                ? assistantName.trim() || undefined
+                : undefined,
             };
 
             if (!currentUser) return;

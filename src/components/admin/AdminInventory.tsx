@@ -189,7 +189,96 @@ export const AdminInventory: React.FC = () => {
     }));
   };
 
-  const valuation = InventoryService.getInventoryValuation(selectedShopId, currentUser);
+  // Location-aware valuation for top KPI cards (updates dynamically when switching All / Shop / Store)
+  const scopedValuationProducts = visibleProducts.filter(
+    p => selectedShopId === 'ALL' || p.shopId === selectedShopId
+  );
+
+  const activeScopeSet = new Set<ShopLocationFilter>();
+  const valuation = scopedValuationProducts.reduce(
+    (acc, p) => {
+      const hasValidShop = !!p.shopId && visibleShopIdSet.has(p.shopId);
+      const locFilter: ShopLocationFilter = hasValidShop
+        ? getShopLocationFilter(p.shopId)
+        : 'ALL';
+      activeScopeSet.add(locFilter);
+
+      const shopQty = Math.max(0, Number(p.currentStock || 0));
+      const storeQty = getProductStoreQty(p);
+      const activeQty =
+        locFilter === 'SHOP'
+          ? shopQty
+          : locFilter === 'STORE'
+            ? storeQty
+            : shopQty + storeQty;
+
+      const matchesLocation =
+        locFilter === 'SHOP'
+          ? shopQty > 0
+          : locFilter === 'STORE'
+            ? storeQty > 0
+            : true;
+
+      if (matchesLocation) {
+        acc.totalProducts += 1;
+      }
+
+      acc.totalUnitsInStock += activeQty;
+      const cost = activeQty * (p.purchasePrice || 0);
+      const retail = activeQty * (p.sellingPrice || 0);
+      acc.totalCostValue += cost;
+      acc.totalRetailValue += retail;
+
+      if (p.status === 'ACTIVE') {
+        if (activeQty <= 0) {
+          acc.outOfStockCount += 1;
+        } else if (activeQty <= p.minStock) {
+          acc.lowStockCount += 1;
+        }
+      }
+
+      return acc;
+    },
+    {
+      totalProducts: 0,
+      totalUnitsInStock: 0,
+      totalCostValue: 0,
+      totalRetailValue: 0,
+      potentialProfit: 0,
+      lowStockCount: 0,
+      outOfStockCount: 0,
+    }
+  );
+  valuation.totalCostValue = Number(valuation.totalCostValue.toFixed(2));
+  valuation.totalRetailValue = Number(valuation.totalRetailValue.toFixed(2));
+  valuation.potentialProfit = Number(
+    (valuation.totalRetailValue - valuation.totalCostValue).toFixed(2)
+  );
+
+  const activeValuationScope: ShopLocationFilter | 'MIXED' =
+    activeScopeSet.size === 1
+      ? Array.from(activeScopeSet)[0]
+      : activeScopeSet.size > 1
+        ? 'MIXED'
+        : 'ALL';
+
+  const valuationScopeLabel =
+    activeValuationScope === 'SHOP'
+      ? 'Shop stock only'
+      : activeValuationScope === 'STORE'
+        ? 'Store stock only'
+        : activeValuationScope === 'MIXED'
+          ? 'Filtered (Shop / Store)'
+          : 'All (Shop + Store)';
+
+  const valuationScopeColorClass =
+    activeValuationScope === 'SHOP'
+      ? 'text-emerald-400/90'
+      : activeValuationScope === 'STORE'
+        ? 'text-indigo-400/90'
+        : activeValuationScope === 'MIXED'
+          ? 'text-blue-400/90'
+          : 'text-slate-400';
 
   // Exclude transfers from Movements — transfers are tracked exclusively in Stores & Transfers -> List
   const allMovements = InventoryService.getMovementHistory(
@@ -644,7 +733,7 @@ export const AdminInventory: React.FC = () => {
           </div>
           <div className="text-lg font-bold text-white font-mono">{valuation.totalProducts}</div>
           <p className="text-[10px] text-slate-400 mt-0.5 truncate">
-            {valuation.totalUnitsInStock} total units
+            {valuation.totalUnitsInStock.toLocaleString()} total units
           </p>
         </div>
 
@@ -659,7 +748,13 @@ export const AdminInventory: React.FC = () => {
               ({valuation.outOfStockCount} zero)
             </span>
           </div>
-          <p className="text-[10px] text-slate-400 mt-0.5 truncate">Needs restock</p>
+          <p className="text-[10px] text-slate-400 mt-0.5 truncate">
+            {activeValuationScope === 'SHOP'
+              ? 'Shop stock status'
+              : activeValuationScope === 'STORE'
+                ? 'Store stock status'
+                : 'Needs restock'}
+          </p>
         </div>
 
         <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl">
@@ -670,7 +765,9 @@ export const AdminInventory: React.FC = () => {
           <div className="text-sm font-bold text-purple-300 font-mono truncate">
             {formatCurrency(valuation.totalCostValue, settings.currencySymbol)}
           </div>
-          <p className="text-[10px] text-slate-400 mt-0.5 truncate">Invested capital</p>
+          <p className={`text-[10px] mt-0.5 truncate font-medium ${valuationScopeColorClass}`}>
+            {valuationScopeLabel}
+          </p>
         </div>
 
         <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl">
@@ -793,9 +890,18 @@ export const AdminInventory: React.FC = () => {
                   return true;
                 });
 
-                const shopLowStock = filteredShopProducts.filter(
-                  p => p.status === 'ACTIVE' && p.currentStock <= p.minStock
-                ).length;
+                const shopLowStock = filteredShopProducts.filter(p => {
+                  if (p.status !== 'ACTIVE') return false;
+                  const shopQty = Math.max(0, Number(p.currentStock || 0));
+                  const storeQty = getProductStoreQty(p);
+                  const qty =
+                    locationFilter === 'SHOP'
+                      ? shopQty
+                      : locationFilter === 'STORE'
+                        ? storeQty
+                        : shopQty + storeQty;
+                  return qty <= p.minStock;
+                }).length;
 
                 // Total Cost & Total Retail Value across all items matching the shop filter
                 const totalShopCost = filteredShopProducts.reduce((sum, p) => {
@@ -834,10 +940,7 @@ export const AdminInventory: React.FC = () => {
                   return sum + qty;
                 }, 0);
 
-                const headerStockValue =
-                  locationFilter === 'STORE'
-                    ? totalShopCost
-                    : shopProducts.reduce((sum, p) => sum + p.currentStock * p.purchasePrice, 0);
+                const headerStockValue = totalShopCost;
 
                 // Pagination
                 const visibleCount = getVisibleCount(shop.id);

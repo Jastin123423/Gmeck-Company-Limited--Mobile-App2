@@ -170,6 +170,7 @@ export const AdminStores: React.FC = () => {
   const [transferStatus, setTransferStatus] = useState<StockTransferStatus>('COMPLETED');
   const [transferError, setTransferError] = useState('');
   const [transferProgressPct, setTransferProgressPct] = useState<number | null>(null);
+  const transferProductSearchRef = useRef<HTMLInputElement>(null);
 
   // Transferred List full-page state (Today / Weekly / Month / Custom)
   const [transferDatePreset, setTransferDatePreset] = useState<TransferDatePreset>('TODAY');
@@ -542,7 +543,7 @@ export const AdminStores: React.FC = () => {
   const effectiveSourceLocationKey =
     sourceLocationKey && sourceLocationOptions.some(o => o.key === sourceLocationKey)
       ? sourceLocationKey
-      : sourceLocationOptions[0]?.key || '';
+      : '';
 
   const selectedSourceLocation = useMemo(
     () => sourceLocationOptions.find(o => o.key === effectiveSourceLocationKey),
@@ -633,7 +634,7 @@ export const AdminStores: React.FC = () => {
   const effectiveDestLocationKey =
     destLocationKey && destLocationOptions.some(o => o.key === destLocationKey)
       ? destLocationKey
-      : destLocationOptions[0]?.key || '';
+      : '';
 
   const selectedDestLocation = useMemo(
     () => destLocationOptions.find(o => o.key === effectiveDestLocationKey),
@@ -680,28 +681,30 @@ export const AdminStores: React.FC = () => {
     return baseAvail;
   };
 
-  // Search-only products belonging to selected Location Source (only searched when productSearch has >= 1 char)
+  // Search-only products belonging to selected Location Source (multi-token match like Purchase search)
   const storeScopedProducts = useMemo(() => {
     const q = productSearch.trim().toLowerCase();
     if (!q || !selectedSourceLocation) return [];
+    const tokens = q.split(/\s+/).filter(Boolean);
 
     const filtered = accessibleProducts.filter(p => {
       if (p.shopId !== selectedSourceLocation.shopId) return false;
       if (transferStockedOnly && getSourceAvailableQty(p) <= 0) return false;
 
       const cf = p.customFields;
-      const customMatch = cf
-        ? [cf.field1, cf.field2, cf.field3, cf.field4].some(v =>
-            (v || '').toLowerCase().includes(q)
-          )
-        : false;
-      return (
-        p.name.toLowerCase().includes(q) ||
-        (p.variation || '').toLowerCase().includes(q) ||
-        (p.sku || '').toLowerCase().includes(q) ||
-        (p.barcode || '').toLowerCase().includes(q) ||
-        customMatch
-      );
+      const hay = [
+        p.name,
+        p.variation || '',
+        p.sku || '',
+        p.barcode || '',
+        cf?.field1 || '',
+        cf?.field2 || '',
+        cf?.field3 || '',
+        cf?.field4 || '',
+      ]
+        .join(' ')
+        .toLowerCase();
+      return tokens.every(t => hay.includes(t));
     });
 
     return [...filtered].sort((a, b) => {
@@ -1221,22 +1224,12 @@ export const AdminStores: React.FC = () => {
 
   const MAX_BATCH_TRANSFER_PRODUCTS = 1000;
 
-  const openNewTransferForm = (preferredStoreId?: string) => {
+  const openNewTransferForm = (_preferredStoreId?: string) => {
     setEditingTransferId(null);
     setTransferDate(formatDateYMD(new Date()));
-    if (preferredStoreId && transferableStores.some(s => s.id === preferredStoreId)) {
-      const st = transferableStores.find(s => s.id === preferredStoreId)!;
-      setSourceLocationKey(encodeLocationKey('STORE', st.id));
-      setDestLocationKey(encodeLocationKey('SHOP', st.shopId));
-    } else if (sourceLocationOptions[0]) {
-      const first = sourceLocationOptions[0];
-      setSourceLocationKey(first.key);
-      if (first.type === 'STORE') {
-        setDestLocationKey(encodeLocationKey('SHOP', first.shopId));
-      } else {
-        setDestLocationKey('');
-      }
-    }
+    // Keep Location Source and Location Destination as explicit selects (never auto-fill)
+    setSourceLocationKey('');
+    setDestLocationKey('');
     setSelectedTransferMap({});
     setSelectedPriceMap({});
     setProductSearch('');
@@ -1289,16 +1282,8 @@ export const AdminStores: React.FC = () => {
 
   const handleSourceLocationChange = (nextKey: string) => {
     setSourceLocationKey(nextKey);
-    const decoded = decodeLocationKey(nextKey);
-    if (decoded?.type === 'STORE') {
-      const st = transferableStores.find(s => s.id === decoded.id);
-      if (st) {
-        setDestLocationKey(encodeLocationKey('SHOP', st.shopId));
-      }
-    } else if (decoded?.type === 'SHOP') {
-      const firstStore = transferableStores.find(s => s.shopId === decoded.id);
-      setDestLocationKey(firstStore ? encodeLocationKey('STORE', firstStore.id) : '');
-    }
+    // Keep Location Destination unselected until admin explicitly chooses it
+    setDestLocationKey('');
     setSelectedTransferMap({});
     setSelectedPriceMap({});
     setProductSearch('');
@@ -1307,47 +1292,80 @@ export const AdminStores: React.FC = () => {
     setTransferError('');
   };
 
-  const handleToggleTransferProduct = (product: Product) => {
+  const handleAddTransferProduct = (product: Product) => {
     const available = getSourceAvailableQty(product);
     const defaultPrice = String(Number(product.sellingPrice || product.purchasePrice || 0));
 
     setTransferError('');
-    setSelectedTransferMap(prev => {
-      if (product.id in prev) {
-        const next = { ...prev };
-        delete next[product.id];
-        setSelectedPriceMap(pm => {
-          const np = { ...pm };
-          delete np[product.id];
-          return np;
-        });
-        return next;
-      }
-      if (transferStatus === 'COMPLETED' && available <= 0) {
+    if (transferStatus === 'COMPLETED' && available <= 0) {
+      addToast({
+        type: 'warning',
+        title: 'Out of Stock at Location Source',
+        description: `"${product.name}" currently has 0 units at ${selectedSourceLocation?.name || 'source location'}.`,
+      });
+      return;
+    }
+
+    if (product.id in selectedTransferMap) {
+      const currentQty = Number(selectedTransferMap[product.id]) || 0;
+      const nextQty = currentQty + 1;
+      if (transferStatus === 'COMPLETED' && nextQty > available) {
         addToast({
           type: 'warning',
-          title: 'Out of Stock at Location Source',
-          description: `"${product.name}" currently has 0 units at ${selectedSourceLocation?.name || 'source location'}.`,
+          title: 'Stock Limit Reached',
+          description: `Only ${available.toLocaleString()} ${product.unit} available for "${product.name}".`,
         });
-        return prev;
+        return;
       }
-      if (Object.keys(prev).length >= MAX_BATCH_TRANSFER_PRODUCTS) {
+      setSelectedTransferMap(prev => ({
+        ...prev,
+        [product.id]: String(nextQty),
+      }));
+    } else {
+      if (Object.keys(selectedTransferMap).length >= MAX_BATCH_TRANSFER_PRODUCTS) {
         addToast({
           type: 'warning',
           title: 'Selection Limit Reached',
-          description: `You can select up to ${MAX_BATCH_TRANSFER_PRODUCTS.toLocaleString()} products per transfer.`,
+          description: `You can add up to ${MAX_BATCH_TRANSFER_PRODUCTS.toLocaleString()} products per transfer.`,
         });
-        return prev;
+        return;
       }
       setSelectedPriceMap(pm => ({
         ...pm,
         [product.id]: pm[product.id] ?? defaultPrice,
       }));
-      return {
+      setSelectedTransferMap(prev => ({
         ...prev,
         [product.id]: '1',
-      };
-    });
+      }));
+    }
+
+    // Clear search automatically so admin can immediately search the next product without pressing ×
+    setProductSearch('');
+    setTransferVisibleLimit(STORE_PAGE_SIZE);
+  };
+
+  const handleTransferSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      setProductSearch('');
+      return;
+    }
+    if (e.key === 'Enter' && productSearch.trim()) {
+      e.preventDefault();
+      const q = productSearch.trim().toLowerCase();
+      const exact = storeScopedProducts.find(
+        p =>
+          (p.barcode || '').toLowerCase() === q ||
+          (p.sku || '').toLowerCase() === q
+      );
+      if (exact) {
+        handleAddTransferProduct(exact);
+        return;
+      }
+      if (storeScopedProducts.length === 1) {
+        handleAddTransferProduct(storeScopedProducts[0]);
+      }
+    }
   };
 
   const handleChangeSelectedTransferQty = (productId: string, nextVal: string) => {
@@ -1364,67 +1382,6 @@ export const AdminStores: React.FC = () => {
       ...prev,
       [productId]: nextVal,
     }));
-  };
-
-  const handleSelectAllMatchingProducts = () => {
-    setTransferError('');
-    const eligibleMatches =
-      transferStatus === 'COMPLETED'
-        ? storeScopedProducts.filter(p => getSourceAvailableQty(p) > 0)
-        : storeScopedProducts;
-    if (eligibleMatches.length === 0) return;
-
-    let added = 0;
-    let hitCap = false;
-    const priceAdditions: Record<string, string> = {};
-
-    setSelectedTransferMap(prev => {
-      const next = { ...prev };
-      for (const p of eligibleMatches) {
-        if (p.id in next) continue;
-        if (Object.keys(next).length >= MAX_BATCH_TRANSFER_PRODUCTS) {
-          hitCap = true;
-          break;
-        }
-        next[p.id] = '1';
-        priceAdditions[p.id] = String(Number(p.sellingPrice || p.purchasePrice || 0));
-        added++;
-      }
-      return next;
-    });
-
-    if (Object.keys(priceAdditions).length > 0) {
-      setSelectedPriceMap(pm => ({ ...priceAdditions, ...pm }));
-    }
-
-    if (hitCap) {
-      addToast({
-        type: 'warning',
-        title: 'Maximum 1,000 Products Selected',
-        description: `Added ${added} matching product(s) up to the ${MAX_BATCH_TRANSFER_PRODUCTS.toLocaleString()} item limit.`,
-      });
-    } else if (added > 0) {
-      addToast({
-        type: 'info',
-        title: 'Products Selected',
-        description: `Ticked ${added.toLocaleString()} product(s) from current search results.`,
-      });
-    }
-  };
-
-  const handleDeselectMatchingProducts = () => {
-    setTransferError('');
-    const matchedIds = new Set<string>(storeScopedProducts.map(p => p.id));
-    setSelectedTransferMap(prev => {
-      const next = { ...prev };
-      for (const id of matchedIds) delete next[id];
-      return next;
-    });
-    setSelectedPriceMap(prev => {
-      const next = { ...prev };
-      for (const id of matchedIds) delete next[id];
-      return next;
-    });
   };
 
   const handleApplyBulkQtyToSelected = () => {
@@ -2134,7 +2091,9 @@ export const AdminStores: React.FC = () => {
   return (
     <div
       id="admin-stores-view"
-      className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-6"
+      className={`flex-1 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-6 ${
+        activeSubTab === 'transfer' ? 'px-0 pt-3.5 sm:p-6' : 'p-3.5 sm:p-6'
+      }`}
     >
       {/* Standard Stores / Inventory Header & Overview KPIs */}
       {!isFullPageTransferWorkspace && (
@@ -2949,7 +2908,7 @@ export const AdminStores: React.FC = () => {
       {activeSubTab === 'transfer' && (
         <div className="space-y-4 max-w-5xl mx-auto">
           {/* Full-Page Header */}
-          <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-3.5 sm:px-0 pb-4 border-b border-slate-800">
             <div className="flex items-center gap-3 min-w-0">
               <button
                 type="button"
@@ -2986,7 +2945,7 @@ export const AdminStores: React.FC = () => {
           </div>
 
           {sourceLocationOptions.length === 0 ? (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl py-12 px-4 text-center">
+            <div className="mx-3.5 sm:mx-0 bg-slate-900 border border-slate-800 rounded-2xl py-12 px-4 text-center">
               <Warehouse className="w-10 h-10 mx-auto text-slate-600 mb-2.5" />
               <h3 className="text-sm font-semibold text-white">
                 No Active Stores Available for Transfer
@@ -3004,9 +2963,9 @@ export const AdminStores: React.FC = () => {
               </button>
             </div>
           ) : (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl">
+            <div className="bg-slate-900 border-y sm:border border-slate-800 rounded-none sm:rounded-2xl py-4 sm:py-6 shadow-xl">
               {transferError && (
-                <div className="mb-4 p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                <div className="mx-3.5 sm:mx-6 mb-4 p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <span>{transferError}</span>
                 </div>
@@ -3014,7 +2973,7 @@ export const AdminStores: React.FC = () => {
 
               <form onSubmit={handleSubmitTransfer} className="space-y-5 text-xs">
                 {/* 1. Select Date (opens calendar, allows past dates) + Status */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div className="px-3.5 sm:px-6 grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1.5">
                       Select Date *
@@ -3086,7 +3045,7 @@ export const AdminStores: React.FC = () => {
                 </div>
 
                 {/* 2. Location Source & Location Destination */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                <div className="px-3.5 sm:px-6 grid grid-cols-1 md:grid-cols-2 gap-3.5">
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1.5">
                       Location Source *
@@ -3097,6 +3056,7 @@ export const AdminStores: React.FC = () => {
                       required
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                     >
+                      <option value="">-- Select Location Source --</option>
                       {sourceLocationOptions.map(opt => (
                         <option key={opt.key} value={opt.key}>
                           {opt.label}
@@ -3115,24 +3075,30 @@ export const AdminStores: React.FC = () => {
                         setDestLocationKey(e.target.value);
                         setTransferError('');
                       }}
+                      disabled={!selectedSourceLocation}
                       required
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {destLocationOptions.length === 0 ? (
+                      {!selectedSourceLocation ? (
+                        <option value="">-- Select Location Source first --</option>
+                      ) : destLocationOptions.length === 0 ? (
                         <option value="">No valid destination available</option>
                       ) : (
-                        destLocationOptions.map(opt => (
-                          <option key={opt.key} value={opt.key}>
-                            {opt.label}
-                          </option>
-                        ))
+                        <>
+                          <option value="">-- Select Location Destination --</option>
+                          {destLocationOptions.map(opt => (
+                            <option key={opt.key} value={opt.key}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </>
                       )}
                     </select>
                   </div>
                 </div>
 
                 {selectedSourceLocation && selectedDestLocation && (
-                  <div className="px-3.5 py-2.5 rounded-xl bg-blue-950/25 border border-blue-500/25 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <div className="mx-3.5 sm:mx-6 px-3.5 py-2.5 rounded-xl bg-blue-950/25 border border-blue-500/25 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                     <span className="text-slate-300">
                       Route:{' '}
                       <strong className="text-white">{selectedSourceLocation.name}</strong>
@@ -3151,11 +3117,11 @@ export const AdminStores: React.FC = () => {
                   </div>
                 )}
 
-                {/* 3. Search-Only Product Selector (NO initial full list — appears ONLY when user searches) */}
-                <div className="space-y-2.5">
+                {/* 3. Purchase-Style Quick Product Search (Tap to Add, Auto-Clears — No Tick Checkboxes) */}
+                <div className="px-3.5 sm:px-6 space-y-2.5">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <label className="block text-slate-300 font-semibold">
-                      Search Products to Transfer *
+                      Search & Add Products *
                     </label>
                     <div className="flex items-center gap-2">
                       <button
@@ -3173,23 +3139,32 @@ export const AdminStores: React.FC = () => {
                         {transferStockedOnly ? 'In Stock Only' : 'Include Out-of-Stock'}
                       </button>
                       <span className="text-[11px] font-mono tabular-nums text-blue-300">
-                        {transferSelectionSummary.selectedCount.toLocaleString()} / 1,000 ticked
+                        {transferSelectionSummary.selectedCount.toLocaleString()} / 1,000 added
                       </span>
                     </div>
                   </div>
 
-                  {/* Single-letter responsive search bar */}
+                  {/* Single-letter & multi-token responsive search bar */}
                   <div className="relative">
-                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input
+                      ref={transferProductSearchRef}
                       type="text"
                       value={productSearch}
+                      disabled={!selectedSourceLocation}
+                      inputMode="search"
+                      autoComplete="off"
                       onChange={e => {
                         setProductSearch(e.target.value);
                         setTransferVisibleLimit(STORE_PAGE_SIZE);
                       }}
-                      placeholder="Type 1 or more letters to search by product name, SKU, variation, or barcode..."
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      onKeyDown={handleTransferSearchKeyDown}
+                      placeholder={
+                        selectedSourceLocation
+                          ? 'Search product name, SKU, or barcode — tap to add...'
+                          : 'Select Location Source above to search products...'
+                      }
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
                     />
                     {productSearch && (
                       <button
@@ -3197,9 +3172,10 @@ export const AdminStores: React.FC = () => {
                         onClick={() => {
                           setProductSearch('');
                           setTransferVisibleLimit(STORE_PAGE_SIZE);
+                          transferProductSearchRef.current?.focus();
                         }}
                         aria-label="Clear search"
-                        className="absolute right-2.5 top-2.5 p-0.5 rounded text-slate-400 hover:text-white"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
                       >
                         <X className="w-4 h-4" />
                       </button>
@@ -3207,121 +3183,107 @@ export const AdminStores: React.FC = () => {
                   </div>
 
                   {/* Matching Results List — strictly shown ONLY when productSearch has input */}
-                  {!productSearch.trim() ? (
+                  {!selectedSourceLocation ? (
                     <p className="text-[11px] text-slate-500 px-1">
-                      Search above by product name or SKU to view and tick items from{' '}
-                      <span className="text-slate-300">
-                        {selectedSourceLocation?.name || 'Location Source'}
-                      </span>
-                      . Ticked products appear arranged below.
+                      Choose a <span className="text-slate-300 font-medium">Location Source</span>{' '}
+                      first, then search and tap products to add them below.
+                    </p>
+                  ) : !productSearch.trim() ? (
+                    <p className="text-[11px] text-slate-500 px-1">
+                      Type a product name or SKU from{' '}
+                      <span className="text-slate-300 font-medium">
+                        {selectedSourceLocation.name}
+                      </span>{' '}
+                      and tap any match to add it immediately — search clears automatically for the next product.
                     </p>
                   ) : (
-                    <div className="bg-slate-950/80 border border-slate-800 rounded-xl overflow-hidden">
-                      <div className="px-3 py-2 bg-slate-950 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <div className="bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+                      <div className="px-3 py-2 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-2 text-[11px]">
                         <span className="text-slate-400">
-                          Found{' '}
                           <strong className="text-white">
                             {storeScopedProducts.length.toLocaleString()}
                           </strong>{' '}
                           match{storeScopedProducts.length === 1 ? '' : 'es'} for &ldquo;
-                          {productSearch.trim()}&rdquo;
+                          {productSearch.trim()}&rdquo; — tap a product to add
                         </span>
-
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={handleSelectAllMatchingProducts}
-                            disabled={storeScopedProducts.length === 0}
-                            className="px-2.5 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 text-blue-300 font-semibold transition disabled:opacity-40"
-                          >
-                            Tick Matching
-                          </button>
-                          {storeScopedProducts.some(p => p.id in selectedTransferMap) && (
-                            <button
-                              type="button"
-                              onClick={handleDeselectMatchingProducts}
-                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
-                            >
-                              Untick Matching
-                            </button>
-                          )}
-                        </div>
                       </div>
 
                       {storeScopedProducts.length === 0 ? (
-                        <div className="py-6 px-4 text-center text-slate-500 text-xs">
-                          No products matching &ldquo;{productSearch.trim()}&rdquo; in{' '}
-                          {selectedSourceLocation?.name || 'this source location'}.
+                        <div className="py-7 px-4 text-center">
+                          <Package className="w-8 h-8 mx-auto text-slate-600 mb-1.5" />
+                          <p className="text-xs font-medium text-slate-400">
+                            No products match &ldquo;{productSearch.trim()}&rdquo;
+                          </p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Try a shorter search or check the SKU in {selectedSourceLocation.name}.
+                          </p>
                         </div>
                       ) : (
-                        <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/70">
+                        <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/70 overscroll-contain">
                           {storeScopedProducts.slice(0, transferVisibleLimit).map(p => {
                             const qtyHere = getSourceAvailableQty(p);
-                            const isChecked = p.id in selectedTransferMap;
-                            const disabledTick =
-                              !isChecked && transferStatus === 'COMPLETED' && qtyHere <= 0;
+                            const existingQtyStr = selectedTransferMap[p.id];
+                            const isAdded = p.id in selectedTransferMap;
+                            const isOutOfStock =
+                              transferStatus === 'COMPLETED' && qtyHere <= 0;
 
                             return (
-                              <div
+                              <button
                                 key={p.id}
-                                onClick={() => handleToggleTransferProduct(p)}
-                                className={`px-3 py-2.5 flex items-center justify-between gap-2.5 cursor-pointer transition ${
-                                  isChecked
-                                    ? 'bg-blue-600/15 hover:bg-blue-600/20'
-                                    : disabledTick
-                                      ? 'opacity-55 hover:bg-slate-900/60'
+                                type="button"
+                                disabled={isOutOfStock}
+                                onClick={() => handleAddTransferProduct(p)}
+                                className={`w-full text-left px-3 py-3 flex items-center justify-between gap-3 transition active:bg-slate-800/80 ${
+                                  isOutOfStock
+                                    ? 'opacity-50 cursor-not-allowed'
+                                    : isAdded
+                                      ? 'bg-blue-950/25 hover:bg-blue-950/40'
                                       : 'hover:bg-slate-900/80'
                                 }`}
                               >
-                                <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                                  <input
-                                    type="checkbox"
-                                    checked={isChecked}
-                                    disabled={disabledTick}
-                                    onChange={() => {}}
-                                    onClick={e => {
-                                      e.stopPropagation();
-                                      handleToggleTransferProduct(p);
-                                    }}
-                                    className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500 shrink-0 cursor-pointer"
-                                  />
-                                  <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-1.5 flex-wrap">
-                                      <span className="font-semibold text-white truncate">
-                                        {p.name}
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-xs sm:text-sm font-medium text-white truncate">
+                                      {p.name}
+                                    </span>
+                                    {p.variation && (
+                                      <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[10px]">
+                                        {p.variation}
                                       </span>
-                                      {p.variation && (
-                                        <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[10px]">
-                                          {p.variation}
-                                        </span>
-                                      )}
-                                    </div>
-                                    <div className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">
-                                      SKU: {p.sku} · Avail:{' '}
-                                      <strong
-                                        className={qtyHere > 0 ? 'text-blue-300' : 'text-rose-400'}
-                                      >
-                                        {qtyHere.toLocaleString()} {p.unit}
-                                      </strong>{' '}
-                                      · Price:{' '}
+                                    )}
+                                    {isAdded && (
+                                      <span className="px-1.5 py-0.5 rounded bg-blue-500/20 border border-blue-500/30 text-blue-300 text-[10px] font-semibold">
+                                        In List ({existingQtyStr})
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center flex-wrap gap-x-2.5 gap-y-0.5 mt-1 text-[11px] text-slate-400 font-mono">
+                                    <span>{p.sku}</span>
+                                    <span className={qtyHere > 0 ? 'text-blue-400' : 'text-rose-400'}>
+                                      Avail: {qtyHere.toLocaleString()} {p.unit}
+                                    </span>
+                                    <span className="text-emerald-400/90">
                                       {formatCurrency(
                                         Number(p.sellingPrice || p.purchasePrice || 0),
                                         settings.currencySymbol
                                       )}
-                                    </div>
+                                    </span>
                                   </div>
                                 </div>
 
                                 <span
-                                  className={`text-[10px] font-semibold px-2 py-0.5 rounded shrink-0 ${
-                                    isChecked
-                                      ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
-                                      : 'bg-slate-900 text-slate-400 border border-slate-800'
+                                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold shrink-0 transition ${
+                                    isOutOfStock
+                                      ? 'bg-slate-900 text-slate-500 border border-slate-800'
+                                      : isAdded
+                                        ? 'bg-blue-600/25 text-blue-200 border border-blue-500/40'
+                                        : 'bg-blue-600 text-white shadow-sm'
                                   }`}
                                 >
-                                  {isChecked ? 'Selected' : 'Tick'}
+                                  <Plus className="w-3.5 h-3.5" />
+                                  <span>{isAdded ? '+1' : 'Add'}</span>
                                 </span>
-                              </div>
+                              </button>
                             );
                           })}
 
@@ -3376,11 +3338,16 @@ export const AdminStores: React.FC = () => {
                     : selectedTransferEntries;
 
                   return (
-                    <div className="bg-slate-950/90 border border-blue-500/35 rounded-xl overflow-hidden">
-                      <div className="px-3.5 py-2.5 bg-blue-950/25 border-b border-blue-500/25 flex flex-wrap items-center justify-between gap-2">
+                    <div className="mx-0 px-0 bg-slate-950/90 border-y border-blue-500/35 rounded-none overflow-hidden">
+                      <div className="px-2.5 sm:px-4 py-2.5 bg-blue-950/25 border-b border-blue-500/25 flex flex-wrap items-center justify-between gap-2">
                         <div>
-                          <div className="text-xs font-bold text-white">
-                            Selected Products ({transferSelectionSummary.selectedCount.toLocaleString()} / 1,000)
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-white">
+                              Selected Products ({transferSelectionSummary.selectedCount.toLocaleString()} / 1,000)
+                            </span>
+                            <span className="sm:hidden text-[10px] font-medium text-blue-300/80">
+                              ← Swipe →
+                            </span>
                           </div>
                           <div className="text-[11px] text-slate-400 font-mono tabular-nums">
                             Total Units:{' '}
@@ -3438,7 +3405,7 @@ export const AdminStores: React.FC = () => {
                       </div>
 
                       {selectedTransferEntries.length > 10 && (
-                        <div className="px-3 py-2 border-b border-slate-800/70 bg-slate-950/60">
+                        <div className="px-2.5 sm:px-4 py-2 border-b border-slate-800/70 bg-slate-950/60">
                           <input
                             type="text"
                             value={selectedQueueFilter}
@@ -3452,38 +3419,48 @@ export const AdminStores: React.FC = () => {
                         </div>
                       )}
 
-                      <div className="divide-y divide-slate-800/70 max-h-96 overflow-y-auto">
-                        {filteredSelected.slice(0, selectedQueueVisibleLimit).map((entry, idx) => (
-                          <div
-                            key={entry.product.id}
-                            className="px-3.5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-[10px] font-mono text-slate-500">
-                                  #{idx + 1}
-                                </span>
-                                <span className="font-semibold text-white truncate">
-                                  {entry.product.name}
-                                  {entry.product.variation ? ` (${entry.product.variation})` : ''}
-                                </span>
-                              </div>
-                              <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                                {entry.product.sku} · Avail:{' '}
-                                <span
-                                  className={
-                                    entry.available > 0 ? 'text-blue-300' : 'text-amber-300'
-                                  }
-                                >
-                                  {entry.available.toLocaleString()} {entry.product.unit || 'pcs'}
-                                </span>
-                              </div>
-                            </div>
+                      {/* Horizontally & vertically scrollable single-line Selected Products list */}
+                      <div className="overflow-x-auto overflow-y-auto max-h-96">
+                        <div className="min-w-[580px] w-full divide-y divide-slate-800/70">
+                          {/* Sticky Column Headers */}
+                          <div className="sticky top-0 z-10 flex items-center gap-2.5 px-2.5 sm:px-4 py-2 bg-slate-900/95 border-b border-slate-800 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                            <div className="flex-1 min-w-[190px]">Product</div>
+                            <div className="w-[112px] shrink-0 text-center">Qty</div>
+                            <div className="w-[96px] shrink-0 text-right">Price</div>
+                            <div className="w-[96px] shrink-0 text-right">Subtotal</div>
+                            <div className="w-7 shrink-0" />
+                          </div>
 
-                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          {filteredSelected.slice(0, selectedQueueVisibleLimit).map((entry, idx) => (
+                            <div
+                              key={entry.product.id}
+                              className="flex flex-nowrap items-center gap-2.5 px-2.5 sm:px-4 py-2.5 text-xs hover:bg-slate-900/40 transition"
+                            >
+                              {/* Product Name & Avail */}
+                              <div className="flex-1 min-w-[190px] overflow-hidden">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[10px] font-mono text-slate-500 shrink-0">
+                                    #{idx + 1}
+                                  </span>
+                                  <span className="font-semibold text-white truncate">
+                                    {entry.product.name}
+                                    {entry.product.variation ? ` (${entry.product.variation})` : ''}
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">
+                                  {entry.product.sku} · Avail:{' '}
+                                  <span
+                                    className={
+                                      entry.available > 0 ? 'text-blue-300' : 'text-amber-300'
+                                    }
+                                  >
+                                    {entry.available.toLocaleString()} {entry.product.unit || 'pcs'}
+                                  </span>
+                                </div>
+                              </div>
+
                               {/* Quantity */}
-                              <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-slate-400">Qty:</span>
+                              <div className="w-[112px] shrink-0 flex items-center gap-1">
                                 <input
                                   type="number"
                                   min="1"
@@ -3515,15 +3492,14 @@ export const AdminStores: React.FC = () => {
                                       String(Math.max(1, entry.available))
                                     )
                                   }
-                                  className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-semibold text-blue-300"
+                                  className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-semibold text-blue-300 shrink-0"
                                 >
                                   Max
                                 </button>
                               </div>
 
                               {/* Price */}
-                              <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-slate-400">Price:</span>
+                              <div className="w-[96px] shrink-0">
                                 <input
                                   type="number"
                                   min="0"
@@ -3537,7 +3513,7 @@ export const AdminStores: React.FC = () => {
                                     )
                                   }
                                   aria-label={`Price for ${entry.product.name}`}
-                                  className={`w-24 bg-slate-900 border rounded-lg px-2 py-1 text-right text-xs font-mono text-white focus:outline-none focus:ring-1 ${
+                                  className={`w-full bg-slate-900 border rounded-lg px-2 py-1 text-right text-xs font-mono text-white focus:outline-none focus:ring-1 ${
                                     entry.isInvalidPrice
                                       ? 'border-rose-500 focus:ring-rose-500'
                                       : 'border-slate-700 focus:ring-blue-500'
@@ -3546,35 +3522,35 @@ export const AdminStores: React.FC = () => {
                               </div>
 
                               {/* Subtotal */}
-                              <div className="min-w-[85px] text-right font-mono tabular-nums">
-                                <div className="text-[9px] text-slate-500 uppercase">Subtotal</div>
-                                <div className="font-bold text-emerald-400">
-                                  {formatCurrency(entry.subtotal, settings.currencySymbol)}
-                                </div>
+                              <div className="w-[96px] shrink-0 text-right font-mono tabular-nums font-bold text-emerald-400 whitespace-nowrap">
+                                {formatCurrency(entry.subtotal, settings.currencySymbol)}
                               </div>
 
-                              <button
-                                type="button"
-                                aria-label={`Remove ${entry.product.name}`}
-                                onClick={() => {
-                                  setSelectedTransferMap(prev => {
-                                    const next = { ...prev };
-                                    delete next[entry.product.id];
-                                    return next;
-                                  });
-                                  setSelectedPriceMap(prev => {
-                                    const next = { ...prev };
-                                    delete next[entry.product.id];
-                                    return next;
-                                  });
-                                }}
-                                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                              </button>
+                              {/* Remove */}
+                              <div className="w-7 shrink-0 flex justify-end">
+                                <button
+                                  type="button"
+                                  aria-label={`Remove ${entry.product.name}`}
+                                  onClick={() => {
+                                    setSelectedTransferMap(prev => {
+                                      const next = { ...prev };
+                                      delete next[entry.product.id];
+                                      return next;
+                                    });
+                                    setSelectedPriceMap(prev => {
+                                      const next = { ...prev };
+                                      delete next[entry.product.id];
+                                      return next;
+                                    });
+                                  }}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          ))}
+                        </div>
                       </div>
 
                       {filteredSelected.length > STORE_PAGE_SIZE && (
@@ -3611,7 +3587,7 @@ export const AdminStores: React.FC = () => {
                       )}
 
                       {/* Live Running Total Footer */}
-                      <div className="px-4 py-3 bg-slate-950 border-t border-blue-500/25 flex flex-wrap items-center justify-between gap-2">
+                      <div className="px-2.5 sm:px-4 py-3 bg-slate-950 border-t border-blue-500/25 flex flex-wrap items-center justify-between gap-2">
                         <span className="text-xs font-semibold text-slate-300">
                           Total ({transferSelectionSummary.selectedCount} product
                           {transferSelectionSummary.selectedCount === 1 ? '' : 's'} ·{' '}
@@ -3629,7 +3605,7 @@ export const AdminStores: React.FC = () => {
                 })()}
 
                 {/* 5. Shipping Charges (Optional) & Notice (Optional) */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                <div className="px-3.5 sm:px-6 grid grid-cols-1 md:grid-cols-2 gap-3.5">
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1.5">
                       Shipping Charges (Optional)
@@ -3668,7 +3644,7 @@ export const AdminStores: React.FC = () => {
 
                 {/* Progress Indicator when submitting */}
                 {transferProgressPct !== null && (
-                  <div className="bg-slate-950 border border-blue-500/40 rounded-xl p-3 space-y-2">
+                  <div className="mx-3.5 sm:mx-6 bg-slate-950 border border-blue-500/40 rounded-xl p-3 space-y-2">
                     <div className="flex items-center justify-between text-[11px]">
                       <span className="font-semibold text-blue-300 flex items-center gap-1.5">
                         <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -3690,7 +3666,7 @@ export const AdminStores: React.FC = () => {
                 )}
 
                 {/* Grand Summary & Submit */}
-                <div className="pt-2 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="px-3.5 sm:px-6 pt-2 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="text-xs text-slate-300 font-mono tabular-nums space-y-0.5">
                     <div>
                       Products Total:{' '}

@@ -25,6 +25,7 @@ export class SalesService {
       discount?: number;
       amountReceived: number;
       notes?: string;
+      assistantName?: string;
     },
     currentUser: User
   ): { success: boolean; sale?: Sale; error?: string } {
@@ -137,6 +138,7 @@ export class SalesService {
       shopName: shop.name,
       sellerId: currentUser.id,
       sellerName: currentUser.name,
+      assistantName: params.assistantName?.trim() || undefined,
       subtotal: Number(subtotal.toFixed(2)),
       discount: Number(overallDiscount.toFixed(2)),
       tax: taxAmount,

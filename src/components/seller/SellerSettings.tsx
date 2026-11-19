@@ -1,14 +1,15 @@
 import React, { useState, useRef } from 'react';
-import { Palette, KeyRound, Check, Lock, ShieldCheck, User, Camera, Upload } from 'lucide-react';
+import { Palette, KeyRound, Check, Lock, ShieldCheck, User, Camera, Upload, UserCheck } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { SellerService } from '../../services/sellerService';
 import { AuthService } from '../../services/authService';
 import { CloudflareApi } from '../../services/cloudflareApi';
 import { db } from '../../db/storage';
 import { SELLER_COLORS } from '../../utils/colors';
+import { isShopAdmin } from '../../utils/permissions';
 
 export const SellerSettings: React.FC = () => {
-  const { currentUser, addToast, sellerColor, refreshUser } = useApp();
+  const { currentUser, dbState, addToast, sellerColor, refreshUser, updateSettings } = useApp();
 
   // Password state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -23,6 +24,21 @@ export const SellerSettings: React.FC = () => {
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
   if (!currentUser) return null;
+
+  const shopAdmin = isShopAdmin(currentUser);
+  const enableSalesAssistant = Boolean(dbState.settings.enableSalesAssistant);
+
+  const handleToggleSalesAssistant = () => {
+    const nextValue = !enableSalesAssistant;
+    updateSettings({ enableSalesAssistant: nextValue });
+    addToast({
+      type: nextValue ? 'success' : 'info',
+      title: nextValue ? 'Sales Assistant Enabled' : 'Sales Assistant Disabled',
+      description: nextValue
+        ? 'Sellers can now enter Jina la Muuzaji at checkout, and Assistant Performance is active in Reports.'
+        : 'Sales Assistant feature is turned off across POS and Reports.',
+    });
+  };
 
   // Helper to compress image
   const compressImage = (file: File, maxWidth: number, maxHeight: number): Promise<Blob> => {
@@ -232,6 +248,59 @@ export const SellerSettings: React.FC = () => {
             <span className="hidden sm:inline">{isUploadingAvatar ? 'Uploading...' : 'Change Photo'}</span>
           </button>
         </div>
+
+        {/* Shop Admin POS Feature: Sales Assistant Toggle */}
+        {shopAdmin && (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
+                  enableSalesAssistant
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                    : 'bg-slate-800 border-slate-700 text-slate-400'
+                }`}>
+                  <UserCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-xs sm:text-sm font-bold text-white uppercase tracking-wider">
+                      Sales Assistant (Jina la Muuzaji)
+                    </h3>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${
+                      enableSalesAssistant
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}>
+                      {enableSalesAssistant ? 'ON' : 'OFF'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                    Turn on to show <span className="text-slate-200 font-medium">Jina la Muuzaji</span> above payment methods in New Sale, display <span className="font-mono text-slate-300">Seller/Assistant</span> in Price Deviation reports, and enable Assistant Performance tracking.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                id="shop-admin-toggle-sales-assistant-btn"
+                type="button"
+                role="switch"
+                aria-checked={enableSalesAssistant}
+                onClick={handleToggleSalesAssistant}
+                className={`relative inline-flex h-8 w-14 shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/50 self-end sm:self-center ${
+                  enableSalesAssistant
+                    ? 'bg-emerald-600 border-emerald-500'
+                    : 'bg-slate-800 border-slate-700'
+                }`}
+              >
+                <span
+                  className={`inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition-transform ${
+                    enableSalesAssistant ? 'translate-x-7' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Account Color Palette Picker */}
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl">

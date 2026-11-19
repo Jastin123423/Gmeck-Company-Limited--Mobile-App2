@@ -228,6 +228,7 @@ export interface Sale {
   shopName?: string;
   sellerId: string;
   sellerName: string;
+  assistantName?: string;
   subtotal: number;
   discount: number;
   tax: number;
@@ -381,6 +382,7 @@ export interface BusinessSettings {
   lowStockThresholdDefault: number;
   logoUrl?: string;
   themePrimaryColor?: string;
+  enableSalesAssistant?: boolean;
 }
 
 export interface AuditLog {
