@@ -16,6 +16,7 @@ import {
   ArrowLeft,
   Store,
   User as UserIcon,
+  ChevronDown,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { SalesService, CartItemInput } from '../../services/salesService';
@@ -26,9 +27,9 @@ import { Sale, SaleEditRequest } from '../../types';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import {
   formatSaleEditDetails,
-  printHtmlViaIframe,
   printSaleEditsReportPdf,
 } from '../../utils/saleEditsPrint';
+import { downloadSalesReportPdf } from '../../utils/pdfExport';
 import {
   getAdminManagedShops,
   getShopAdminShopIds,
@@ -524,136 +525,27 @@ export const AdminSales: React.FC = () => {
 
   const handlePrint = () => {
     setIsPrinting(true);
-
-    const printContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Sales Report - ${selectedShopName}</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background: #fff; color: #1e293b; }
-          .header { text-align: center; margin-bottom: 20px; border-bottom: 3px double #3b82f6; padding-bottom: 15px; }
-          .header h1 { font-size: 22px; color: #1e40af; font-weight: bold; }
-          .header .company { font-size: 13px; color: #475569; margin-top: 5px; }
-          .header .meta { font-size: 11px; color: #64748b; margin-top: 8px; line-height: 1.5; }
-          .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
-          .summary-card { padding: 12px; border-radius: 8px; text-align: center; }
-          .summary-card.total { background: #eff6ff; border: 2px solid #3b82f6; }
-          .summary-card.profit { background: #f0fdf4; border: 2px solid #22c55e; }
-          .summary-card.count { background: #fef3c7; border: 2px solid #f59e0b; }
-          .summary-card .label { font-size: 10px; text-transform: uppercase; color: #64748b; font-weight: 600; }
-          .summary-card .value { font-size: 16px; font-weight: bold; margin-top: 5px; }
-          .summary-card.total .value { color: #1e40af; }
-          .summary-card.profit .value { color: #16a34a; }
-          .summary-card.count .value { color: #d97706; }
-          table { width: 100%; border-collapse: collapse; font-size: 11px; }
-          thead { background: #1e293b; color: #fff; }
-          th { padding: 8px 6px; text-align: left; font-weight: 600; }
-          td { padding: 7px 6px; border-bottom: 1px solid #e2e8f0; }
-          tr:nth-child(even) { background: #f8fafc; }
-          .status-completed { color: #16a34a; font-weight: bold; }
-          .status-voided { color: #dc2626; font-weight: bold; }
-          .amount { text-align: right; font-family: 'Courier New', monospace; font-weight: bold; }
-          .items-list { max-width: 250px; }
-          .item-tag { display: inline-block; background: #e0e7ff; color: #4338ca; padding: 2px 6px; border-radius: 4px; margin: 2px; font-size: 10px; }
-          .footer { text-align: center; margin-top: 20px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 10px; }
-          .shop-badge { display: inline-block; background: #dbeafe; color: #1e40af; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-top: 8px; }
-
-          @media (min-width: 640px) {
-            body { padding: 30px; }
-            .header h1 { font-size: 26px; }
-            .summary-card .value { font-size: 20px; }
-            table { font-size: 12px; }
-            th { padding: 10px 8px; }
-            td { padding: 9px 8px; }
-          }
-
-          @media print {
-            body { padding: 0; }
-          }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>${settings.businessName}</h1>
-          <div class="company">${settings.tagline || ''}</div>
-          <div class="meta">
-            <strong>Sales History Report</strong><br>
-            Shop: ${selectedShopName} | Period: ${startDate || 'Beginning'} to ${endDate || 'Present'}<br>
-            Generated: ${new Date().toLocaleString()}
-          </div>
-          <div class="shop-badge">🏪 ${selectedShopName}</div>
-        </div>
-
-        <div class="summary">
-          <div class="summary-card total">
-            <div class="label">Total Revenue</div>
-            <div class="value">${settings.currencySymbol} ${totalVolume.toLocaleString()}</div>
-          </div>
-          <div class="summary-card profit">
-            <div class="label">Gross Profit</div>
-            <div class="value">${settings.currencySymbol} ${totalProfit.toLocaleString()}</div>
-          </div>
-          <div class="summary-card count">
-            <div class="label">Transactions</div>
-            <div class="value">${sales.length}</div>
-          </div>
-        </div>
-
-        <table>
-          <thead>
-            <tr>
-              <th>Receipt #</th>
-              <th>Date & Time</th>
-              <th>Shop</th>
-              <th>Seller</th>
-              <th>Products Sold</th>
-              <th>Payment</th>
-              <th>Status</th>
-              <th class="amount">Total</th>
-              <th class="amount">Profit</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${sales.map(sale => `
-              <tr>
-                <td><strong>${sale.receiptNumber}</strong></td>
-                <td>${formatDateTime(sale.createdAt)}</td>
-                <td>${sale.shopName || 'N/A'}</td>
-                <td>${sale.sellerName}</td>
-                <td class="items-list">
-                  ${(sale.items || []).map(item =>
-                    `<span class="item-tag">${item.quantity}x ${item.productName}</span>`
-                  ).join('')}
-                </td>
-                <td>${sale.paymentMethod}</td>
-                <td class="${sale.status === 'COMPLETED' ? 'status-completed' : 'status-voided'}">${sale.status}</td>
-                <td class="amount">${settings.currencySymbol} ${sale.total.toLocaleString()}</td>
-                <td class="amount">${sale.status === 'COMPLETED' ? `${settings.currencySymbol} ${sale.grossProfit.toLocaleString()}` : `${settings.currencySymbol} 0`}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-
-        <div class="footer">
-          ${settings.businessName} - ${settings.address || ''} | Phone: ${settings.phone || 'N/A'}<br>
-          ${settings.receiptFooterNote || 'Thank you for your business!'}
-        </div>
-      </body>
-      </html>
-    `;
-
-    const started = printHtmlViaIframe(printContent);
-    if (!started) {
+    const ok = downloadSalesReportPdf(sales, settings, {
+      shopLabel: selectedShopName,
+      startDate: startDate || undefined,
+      endDate: endDate || undefined,
+      totalRevenue: totalVolume,
+      totalProfit,
+    });
+    if (ok) {
+      addToast({
+        type: 'success',
+        title: 'Sales PDF Downloaded',
+        description: `Exported ${sales.length} transaction(s) for ${selectedShopName}.`,
+      });
+    } else {
       addToast({
         type: 'error',
-        title: 'Print Unavailable',
-        description: 'Could not open print preview in this browser.',
+        title: 'PDF Export Failed',
+        description: 'Could not generate sales PDF document.',
       });
     }
-    setTimeout(() => setIsPrinting(false), 1200);
+    setTimeout(() => setIsPrinting(false), 600);
   };
 
   const handleExportCSV = () => {
@@ -798,11 +690,17 @@ export const AdminSales: React.FC = () => {
         statusLabel: editStatusLabel,
         shopLabel: editShopLabel,
       });
-      if (!ok) {
+      if (ok) {
+        addToast({
+          type: 'success',
+          title: 'Edit History PDF Downloaded',
+          description: `Exported ${filteredHandledEdits.length} handled sale edit(s).`,
+        });
+      } else {
         addToast({
           type: 'error',
-          title: 'Print Unavailable',
-          description: 'Could not prepare print document.',
+          title: 'PDF Export Failed',
+          description: 'Could not generate sale edits PDF.',
         });
       }
     };
@@ -850,7 +748,7 @@ export const AdminSales: React.FC = () => {
               className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow transition"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Print</span>
+              <span>Download PDF</span>
             </button>
           </div>
         </div>
@@ -1278,7 +1176,7 @@ export const AdminSales: React.FC = () => {
             className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold shadow transition disabled:opacity-50"
           >
             <Printer className="w-3.5 h-3.5" />
-            <span>Print</span>
+            <span>{isPrinting ? 'Generating...' : 'Download PDF'}</span>
           </button>
           <button
             onClick={handleExportCSV}
@@ -1772,33 +1670,51 @@ export const AdminSales: React.FC = () => {
                   </table>
                 </div>
 
-                {/* Per-Group Total Sales & Profit Summary (Before Expand) */}
-                <div className="px-4 py-3 bg-slate-950/70 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
-                  <span className="text-[11px] font-semibold text-slate-400">
-                    {group.label} Totals ({group.completedCount} completed)
-                  </span>
-                  <div className="flex flex-wrap items-center gap-4 text-xs">
-                    <div>
-                      <span className="text-slate-400 mr-1.5">Total Sales:</span>
-                      <span className="font-mono font-bold text-white">
+                {/* Per-Group Total Sales & Profit Summary (Inventory-style 2-card layout right before Expand / See More) */}
+                <div className="px-3.5 py-3 bg-slate-950/75 border-t border-slate-800/90 space-y-1.5">
+                  <div className="flex items-center justify-between text-[10px] text-slate-400">
+                    <span className="font-semibold uppercase tracking-wider truncate">
+                      {group.label} Summary
+                    </span>
+                    <span className="font-mono tabular-nums text-slate-300 shrink-0">
+                      {group.completedCount.toLocaleString()} completed{' '}
+                      {group.completedCount === 1 ? 'sale' : 'sales'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2">
+                      <div className="text-[9px] text-slate-400 uppercase font-semibold">
+                        Total Sales
+                      </div>
+                      <div className="text-xs font-bold font-mono tabular-nums text-blue-300 mt-0.5 truncate">
                         {formatCurrency(group.totalRevenue, settings.currencySymbol)}
-                      </span>
+                      </div>
                     </div>
-                    <div>
-                      <span className="text-slate-400 mr-1.5">Total Profit:</span>
-                      <span className="font-mono font-bold text-emerald-400">
+                    <div className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-right">
+                      <div className="text-[9px] text-slate-400 uppercase font-semibold">
+                        Total Profit
+                      </div>
+                      <div className="text-xs font-bold font-mono tabular-nums text-emerald-400 mt-0.5 truncate">
                         {formatCurrency(group.totalProfit, settings.currencySymbol)}
-                      </span>
+                      </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Expand / See More Footer */}
+                {/* Expand / See More Footer (matches Inventory pagination bar) */}
                 {(group.sales.length > SALES_PAGE_SIZE || visibleLimit > SALES_PAGE_SIZE) && (
-                  <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-slate-950/90 border-t border-slate-800/80 text-xs">
-                    <span className="text-slate-400">
-                      Showing {visibleSales.length} of {group.sales.length}
-                    </span>
+                  <div className="p-3 bg-slate-950/40 border-t border-slate-800/80 space-y-2">
+                    <div className="text-[10px] text-slate-500 text-center">
+                      Showing{' '}
+                      <span className="text-slate-300 font-semibold">
+                        {visibleSales.length.toLocaleString()}
+                      </span>{' '}
+                      of{' '}
+                      <span className="text-slate-300 font-semibold">
+                        {group.sales.length.toLocaleString()}
+                      </span>{' '}
+                      sales
+                    </div>
                     <div className="flex items-center gap-2">
                       {visibleLimit > SALES_PAGE_SIZE && (
                         <button
@@ -1809,7 +1725,7 @@ export const AdminSales: React.FC = () => {
                               [group.key]: SALES_PAGE_SIZE,
                             }))
                           }
-                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition"
+                          className="flex-1 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-300 text-[11px] font-semibold transition"
                         >
                           Show Less
                         </button>
@@ -1823,9 +1739,10 @@ export const AdminSales: React.FC = () => {
                               [group.key]: (prev[group.key] ?? SALES_PAGE_SIZE) + SALES_PAGE_SIZE,
                             }))
                           }
-                          className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold transition"
+                          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-[11px] font-semibold shadow transition"
                         >
-                          See More (+{Math.min(SALES_PAGE_SIZE, remaining)})
+                          <ChevronDown className="w-3.5 h-3.5" />
+                          <span>See More ({Math.min(SALES_PAGE_SIZE, remaining)})</span>
                         </button>
                       )}
                     </div>

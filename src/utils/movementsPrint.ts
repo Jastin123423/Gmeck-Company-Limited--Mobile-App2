@@ -1,5 +1,6 @@
 import { BusinessSettings, InventoryMovement } from '../types';
 import { formatCurrency, formatDateTime } from './formatters';
+import { downloadMovementsReportPdf } from './pdfExport';
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -266,51 +267,6 @@ export function printMovementsReportPdf(
   settings: BusinessSettings,
   meta: MovementsPrintMeta
 ): boolean {
-  if (typeof document === 'undefined') return false;
-  const html = buildMovementsPrintHtml(movements, settings, meta);
-
-  const iframe = document.createElement('iframe');
-  iframe.setAttribute('aria-hidden', 'true');
-  iframe.style.position = 'fixed';
-  iframe.style.right = '0';
-  iframe.style.bottom = '0';
-  iframe.style.width = '0';
-  iframe.style.height = '0';
-  iframe.style.border = '0';
-  iframe.style.visibility = 'hidden';
-  document.body.appendChild(iframe);
-
-  const cleanup = () => {
-    window.setTimeout(() => {
-      if (iframe.parentNode) {
-        iframe.parentNode.removeChild(iframe);
-      }
-    }, 1000);
-  };
-
-  try {
-    const win = iframe.contentWindow;
-    const doc = win?.document || iframe.contentDocument;
-    if (!doc || !win) {
-      cleanup();
-      return false;
-    }
-    doc.open();
-    doc.write(html);
-    doc.close();
-
-    win.addEventListener('afterprint', cleanup, { once: true });
-    window.setTimeout(() => {
-      try {
-        win.focus();
-        win.print();
-      } finally {
-        window.setTimeout(cleanup, 1500);
-      }
-    }, 120);
-    return true;
-  } catch {
-    cleanup();
-    return false;
-  }
+  return downloadMovementsReportPdf(movements, settings, meta);
 }
+

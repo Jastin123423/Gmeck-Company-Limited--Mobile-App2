@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { Printer, Download, Copy, X, Check, Store, Share2, MessageSquare } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
+import { downloadReceiptPdf } from '../../utils/pdfExport';
 
 export const ReceiptModal: React.FC = () => {
   const { activeReceipt, closeReceipt, dbState, addToast } = useApp();
@@ -13,7 +14,20 @@ export const ReceiptModal: React.FC = () => {
   const settings = dbState.settings;
 
   const handlePrint = () => {
-    window.print();
+    const ok = downloadReceiptPdf(activeReceipt, settings);
+    if (ok) {
+      addToast({
+        type: 'success',
+        title: 'Receipt PDF Downloaded',
+        description: `Saved receipt_${activeReceipt.receiptNumber}.pdf`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'PDF Failed',
+        description: 'Could not generate receipt PDF.',
+      });
+    }
   };
 
   const generateReceiptPlainText = () => {
@@ -278,7 +292,7 @@ export const ReceiptModal: React.FC = () => {
               className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow active:scale-95 transition"
             >
               <Printer className="w-4 h-4" />
-              <span>Print Receipt</span>
+              <span>Download PDF</span>
             </button>
           </div>
         </div>

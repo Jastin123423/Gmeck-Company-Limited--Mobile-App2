@@ -22,6 +22,10 @@ import { useApp } from '../../context/AppContext';
 import { InventoryService } from '../../services/inventoryService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { printMovementsReportPdf } from '../../utils/movementsPrint';
+import {
+  downloadLossReportPdf,
+  downloadLowStockReportPdf,
+} from '../../utils/pdfExport';
 import { Product } from '../../types';
 import { ProductThumbnail } from '../common/ProductThumbnail';
 import { ProductImageViewerModal } from '../common/ProductImageViewerModal';
@@ -357,287 +361,64 @@ export const AdminInventory: React.FC = () => {
   };
 
   // ==============================
-  // PRINT LOW STOCK PDF
+  // DOWNLOAD LOW STOCK PDF
   // ==============================
   const handlePrintLowStockReport = () => {
-    const printWindow = window.open('', '_blank', 'width=1200,height=800');
-    if (!printWindow) {
+    const scopeLabel =
+      shopAdmin && !platformAdmin
+        ? shops.length === 1
+          ? shops[0].name
+          : 'Managed Shops'
+        : 'All Shops Combined';
+
+    const ok = downloadLowStockReportPdf(allLowStockProducts, shops, settings, scopeLabel);
+    if (ok) {
+      addToast({
+        type: 'success',
+        title: 'Low Stock PDF Downloaded',
+        description: `Saved PDF with ${allLowStockProducts.length} low stock item(s).`,
+      });
+    } else {
       addToast({
         type: 'error',
-        title: 'Popup Blocked',
-        description: 'Please allow popups to print the report.',
+        title: 'PDF Export Failed',
+        description: 'Could not generate low stock PDF report.',
       });
-      return;
     }
-
-    const lowStockByShop = shops
-      .map(shop => ({
-        shop,
-        products: allLowStockProducts.filter(p => p.shopId === shop.id),
-      }))
-      .filter(g => g.products.length > 0);
-
-    const totalUnitsNeeded = allLowStockProducts.reduce(
-      (sum, p) => sum + Math.max(0, p.minStock - p.currentStock),
-      0
-    );
-
-    const estimatedRestockCost = allLowStockProducts.reduce(
-      (sum, p) => sum + Math.max(0, p.minStock - p.currentStock) * p.purchasePrice,
-      0
-    );
-
-    const printContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Low Stock Report - ${settings.businessName}</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: 'Segoe UI', Tahoma, sans-serif; padding: 20px; color: #1e293b; background: #fff; }
-          .header { text-align: center; margin-bottom: 20px; border-bottom: 3px double #f59e0b; padding-bottom: 15px; }
-          .header h1 { font-size: 22px; color: #b45309; margin-bottom: 6px; }
-          .header .company { font-size: 13px; color: #475569; }
-          .header .meta { font-size: 11px; color: #64748b; margin-top: 8px; }
-          .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 20px; }
-          .summary-card { padding: 12px; border-radius: 10px; text-align: center; color: #fff; }
-          .summary-card.count { background: linear-gradient(135deg, #f59e0b, #d97706); }
-          .summary-card.units { background: linear-gradient(135deg, #8b5cf6, #7c3aed); }
-          .summary-card.cost { background: linear-gradient(135deg, #dc2626, #991b1b); }
-          .summary-card .label { font-size: 10px; text-transform: uppercase; opacity: 0.95; }
-          .summary-card .value { font-size: 16px; font-weight: bold; margin-top: 5px; }
-          .shop-section { margin-bottom: 20px; page-break-inside: avoid; }
-          .shop-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #1e293b; color: #fff; border-radius: 8px 8px 0 0; }
-          .shop-header h2 { font-size: 14px; font-weight: bold; }
-          .shop-header .shop-stats { font-size: 10px; opacity: 0.85; }
-          table { width: 100%; border-collapse: collapse; font-size: 11px; }
-          thead { background: #f1f5f9; color: #334155; }
-          th { padding: 8px 6px; text-align: left; font-weight: 600; border-bottom: 2px solid #cbd5e1; }
-          td { padding: 7px 6px; border-bottom: 1px solid #e2e8f0; }
-          tr:nth-child(even) { background: #f8fafc; }
-          .sku { font-family: 'Courier New', monospace; font-size: 10px; color: #475569; }
-          .stock-current { font-weight: bold; color: #dc2626; font-family: 'Courier New', monospace; }
-          .stock-min { color: #475569; font-family: 'Courier New', monospace; }
-          .stock-needed { font-weight: bold; color: #b45309; font-family: 'Courier New', monospace; }
-          .cost { text-align: right; font-family: 'Courier New', monospace; font-weight: bold; color: #dc2626; }
-          .product-name { font-weight: 600; color: #1e293b; }
-          .footer { text-align: center; margin-top: 25px; padding-top: 12px; border-top: 2px solid #e2e8f0; font-size: 10px; color: #94a3b8; }
-          .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: bold; }
-          .badge.critical { background: #fee2e2; color: #991b1b; }
-          .badge.warning { background: #fef3c7; color: #92400e; }
-          .empty-state { text-align: center; padding: 35px; color: #64748b; background: #f8fafc; border-radius: 8px; }
-          @media (min-width: 640px) {
-            body { padding: 30px; }
-            .header h1 { font-size: 26px; }
-            .summary-card .value { font-size: 20px; }
-          }
-          @media print {
-            body { padding: 0; }
-            .shop-section { page-break-inside: avoid; }
-          }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>📦 Low Stock & Restock Report</h1>
-          <div class="company">${settings.businessName}</div>
-          <div class="meta">Generated: ${new Date().toLocaleString()} • ${
-            shopAdmin && !platformAdmin
-              ? shops.length === 1
-                ? shops[0].name
-                : 'Managed Shops'
-              : 'All Shops Combined'
-          }</div>
-        </div>
-        <div class="summary-grid">
-          <div class="summary-card count">
-            <div class="label">Low Stock Items</div>
-            <div class="value">${allLowStockProducts.length}</div>
-          </div>
-          <div class="summary-card units">
-            <div class="label">Units To Restock</div>
-            <div class="value">${totalUnitsNeeded}</div>
-          </div>
-          <div class="summary-card cost">
-            <div class="label">Est. Restock Cost</div>
-            <div class="value">${settings.currencySymbol} ${estimatedRestockCost.toLocaleString()}</div>
-          </div>
-        </div>
-        ${
-          lowStockByShop.length === 0
-            ? `<div class="empty-state">
-                <h3 style="color:#16a34a; margin-bottom:8px;">✅ All Good!</h3>
-                <p>No low stock items found across any shop.</p>
-              </div>`
-            : lowStockByShop.map(group => `
-              <div class="shop-section">
-                <div class="shop-header">
-                  <h2>🏪 ${group.shop.name}</h2>
-                  <span class="shop-stats">Code: ${group.shop.code || 'UNIT'} • ${group.products.length} ${group.products.length === 1 ? 'item' : 'items'}</span>
-                </div>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Product Name</th>
-                      <th>SKU</th>
-                      <th style="text-align:center;">Stock</th>
-                      <th style="text-align:center;">Min</th>
-                      <th style="text-align:center;">Needed</th>
-                      <th style="text-align:right;">Cost/Unit</th>
-                      <th style="text-align:right;">Restock Cost</th>
-                      <th style="text-align:center;">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${group.products.map(p => {
-                      const unitsNeeded = Math.max(0, p.minStock - p.currentStock);
-                      const restockCost = unitsNeeded * p.purchasePrice;
-                      const isCritical = p.currentStock <= 0;
-                      return `
-                        <tr>
-                          <td class="product-name">${p.name}</td>
-                          <td class="sku">${p.sku}</td>
-                          <td style="text-align:center;" class="stock-current">${p.currentStock} ${p.unit}</td>
-                          <td style="text-align:center;" class="stock-min">${p.minStock} ${p.unit}</td>
-                          <td style="text-align:center;" class="stock-needed">${unitsNeeded}</td>
-                          <td class="cost" style="color:#475569;">${settings.currencySymbol} ${p.purchasePrice.toLocaleString()}</td>
-                          <td class="cost">${settings.currencySymbol} ${restockCost.toLocaleString()}</td>
-                          <td style="text-align:center;">
-                            <span class="badge ${isCritical ? 'critical' : 'warning'}">
-                              ${isCritical ? 'OUT' : 'LOW'}
-                            </span>
-                          </td>
-                        </tr>
-                      `;
-                    }).join('')}
-                  </tbody>
-                </table>
-              </div>
-            `).join('')
-        }
-        <div class="footer">
-          ${settings.businessName} • ${settings.address || ''}<br>
-          Phone: ${settings.phone || 'N/A'}
-        </div>
-        <script>window.onload = function() { window.print(); }</script>
-      </body>
-      </html>
-    `;
-
-    printWindow.document.write(printContent);
-    printWindow.document.close();
-
-    addToast({
-      type: 'success',
-      title: 'Low Stock Report',
-      description: `Print dialog opened with ${allLowStockProducts.length} low stock items.`,
-    });
   };
 
-  // Print Loss Report
+  // Download Stock Loss Report PDF
   const handlePrintLossReport = () => {
-    const printWindow = window.open('', '_blank', 'width=1200,height=800');
-    if (!printWindow) return;
-
-    const printContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Stock Loss Report</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: 'Segoe UI', sans-serif; padding: 20px; color: #1e293b; }
-          .header { text-align: center; margin-bottom: 20px; border-bottom: 3px double #dc2626; padding-bottom: 15px; }
-          .header h1 { font-size: 22px; color: #dc2626; }
-          .header .meta { font-size: 11px; color: #64748b; margin-top: 6px; }
-          .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
-          .summary-card { padding: 12px; border-radius: 8px; text-align: center; color: #fff; }
-          .summary-card.total-value { background: linear-gradient(135deg, #dc2626, #991b1b); }
-          .summary-card.total-units { background: linear-gradient(135deg, #f59e0b, #d97706); }
-          .summary-card.count { background: linear-gradient(135deg, #8b5cf6, #7c3aed); }
-          .summary-card .label { font-size: 10px; text-transform: uppercase; }
-          .summary-card .value { font-size: 16px; font-weight: bold; margin-top: 4px; }
-          table { width: 100%; border-collapse: collapse; font-size: 11px; }
-          thead { background: #1e293b; color: #fff; }
-          th { padding: 8px; text-align: left; }
-          td { padding: 6px; border-bottom: 1px solid #e2e8f0; }
-          tr:nth-child(even) { background: #fef2f2; }
-          .loss-type { color: #dc2626; font-weight: bold; }
-          .footer { text-align: center; margin-top: 20px; font-size: 10px; color: #94a3b8; }
-          @media (max-width: 600px) {
-            .summary { grid-template-columns: 1fr; }
-            table { font-size: 10px; }
-            th, td { padding: 5px; }
-          }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>📦 Stock Loss Report</h1>
-          <div class="meta">Period: ${lossPeriod.toUpperCase()} | Generated: ${new Date().toLocaleString()}</div>
-        </div>
-        <div class="summary">
-          <div class="summary-card total-value">
-            <div class="label">Total Loss Value</div>
-            <div class="value">${settings.currencySymbol} ${totalLossValue.toLocaleString()}</div>
-          </div>
-          <div class="summary-card total-units">
-            <div class="label">Total Units Lost</div>
-            <div class="value">${totalLossUnits}</div>
-          </div>
-          <div class="summary-card count">
-            <div class="label">Loss Records</div>
-            <div class="value">${filteredLosses.length}</div>
-          </div>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Product</th>
-              <th>Type</th>
-              <th>Qty Lost</th>
-              <th>Loss Value</th>
-              <th>Reason</th>
-              <th>Recorded By</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${filteredLosses.map(m => `
-              <tr>
-                <td>${formatDateTime(m.createdAt)}</td>
-                <td><strong>${m.productName}</strong></td>
-                <td class="loss-type">${m.type}</td>
-                <td>${Math.abs(m.changeQty)}</td>
-                <td>${settings.currencySymbol} ${(m.costValue || 0).toLocaleString()}</td>
-                <td>${m.reason}</td>
-                <td>${m.userName}</td>
-              </tr>
-            `).join('') || '<tr><td colspan="7" style="text-align:center;">No loss records found</td></tr>'}
-          </tbody>
-        </table>
-        <div class="footer">${settings.businessName} - Stock Loss Report</div>
-        <script>window.onload = function() { window.print(); }</script>
-      </body>
-      </html>
-    `;
-
-    printWindow.document.write(printContent);
-    printWindow.document.close();
+    const ok = downloadLossReportPdf(filteredLosses, settings, {
+      periodLabel: lossPeriod.toUpperCase(),
+      totalLossValue,
+      totalLossUnits,
+    });
+    if (ok) {
+      addToast({
+        type: 'success',
+        title: 'Loss Report PDF Downloaded',
+        description: `Saved PDF with ${filteredLosses.length} loss record(s).`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'PDF Export Failed',
+        description: 'Could not generate stock loss PDF report.',
+      });
+    }
   };
 
-  // Print Full-Screen Movements Report (PDF)
+  // Download Full-Screen Movements Report PDF
   const handlePrintMovementsReport = () => {
     const periodLabel =
       movementPeriod === 'DAY'
         ? `Day (${movementStartDate})`
         : movementPeriod === 'WEEK'
-          ? `Week (${movementStartDate} → ${movementEndDate})`
+          ? `Week (${movementStartDate} -> ${movementEndDate})`
           : movementPeriod === 'MONTH'
-            ? `Month (${movementStartDate} → ${movementEndDate})`
-            : `Custom (${movementStartDate || '...'} → ${movementEndDate || '...'})`;
+            ? `Month (${movementStartDate} -> ${movementEndDate})`
+            : `Custom (${movementStartDate || '...'} -> ${movementEndDate || '...'})`;
 
     const typeLabel =
       movementTypeFilter === 'ALL' ? 'All Movement Types (No Transfers)' : movementTypeFilter;
@@ -655,11 +436,17 @@ export const AdminInventory: React.FC = () => {
       typeLabel,
       shopLabel,
     });
-    if (!ok) {
+    if (ok) {
+      addToast({
+        type: 'success',
+        title: 'Movements PDF Downloaded',
+        description: `Saved PDF with ${movements.length} movement record(s).`,
+      });
+    } else {
       addToast({
         type: 'error',
-        title: 'Print Failed',
-        description: 'Could not prepare the movements print preview.',
+        title: 'PDF Export Failed',
+        description: 'Could not generate movements PDF report.',
       });
     }
   };

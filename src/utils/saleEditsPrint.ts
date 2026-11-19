@@ -1,5 +1,6 @@
 import { BusinessSettings, Sale, SaleEditRequest, SaleItem } from '../types';
 import { formatCurrency, formatDateTime } from './formatters';
+import { downloadSaleEditsPdf } from './pdfExport';
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -477,6 +478,6 @@ export function printSaleEditsReportPdf(
   settings: BusinessSettings,
   meta: SaleEditsPrintMeta
 ): boolean {
-  const html = buildSaleEditsPrintHtml(requests, salesById, settings, meta);
-  return printHtmlViaIframe(html);
+  return downloadSaleEditsPdf(requests, salesById, settings, meta);
 }
+

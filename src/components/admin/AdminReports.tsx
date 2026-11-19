@@ -23,6 +23,11 @@ import {
 } from '../../services/reportService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import {
+  downloadFinancialReportPdf,
+  downloadPriceDeviationsPdf,
+  downloadShopProfitLossPdf,
+} from '../../utils/pdfExport';
+import {
   getAdminManagedShops,
   hasAdminAccess,
   isPlatformAdmin,
@@ -440,109 +445,29 @@ export const AdminReports: React.FC = () => {
   // ─────────────────────────────────────────────────────────────
   const handlePrintReport = () => {
     setIsPrinting(true);
-    const printWindow = window.open('', '_blank', 'width=1400,height=900');
-    if (!printWindow) {
-      addToast({ type: 'error', title: 'Popup Blocked', description: 'Please allow popups to print.' });
-      setIsPrinting(false);
-      return;
+    const ok = downloadFinancialReportPdf(incomeSummary, settings, {
+      shopLabel: selectedShopName,
+      from: incomeRange.from || undefined,
+      to: incomeRange.to || undefined,
+    });
+    if (ok) {
+      addToast({
+        type: 'success',
+        title: 'Financial PDF Downloaded',
+        description: `Financial report saved for ${selectedShopName}.`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'PDF Export Failed',
+        description: 'Could not generate financial PDF report.',
+      });
     }
-
-    const s: any = incomeSummary;
-    const printContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Financial Report - ${selectedShopName}</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background: #fff; color: #1e293b; }
-          .header { text-align: center; margin-bottom: 20px; border-bottom: 3px double #3b82f6; padding-bottom: 15px; }
-          .header h1 { font-size: 22px; color: #1e40af; font-weight: bold; }
-          .header .company { font-size: 13px; color: #475569; margin-top: 5px; }
-          .header .meta { font-size: 11px; color: #64748b; margin-top: 8px; line-height: 1.5; }
-          .header .badge { display: inline-block; background: #dbeafe; color: #1e40af; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; margin-top: 8px; }
-          .section-title { font-size: 15px; color: #1e293b; font-weight: bold; margin-bottom: 12px; padding: 8px 12px; background: #eff6ff; border-left: 4px solid #3b82f6; border-radius: 0 8px 8px 0; }
-          table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 16px; }
-          thead { background: #1e293b; color: #fff; }
-          th { padding: 8px 6px; text-align: left; font-weight: 600; }
-          td { padding: 7px 6px; border-bottom: 1px solid #e2e8f0; }
-          tr:nth-child(even) { background: #f8fafc; }
-          .amount { text-align: right; font-family: 'Courier New', monospace; font-weight: bold; }
-          .positive { color: #16a34a; }
-          .negative { color: #dc2626; }
-          .footer { text-align: center; margin-top: 25px; font-size: 10px; color: #94a3b8; border-top: 2px solid #e2e8f0; padding-top: 12px; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>${settings.businessName}</h1>
-          <div class="company">${settings.tagline || ''}</div>
-          <div class="meta">
-            <strong>Financial Report</strong><br>
-            Period: ${incomeRange.from || 'Beginning'} to ${incomeRange.to || 'Present'}<br>
-            Generated: ${new Date().toLocaleString()}
-          </div>
-          <div class="badge">🏪 ${selectedShopName}</div>
-        </div>
-
-        <div class="section-title">📊 Income Statement</div>
-        <table>
-          <tbody>
-            <tr><td><strong>Gross Revenue</strong></td><td class="amount">${settings.currencySymbol} ${(s.totalGrossSales || 0).toLocaleString()}</td></tr>
-            <tr><td>Less: COGS</td><td class="amount negative">-${settings.currencySymbol} ${(s.totalCostOfGoods || 0).toLocaleString()}</td></tr>
-            <tr><td><strong>Gross Profit</strong></td><td class="amount positive">${settings.currencySymbol} ${(s.totalGrossProfit || 0).toLocaleString()} (${s.profitMarginPercent || 0}%)</td></tr>
-            <tr><td>Less: Expenses</td><td class="amount negative">-${settings.currencySymbol} ${(s.totalExpenses || 0).toLocaleString()}</td></tr>
-            <tr style="background:#f0fdf4;"><td><strong>NET PROFIT</strong></td><td class="amount ${(s.netProfit || 0) >= 0 ? 'positive' : 'negative'}">${settings.currencySymbol} ${(s.netProfit || 0).toLocaleString()} (${s.netMarginPercent || 0}%)</td></tr>
-          </tbody>
-        </table>
-
-        <div class="section-title">🏪 Shop Performance</div>
-        <table>
-          <thead><tr><th>Shop</th><th class="amount">Sales</th><th class="amount">Revenue</th><th class="amount">Profit</th></tr></thead>
-          <tbody>
-            ${(s.shopSalesBreakdown || []).map((sh: any) => `
-              <tr><td>${sh.name}</td><td class="amount">${sh.salesCount}</td><td class="amount">${settings.currencySymbol} ${sh.totalSales.toLocaleString()}</td><td class="amount positive">${settings.currencySymbol} ${sh.grossProfit.toLocaleString()}</td></tr>
-            `).join('')}
-          </tbody>
-        </table>
-
-        <div class="section-title">📦 Product Profitability</div>
-        <table>
-          <thead><tr><th>Product</th><th>SKU</th><th class="amount">Units</th><th class="amount">Revenue</th><th class="amount">Profit</th></tr></thead>
-          <tbody>
-            ${(s.topProducts || []).map((p: any) => `
-              <tr><td>${p.name}</td><td style="font-family:monospace;">${p.sku}</td><td class="amount">${p.unitsSold}</td><td class="amount">${settings.currencySymbol} ${p.revenue.toLocaleString()}</td><td class="amount positive">${settings.currencySymbol} ${p.profit.toLocaleString()}</td></tr>
-            `).join('')}
-          </tbody>
-        </table>
-
-        <div class="section-title">👥 Seller Performance</div>
-        <table>
-          <thead><tr><th>Seller</th><th class="amount">Orders</th><th class="amount">Revenue</th><th class="amount">Profit</th></tr></thead>
-          <tbody>
-            ${(s.sellerSales || []).map((se: any) => `
-              <tr><td>${se.name}</td><td class="amount">${se.count}</td><td class="amount">${settings.currencySymbol} ${se.total.toLocaleString()}</td><td class="amount positive">${settings.currencySymbol} ${se.profit.toLocaleString()}</td></tr>
-            `).join('')}
-          </tbody>
-        </table>
-
-        <div class="footer">
-          ${settings.businessName} - ${settings.address || ''} | Phone: ${settings.phone || 'N/A'}
-        </div>
-
-        <script>window.onload = function() { window.print(); }</script>
-      </body>
-      </html>
-    `;
-
-    printWindow.document.write(printContent);
-    printWindow.document.close();
-    setTimeout(() => setIsPrinting(false), 2000);
+    setTimeout(() => setIsPrinting(false), 600);
   };
 
   // ─────────────────────────────────────────────────────────────
-  // Print Deviations
+  // Download Deviations PDF
   // ─────────────────────────────────────────────────────────────
   const handlePrintDeviations = () => {
     if (deviations.length === 0) {
@@ -550,103 +475,25 @@ export const AdminReports: React.FC = () => {
       return;
     }
 
-    const printWindow = window.open('', '_blank', 'width=1200,height=800');
-    if (!printWindow) {
-      addToast({ type: 'error', title: 'Popup Blocked', description: 'Please allow popups to print.' });
-      return;
+    const ok = downloadPriceDeviationsPdf(deviations, deviationStats, settings, {
+      shopLabel: selectedShopName,
+      from: deviationRange.from || undefined,
+      to: deviationRange.to || undefined,
+      direction: deviationDirection,
+    });
+    if (ok) {
+      addToast({
+        type: 'success',
+        title: 'Deviations PDF Downloaded',
+        description: `Saved PDF with ${deviations.length} price deviation(s).`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'PDF Export Failed',
+        description: 'Could not generate price deviations PDF.',
+      });
     }
-
-    const printContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Price Deviation Audit</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background: #fff; color: #1e293b; }
-          .header { text-align: center; margin-bottom: 20px; border-bottom: 3px double #dc2626; padding-bottom: 15px; }
-          .header h1 { font-size: 22px; color: #991b1b; font-weight: bold; }
-          .header .meta { font-size: 11px; color: #64748b; margin-top: 8px; line-height: 1.5; }
-          .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 20px; }
-          .card { padding: 12px; border-radius: 8px; text-align: center; }
-          .card.below { background: #fef2f2; border: 2px solid #dc2626; }
-          .card.belowcost { background: #fff7ed; border: 2px solid #f97316; }
-          .card.above { background: #f0fdf4; border: 2px solid #16a34a; }
-          .card .label { font-size: 9px; text-transform: uppercase; color: #64748b; font-weight: 600; }
-          .card .value { font-size: 16px; font-weight: bold; margin-top: 4px; }
-          table { width: 100%; border-collapse: collapse; font-size: 10px; }
-          thead { background: #1e293b; color: #fff; }
-          th { padding: 7px 5px; text-align: left; font-weight: 600; }
-          td { padding: 6px 5px; border-bottom: 1px solid #e2e8f0; }
-          tr.below td { background: #fef2f2; }
-          tr.belowcost td { background: #fff7ed; }
-          tr.above td { background: #f0fdf4; }
-          .amount { text-align: right; font-family: 'Courier New', monospace; font-weight: bold; }
-          .diff-below { color: #dc2626; text-align: right; font-weight: bold; }
-          .diff-above { color: #16a34a; text-align: right; font-weight: bold; }
-          .loss-tag { display:inline-block; background:#f97316; color:#fff; padding:1px 4px; border-radius:3px; font-size:8px; font-weight:bold; margin-left:3px; }
-          .est { color:#94a3b8; font-size:8px; font-weight:normal; margin-left:3px; }
-          @media (min-width: 640px) { table { font-size: 11px; } }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>Price Deviation Audit</h1>
-          <div class="meta">
-            Shop: ${selectedShopName} | Period: ${deviationRange.from || 'Beginning'} to ${deviationRange.to || 'Present'}<br>
-            Direction: ${deviationDirection} | Generated: ${new Date().toLocaleString()}
-          </div>
-        </div>
-
-        <div class="summary">
-          <div class="card below"><div class="label">Below Reference</div><div class="value">${deviationStats.belowCount}</div></div>
-          <div class="card belowcost"><div class="label">Below Cost (Loss)</div><div class="value">${deviationStats.belowCostCount}</div></div>
-          <div class="card above"><div class="label">Above Reference</div><div class="value">${deviationStats.aboveCount}</div></div>
-        </div>
-
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Receipt</th>
-              <th>Shop</th>
-              <th>Seller</th>
-              <th>Product</th>
-              <th>SKU</th>
-              <th class="amount">Selling Price</th>
-              <th class="amount">Sold At</th>
-              <th class="amount">Diff</th>
-              <th class="amount">Qty</th>
-              <th class="amount">Impact</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${deviations.map(d => `
-              <tr class="${d.belowCost ? 'belowcost' : d.direction === 'BELOW' ? 'below' : 'above'}">
-                <td>${formatDateTime(d.createdAt)}</td>
-                <td><strong>${d.receiptNumber}</strong></td>
-                <td>${d.shopName}</td>
-                <td>${d.sellerName}</td>
-                <td>${d.productName}${d.belowCost ? '<span class="loss-tag">LOSS</span>' : ''}</td>
-                <td style="font-family:monospace;">${d.sku}</td>
-                <td class="amount">${d.referencePrice > 0 ? `${settings.currencySymbol} ${d.referencePrice.toLocaleString()}${!d.usedSnapshot ? '<span class="est">*</span>' : ''}` : '—'}</td>
-                <td class="amount">${settings.currencySymbol} ${d.soldPrice.toLocaleString()}</td>
-                <td class="${d.direction === 'BELOW' ? 'diff-below' : 'diff-above'}">${d.referencePrice > 0 ? `${d.diff > 0 ? '+' : ''}${settings.currencySymbol} ${d.diff.toLocaleString()}` : '—'}</td>
-                <td class="amount">${d.quantity}</td>
-                <td class="${d.direction === 'BELOW' ? 'diff-below' : 'diff-above'}">${d.referencePrice > 0 ? `${d.totalImpact > 0 ? '+' : ''}${settings.currencySymbol} ${d.totalImpact.toLocaleString()}` : '—'}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-
-        <script>window.onload = function() { window.print(); }</script>
-      </body>
-      </html>
-    `;
-
-    printWindow.document.write(printContent);
-    printWindow.document.close();
   };
 
   // ─────────────────────────────────────────────────────────────
@@ -755,119 +602,34 @@ export const AdminReports: React.FC = () => {
   const handlePrintShopProfitLoss = () => {
     const rows = visiblePnlShops;
     if (rows.length === 0) {
-      addToast({ type: 'info', title: 'Nothing to Print', description: 'No shop profit & loss data available.' });
+      addToast({ type: 'info', title: 'Nothing to Export', description: 'No shop profit & loss data available.' });
       return;
     }
 
-    const t = shopProfitLoss.totals;
-    const html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Shop Profit &amp; Loss - ${settings.businessName}</title>
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 24px; color: #0f172a; background: #fff; font-size: 11px; }
-          .header { text-align: center; border-bottom: 3px double #2563eb; padding-bottom: 14px; margin-bottom: 16px; }
-          .header h1 { font-size: 20px; color: #1e3a8a; }
-          .header .sub { font-size: 12px; color: #475569; margin-top: 4px; }
-          .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
-          .kpi { border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; background: #f8fafc; }
-          .kpi .lbl { font-size: 9px; text-transform: uppercase; color: #64748b; font-weight: 700; }
-          .kpi .val { font-size: 14px; font-weight: 800; margin-top: 4px; font-family: monospace; }
-          table { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
-          thead { background: #0f172a; color: #fff; }
-          th, td { padding: 7px 6px; border-bottom: 1px solid #e2e8f0; text-align: left; }
-          th.num, td.num { text-align: right; font-family: monospace; }
-          tr:nth-child(even) { background: #f8fafc; }
-          tfoot tr { background: #eff6ff; font-weight: 800; border-top: 2px solid #2563eb; }
-          .pos { color: #15803d; }
-          .neg { color: #b91c1c; }
-          .note { font-size: 10px; color: #475569; padding: 8px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>${settings.businessName} — Shop Profit &amp; Loss Statement</h1>
-          <div class="sub">Period: ${pnlRange.from || 'Beginning'} to ${pnlRange.to || 'Present'} | Generated: ${new Date().toLocaleString()}</div>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div class="lbl">Product Total Capital</div><div class="val">${settings.currencySymbol} ${t.totalCapital.toLocaleString()}</div></div>
-          <div class="kpi"><div class="lbl">Gross Revenue</div><div class="val">${settings.currencySymbol} ${t.revenue.toLocaleString()}</div></div>
-          <div class="kpi"><div class="lbl">Expenses &amp; Stock Loss</div><div class="val neg">-${settings.currencySymbol} ${t.totalLossAndExpenses.toLocaleString()}</div></div>
-          <div class="kpi"><div class="lbl">Net Profit / (Loss)</div><div class="val ${t.netProfit >= 0 ? 'pos' : 'neg'}">${settings.currencySymbol} ${t.netProfit.toLocaleString()}</div></div>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Shop</th>
-              <th class="num">Product Capital</th>
-              <th class="num">Revenue</th>
-              <th class="num">Gross Profit</th>
-              <th class="num">Expenses</th>
-              <th class="num">Stock Loss</th>
-              <th class="num">Net Profit / Loss</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.map(r => `
-              <tr>
-                <td><strong>${r.shopName}</strong><br/><span style="color:#64748b;font-size:9px;">${r.skuCount} SKUs · ${r.totalUnits.toLocaleString()} units</span></td>
-                <td class="num">${settings.currencySymbol} ${r.totalCapital.toLocaleString()}</td>
-                <td class="num">${settings.currencySymbol} ${r.revenue.toLocaleString()}</td>
-                <td class="num pos">${settings.currencySymbol} ${r.grossProfit.toLocaleString()}</td>
-                <td class="num neg">-${settings.currencySymbol} ${r.expenses.toLocaleString()}</td>
-                <td class="num neg">-${settings.currencySymbol} ${r.stockLossValue.toLocaleString()}</td>
-                <td class="num ${r.netProfit >= 0 ? 'pos' : 'neg'}">${r.netProfit >= 0 ? '+' : ''}${settings.currencySymbol} ${r.netProfit.toLocaleString()}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-          <tfoot>
-            <tr>
-              <td>TOTAL (${rows.length} shops)</td>
-              <td class="num">${settings.currencySymbol} ${t.totalCapital.toLocaleString()}</td>
-              <td class="num">${settings.currencySymbol} ${t.revenue.toLocaleString()}</td>
-              <td class="num pos">${settings.currencySymbol} ${t.grossProfit.toLocaleString()}</td>
-              <td class="num neg">-${settings.currencySymbol} ${t.expenses.toLocaleString()}</td>
-              <td class="num neg">-${settings.currencySymbol} ${t.stockLossValue.toLocaleString()}</td>
-              <td class="num ${t.netProfit >= 0 ? 'pos' : 'neg'}">${t.netProfit >= 0 ? '+' : ''}${settings.currencySymbol} ${t.netProfit.toLocaleString()}</td>
-            </tr>
-          </tfoot>
-        </table>
-        ${shopProfitLoss.generalCompanyExpenses > 0 ? `<div class="note">Unallocated Company Expenses: -${settings.currencySymbol} ${shopProfitLoss.generalCompanyExpenses.toLocaleString()} | Net After Company Expenses: ${settings.currencySymbol} ${t.netAfterCompanyExpenses.toLocaleString()}</div>` : ''}
-      </body>
-      </html>
-    `;
-
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'fixed';
-    iframe.style.right = '0';
-    iframe.style.bottom = '0';
-    iframe.style.width = '0';
-    iframe.style.height = '0';
-    iframe.style.border = '0';
-    document.body.appendChild(iframe);
-
-    const doc = iframe.contentWindow?.document;
-    if (!doc || !iframe.contentWindow) {
-      document.body.removeChild(iframe);
-      addToast({ type: 'error', title: 'Print Failed', description: 'Unable to initialize print frame.' });
-      return;
-    }
-
-    doc.open();
-    doc.write(html);
-    doc.close();
-    setTimeout(() => {
-      try {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-      } finally {
-        setTimeout(() => {
-          if (iframe.parentNode) document.body.removeChild(iframe);
-        }, 1500);
+    const ok = downloadShopProfitLossPdf(
+      rows,
+      shopProfitLoss.totals,
+      shopProfitLoss.generalCompanyExpenses,
+      settings,
+      {
+        from: pnlRange.from || undefined,
+        to: pnlRange.to || undefined,
+        periodLabel: pnlPeriod,
       }
-    }, 250);
+    );
+    if (ok) {
+      addToast({
+        type: 'success',
+        title: 'P&L PDF Downloaded',
+        description: `Shop Profit & Loss PDF saved (${rows.length} shop(s)).`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'PDF Export Failed',
+        description: 'Could not generate Shop Profit & Loss PDF.',
+      });
+    }
   };
 
   // ─────────────────────────────────────────────────────────────
@@ -924,7 +686,7 @@ export const AdminReports: React.FC = () => {
             className="flex-1 flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow transition disabled:opacity-50 active:scale-95"
           >
             <Printer className="w-3.5 h-3.5" />
-            <span>{isPrinting ? 'Printing...' : 'Print'}</span>
+            <span>{isPrinting ? 'Generating...' : 'Download PDF'}</span>
           </button>
         </div>
       </div>
@@ -1042,7 +804,7 @@ export const AdminReports: React.FC = () => {
                 className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold shadow transition"
               >
                 <Printer className="w-3.5 h-3.5" />
-                <span>Print P&amp;L</span>
+                <span>Download P&amp;L PDF</span>
               </button>
             </div>
           </div>
@@ -1628,7 +1390,7 @@ export const AdminReports: React.FC = () => {
                   className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-semibold shadow transition"
                 >
                   <Printer className="w-3 h-3" />
-                  <span>Print</span>
+                  <span>PDF</span>
                 </button>
               </div>
             ) : null

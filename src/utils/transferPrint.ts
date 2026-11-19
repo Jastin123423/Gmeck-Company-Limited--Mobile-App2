@@ -1,5 +1,6 @@
 import { BusinessSettings, StockTransfer } from '../types';
 import { formatCurrency } from './formatters';
+import { downloadTransferVoucherPdf } from './pdfExport';
 
 const escapeHtml = (raw: string | number | undefined | null): string => {
   const s = String(raw ?? '');
@@ -376,42 +377,6 @@ export const printStockTransferVoucher = (
   transfer: StockTransfer,
   settings: BusinessSettings
 ): boolean => {
-  if (typeof document === 'undefined') return false;
-  try {
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'fixed';
-    iframe.style.right = '0';
-    iframe.style.bottom = '0';
-    iframe.style.width = '0';
-    iframe.style.height = '0';
-    iframe.style.border = '0';
-    iframe.setAttribute('aria-hidden', 'true');
-    document.body.appendChild(iframe);
-
-    const doc = iframe.contentWindow?.document;
-    if (!doc) {
-      iframe.remove();
-      return false;
-    }
-
-    doc.open();
-    doc.write(buildTransferPrintHtml(transfer, settings));
-    doc.close();
-
-    window.setTimeout(() => {
-      try {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-      } finally {
-        window.setTimeout(() => {
-          iframe.remove();
-        }, 1200);
-      }
-    }, 150);
-
-    return true;
-  } catch (err) {
-    console.error('[printStockTransferVoucher] Print error:', err);
-    return false;
-  }
+  return downloadTransferVoucherPdf(transfer, settings);
 };
+

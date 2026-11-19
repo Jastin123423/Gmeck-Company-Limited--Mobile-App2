@@ -4009,8 +4009,23 @@ export const AdminStores: React.FC = () => {
                             </button>
                             <button
                               type="button"
-                              title="Print"
-                              onClick={() => printStockTransferVoucher(t, settings)}
+                              title="Download PDF"
+                              onClick={() => {
+                                const ok = printStockTransferVoucher(t, settings);
+                                addToast(
+                                  ok
+                                    ? {
+                                        type: 'success',
+                                        title: 'Transfer PDF Downloaded',
+                                        description: `Saved stock_transfer_${t.transferNumber}.pdf`,
+                                      }
+                                    : {
+                                        type: 'error',
+                                        title: 'PDF Export Failed',
+                                        description: 'Could not generate transfer voucher PDF.',
+                                      }
+                                );
+                              }}
                               className="p-1.5 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-300 transition"
                             >
                               <Printer className="w-3.5 h-3.5" />
@@ -4101,11 +4116,26 @@ export const AdminStores: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() => printStockTransferVoucher(t, settings)}
+                        onClick={() => {
+                          const ok = printStockTransferVoucher(t, settings);
+                          addToast(
+                            ok
+                              ? {
+                                  type: 'success',
+                                  title: 'Transfer PDF Downloaded',
+                                  description: `Saved stock_transfer_${t.transferNumber}.pdf`,
+                                }
+                              : {
+                                  type: 'error',
+                                  title: 'PDF Export Failed',
+                                  description: 'Could not generate transfer voucher PDF.',
+                                }
+                          );
+                        }}
                         className="flex items-center justify-center gap-1 py-1.5 rounded-lg bg-emerald-600/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold"
                       >
                         <Printer className="w-3.5 h-3.5" />
-                        <span>Print</span>
+                        <span>PDF</span>
                       </button>
                       <button
                         type="button"
@@ -4215,11 +4245,26 @@ export const AdminStores: React.FC = () => {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => printStockTransferVoucher(viewingTransfer, settings)}
+                onClick={() => {
+                  const ok = printStockTransferVoucher(viewingTransfer, settings);
+                  addToast(
+                    ok
+                      ? {
+                          type: 'success',
+                          title: 'Transfer PDF Downloaded',
+                          description: `Saved stock_transfer_${viewingTransfer.transferNumber}.pdf`,
+                        }
+                      : {
+                          type: 'error',
+                          title: 'PDF Export Failed',
+                          description: 'Could not generate transfer voucher PDF.',
+                        }
+                  );
+                }}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition"
               >
                 <Printer className="w-4 h-4" />
-                <span>Print</span>
+                <span>Download PDF</span>
               </button>
               <button
                 type="button"
