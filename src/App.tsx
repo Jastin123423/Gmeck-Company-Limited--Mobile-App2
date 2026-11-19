@@ -6,6 +6,7 @@ import { MobileDrawer } from './components/common/MobileDrawer';
 import { MobileBottomNav } from './components/common/MobileBottomNav';
 import { ReceiptModal } from './components/common/ReceiptModal';
 import { ToastContainer } from './components/common/ToastContainer';
+import { WelcomeSplash } from './components/common/WelcomeSplash';
 import { LoginView } from './components/auth/LoginView';
 import { getEffectiveSellerPermissions, isShopAdmin } from './utils/permissions';
 
@@ -172,9 +173,12 @@ const MainLayout: React.FC = () => {
 };
 
 export default function App() {
+  const [showSplash, setShowSplash] = useState(true);
+
   return (
     <AppProvider>
       <MainLayout />
+      {showSplash && <WelcomeSplash onComplete={() => setShowSplash(false)} />}
     </AppProvider>
   );
 }

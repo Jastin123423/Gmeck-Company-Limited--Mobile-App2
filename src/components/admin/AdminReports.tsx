@@ -16,6 +16,10 @@ import {
   Scale,
   Coins,
   UserCheck,
+  Crown,
+  ArrowLeft,
+  Trophy,
+  Award,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import {
@@ -248,6 +252,14 @@ export const AdminReports: React.FC = () => {
   const [isPrinting, setIsPrinting] = useState(false);
   const [deviationDirection, setDeviationDirection] = useState<DeviationDirection>('ALL');
 
+  // Full-page Assistant Rankings state
+  const [showAssistantRankingPage, setShowAssistantRankingPage] = useState(false);
+  const [rankPeriod, setRankPeriod] = useState<'today' | 'week' | 'month' | 'custom'>('month');
+  const [rankStart, setRankStart] = useState('');
+  const [rankEnd, setRankEnd] = useState('');
+  const [rankMode, setRankMode] = useState<'mauzo' | 'above_ref'>('mauzo');
+  const [rankSearch, setRankSearch] = useState('');
+
   if (!currentUser) return null;
   if (!hasAdminAccess(currentUser) && !currentUser.permissions?.canViewReports) return null;
 
@@ -287,6 +299,7 @@ export const AdminReports: React.FC = () => {
   const productRange = useMemo(() => computeRange(productPeriod, productStart, productEnd), [productPeriod, productStart, productEnd]);
   const sellerRange = useMemo(() => computeRange(sellerPeriod, sellerStart, sellerEnd), [sellerPeriod, sellerStart, sellerEnd]);
   const assistantRange = useMemo(() => computeRange(assistantPeriod, assistantStart, assistantEnd), [assistantPeriod, assistantStart, assistantEnd]);
+  const rankRange = useMemo(() => computeRange(rankPeriod, rankStart, rankEnd), [rankPeriod, rankStart, rankEnd]);
   const pnlRange = useMemo(
     () => ReportService.computeProfitLossDateRange(pnlPeriod, pnlStart, pnlEnd),
     [pnlPeriod, pnlStart, pnlEnd]
@@ -297,6 +310,7 @@ export const AdminReports: React.FC = () => {
   const productSummary = useMemo(() => ReportService.getFinancialSummary(productRange, { shopId: effectiveShopFilter }, currentUser) || {}, [productRange, currentUser, dbState, effectiveShopFilter]);
   const sellerSummary = useMemo(() => ReportService.getFinancialSummary(sellerRange, { shopId: effectiveShopFilter }, currentUser) || {}, [sellerRange, currentUser, dbState, effectiveShopFilter]);
   const assistantSummary = useMemo(() => ReportService.getFinancialSummary(assistantRange, { shopId: effectiveShopFilter }, currentUser) || {}, [assistantRange, currentUser, dbState, effectiveShopFilter]);
+  const rankSummary = useMemo(() => ReportService.getFinancialSummary(rankRange, { shopId: effectiveShopFilter }, currentUser) || {}, [rankRange, currentUser, dbState, effectiveShopFilter]);
   const deviationSummary = useMemo(() => ReportService.getFinancialSummary(deviationRange, { shopId: effectiveShopFilter }, currentUser) || {}, [deviationRange, currentUser, dbState, effectiveShopFilter]);
 
   // Always show all accessible shops in Shop Profit & Loss so every shop's capital, profit & loss can be compared
@@ -443,6 +457,158 @@ export const AdminReports: React.FC = () => {
 
     return { groups, totalAssistants, totalOrders, totalSales, totalProfit };
   }, [assistantSummary, assistantSearch]);
+
+  // ─────────────────────────────────────────────────────────────
+  // Full-Page Assistant Leaderboard (Mauzo Mengi & Above Reference)
+  // ─────────────────────────────────────────────────────────────
+  const assistantLeaderboard = useMemo(() => {
+    const sales = ((rankSummary as any).filteredSales || []) as any[];
+    const productMap = new Map(products.map((p: any) => [p.id, p]));
+
+    const byAssistant = new Map<
+      string,
+      {
+        key: string;
+        assistantName: string;
+        sellers: Set<string>;
+        shops: Set<string>;
+        orders: number;
+        itemsSold: number;
+        totalSales: number;
+        totalProfit: number;
+        aboveRefTotalGain: number;
+        aboveRefItemsCount: number;
+        aboveRefUnits: number;
+        aboveRefSaleIds: Set<string>;
+        aboveRefSalesValue: number;
+      }
+    >();
+
+    for (const sale of sales) {
+      if (sale.status === 'VOIDED') continue;
+      const rawAssistant = (sale.assistantName || '').trim();
+      if (!rawAssistant) continue;
+
+      const key = rawAssistant.toLowerCase();
+      if (!byAssistant.has(key)) {
+        byAssistant.set(key, {
+          key,
+          assistantName: rawAssistant,
+          sellers: new Set<string>(),
+          shops: new Set<string>(),
+          orders: 0,
+          itemsSold: 0,
+          totalSales: 0,
+          totalProfit: 0,
+          aboveRefTotalGain: 0,
+          aboveRefItemsCount: 0,
+          aboveRefUnits: 0,
+          aboveRefSaleIds: new Set<string>(),
+          aboveRefSalesValue: 0,
+        });
+      }
+
+      const rec = byAssistant.get(key)!;
+      if (sale.sellerName) rec.sellers.add(sale.sellerName);
+      if (sale.shopName) rec.shops.add(sale.shopName);
+
+      const saleTotal = Number(sale.total || 0);
+      const saleProfit = Number(sale.grossProfit || 0);
+      const saleUnits = (sale.items || []).reduce(
+        (sum: number, it: any) => sum + Number(it.quantity || 0),
+        0
+      );
+
+      rec.orders += 1;
+      rec.itemsSold += saleUnits;
+      rec.totalSales += saleTotal;
+      rec.totalProfit += saleProfit;
+
+      // Above Reference price check (snapshot-first, identical to Price Deviation Audit)
+      for (const item of sale.items || []) {
+        const product: any = productMap.get(item.productId);
+        const hasSnapshot =
+          item.referencePrice !== undefined &&
+          item.referencePrice !== null &&
+          item.referencePrice > 0;
+
+        let referencePrice = 0;
+        if (hasSnapshot) {
+          referencePrice = Number(item.referencePrice);
+        } else if (product) {
+          referencePrice =
+            product.proposedSellingPrice && product.proposedSellingPrice > 0
+              ? Number(product.proposedSellingPrice)
+              : Number(product.sellingPrice || 0);
+        }
+
+        const soldPrice = Number(item.unitPrice || 0);
+        const qty = Number(item.quantity || 0);
+
+        if (referencePrice > 0 && soldPrice > referencePrice && qty > 0) {
+          const extraGain = Number(((soldPrice - referencePrice) * qty).toFixed(2));
+          rec.aboveRefTotalGain += extraGain;
+          rec.aboveRefItemsCount += 1;
+          rec.aboveRefUnits += qty;
+          rec.aboveRefSaleIds.add(sale.id);
+          rec.aboveRefSalesValue += soldPrice * qty;
+        }
+      }
+    }
+
+    const normalized = Array.from(byAssistant.values()).map(r => ({
+      key: r.key,
+      assistantName: r.assistantName,
+      sellersLabel: Array.from(r.sellers).join(', ') || 'Seller',
+      shopsLabel: Array.from(r.shops).join(', '),
+      orders: r.orders,
+      itemsSold: r.itemsSold,
+      totalSales: Number(r.totalSales.toFixed(2)),
+      totalProfit: Number(r.totalProfit.toFixed(2)),
+      avgOrder: r.orders > 0 ? Number((r.totalSales / r.orders).toFixed(2)) : 0,
+      aboveRefTotalGain: Number(r.aboveRefTotalGain.toFixed(2)),
+      aboveRefItemsCount: r.aboveRefItemsCount,
+      aboveRefUnits: r.aboveRefUnits,
+      aboveRefOrders: r.aboveRefSaleIds.size,
+      aboveRefSalesValue: Number(r.aboveRefSalesValue.toFixed(2)),
+      avgGainPerUnit:
+        r.aboveRefUnits > 0 ? Number((r.aboveRefTotalGain / r.aboveRefUnits).toFixed(2)) : 0,
+    }));
+
+    const mauzoRanked = [...normalized]
+      .filter(a => a.orders > 0)
+      .sort(
+        (a, b) =>
+          b.totalSales - a.totalSales ||
+          b.orders - a.orders ||
+          b.totalProfit - a.totalProfit ||
+          a.assistantName.localeCompare(b.assistantName)
+      )
+      .map((item, idx) => ({ ...item, rank: idx + 1 }));
+
+    const aboveRefRanked = [...normalized]
+      .filter(a => a.aboveRefTotalGain > 0)
+      .sort(
+        (a, b) =>
+          b.aboveRefTotalGain - a.aboveRefTotalGain ||
+          b.aboveRefItemsCount - a.aboveRefItemsCount ||
+          b.aboveRefUnits - a.aboveRefUnits ||
+          a.assistantName.localeCompare(b.assistantName)
+      )
+      .map((item, idx) => ({ ...item, rank: idx + 1 }));
+
+    return {
+      mauzoRanked,
+      aboveRefRanked,
+      topMauzo: mauzoRanked[0] || null,
+      topAboveRef: aboveRefRanked[0] || null,
+      totalAssistants: mauzoRanked.length,
+      totalMauzoSales: Number(mauzoRanked.reduce((s, a) => s + a.totalSales, 0).toFixed(2)),
+      totalAboveRefGain: Number(
+        aboveRefRanked.reduce((s, a) => s + a.aboveRefTotalGain, 0).toFixed(2)
+      ),
+    };
+  }, [rankSummary, products]);
 
   const selectedShopName =
     effectiveShopFilter === 'ALL'
@@ -759,6 +925,497 @@ export const AdminReports: React.FC = () => {
       });
     }
   };
+
+  // ─────────────────────────────────────────────────────────────
+  // Full-Page Assistant Rankings View
+  // ─────────────────────────────────────────────────────────────
+  if (showAssistantRankingPage && salesAssistantEnabled) {
+    const activeList =
+      rankMode === 'mauzo'
+        ? assistantLeaderboard.mauzoRanked
+        : assistantLeaderboard.aboveRefRanked;
+
+    const qRank = rankSearch.trim().toLowerCase();
+    const visibleRanked = qRank
+      ? activeList.filter(
+          a =>
+            a.assistantName.toLowerCase().includes(qRank) ||
+            a.sellersLabel.toLowerCase().includes(qRank) ||
+            a.shopsLabel.toLowerCase().includes(qRank)
+        )
+      : activeList;
+
+    const topValue =
+      rankMode === 'mauzo'
+        ? assistantLeaderboard.topMauzo?.totalSales || 0
+        : assistantLeaderboard.topAboveRef?.aboveRefTotalGain || 0;
+
+    return (
+      <div
+        id="assistant-ranking-view"
+        className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto space-y-4 pb-24 sm:pb-6"
+      >
+        {/* Full-Page Header */}
+        <div className="flex flex-col gap-3 pb-4 border-b border-slate-800">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <button
+                type="button"
+                onClick={() => setShowAssistantRankingPage(false)}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 active:bg-slate-700 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+                aria-label="Back to Reports"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <Crown className="w-5 h-5 text-amber-400 shrink-0" />
+                  <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                    Assistant Rankings
+                  </h2>
+                </div>
+                <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                  {selectedShopName} ·{' '}
+                  {rankRange.from && rankRange.to
+                    ? `${rankRange.from} → ${rankRange.to}`
+                    : rankRange.from || rankRange.to || 'All Dates'}
+                </p>
+              </div>
+            </div>
+
+            <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px] font-bold font-mono shrink-0">
+              {activeList.length} {activeList.length === 1 ? 'Ranked' : 'Ranked'}
+            </span>
+          </div>
+
+          {/* Shop Selector (for multi-shop admins) */}
+          {!(shopAdmin && !platformAdmin && shops.length <= 1) && (
+            <select
+              value={effectiveShopFilter}
+              onChange={e => setShopFilter(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500"
+            >
+              <option value="ALL">
+                {shopAdmin && !platformAdmin ? 'All Managed Shops' : 'All Shops Combined'}
+              </option>
+              {shops.map((s: any) => (
+                <option key={s.id} value={s.id}>
+                  🏪 {s.name}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {/* Period Filter: Day | Week | Month | Custom */}
+          <div className="space-y-2">
+            <div className="grid grid-cols-4 gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-xs font-semibold">
+              {(
+                [
+                  { id: 'today', label: 'Day' },
+                  { id: 'week', label: 'Week' },
+                  { id: 'month', label: 'Month' },
+                  { id: 'custom', label: 'Custom' },
+                ] as const
+              ).map(p => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setRankPeriod(p.id)}
+                  className={`py-2 rounded-lg transition ${
+                    rankPeriod === p.id
+                      ? 'bg-amber-500 text-slate-950 font-bold shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+
+            {rankPeriod === 'custom' && (
+              <div className="grid grid-cols-2 gap-2">
+                <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-2">
+                  <Calendar className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <input
+                    type="date"
+                    value={rankStart}
+                    onChange={e => setRankStart(e.target.value)}
+                    className="bg-transparent text-[11px] text-white w-full focus:outline-none font-mono"
+                    aria-label="Custom start date"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-2">
+                  <Calendar className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <input
+                    type="date"
+                    value={rankEnd}
+                    onChange={e => setRankEnd(e.target.value)}
+                    className="bg-transparent text-[11px] text-white w-full focus:outline-none font-mono"
+                    aria-label="Custom end date"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Dual Category Leaders Summary */}
+        <div className="grid grid-cols-2 gap-2.5">
+          <button
+            type="button"
+            onClick={() => setRankMode('mauzo')}
+            className={`text-left p-3 rounded-2xl border transition ${
+              rankMode === 'mauzo'
+                ? 'bg-gradient-to-br from-amber-500/15 via-slate-900 to-slate-900 border-amber-400/50 shadow-lg shadow-amber-950/20'
+                : 'bg-slate-900 border-slate-800 hover:border-slate-700'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1 mb-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">
+                Mauzo Mengi #1
+              </span>
+              <Crown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            </div>
+            {assistantLeaderboard.topMauzo ? (
+              <>
+                <div className="text-xs sm:text-sm font-extrabold text-white truncate">
+                  1. {assistantLeaderboard.topMauzo.assistantName}
+                </div>
+                <div className="text-[11px] font-mono font-bold text-emerald-400 mt-0.5 truncate">
+                  {formatCurrency(
+                    assistantLeaderboard.topMauzo.totalSales,
+                    settings.currencySymbol
+                  )}
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  {assistantLeaderboard.topMauzo.orders}{' '}
+                  {assistantLeaderboard.topMauzo.orders === 1 ? 'sale' : 'sales'}
+                </div>
+              </>
+            ) : (
+              <div className="text-[11px] text-slate-500 mt-1">No sales yet</div>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setRankMode('above_ref')}
+            className={`text-left p-3 rounded-2xl border transition ${
+              rankMode === 'above_ref'
+                ? 'bg-gradient-to-br from-emerald-500/15 via-slate-900 to-slate-900 border-emerald-400/50 shadow-lg shadow-emerald-950/20'
+                : 'bg-slate-900 border-slate-800 hover:border-slate-700'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1 mb-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
+                Above Ref #1
+              </span>
+              <Crown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            </div>
+            {assistantLeaderboard.topAboveRef ? (
+              <>
+                <div className="text-xs sm:text-sm font-extrabold text-white truncate">
+                  1. {assistantLeaderboard.topAboveRef.assistantName}
+                </div>
+                <div className="text-[11px] font-mono font-bold text-emerald-400 mt-0.5 truncate">
+                  +
+                  {formatCurrency(
+                    assistantLeaderboard.topAboveRef.aboveRefTotalGain,
+                    settings.currencySymbol
+                  )}
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  {assistantLeaderboard.topAboveRef.aboveRefItemsCount}{' '}
+                  {assistantLeaderboard.topAboveRef.aboveRefItemsCount === 1 ? 'item' : 'items'}{' '}
+                  above ref
+                </div>
+              </>
+            ) : (
+              <div className="text-[11px] text-slate-500 mt-1">No above-ref sales</div>
+            )}
+          </button>
+        </div>
+
+        {/* Ranking Mode Tabs: Mauzo Mengi | Above Reference */}
+        <div className="grid grid-cols-2 gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
+          <button
+            type="button"
+            onClick={() => setRankMode('mauzo')}
+            className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-lg text-xs font-bold transition ${
+              rankMode === 'mauzo'
+                ? 'bg-blue-600 text-white shadow'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Trophy className="w-3.5 h-3.5" />
+            <span>Mauzo Mengi</span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                rankMode === 'mauzo' ? 'bg-white/20 text-white' : 'bg-slate-800 text-slate-400'
+              }`}
+            >
+              {assistantLeaderboard.mauzoRanked.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setRankMode('above_ref')}
+            className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-lg text-xs font-bold transition ${
+              rankMode === 'above_ref'
+                ? 'bg-emerald-600 text-white shadow'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <TrendingUp className="w-3.5 h-3.5" />
+            <span>Above Reference</span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                rankMode === 'above_ref'
+                  ? 'bg-white/20 text-white'
+                  : 'bg-slate-800 text-slate-400'
+              }`}
+            >
+              {assistantLeaderboard.aboveRefRanked.length}
+            </span>
+          </button>
+        </div>
+
+        {/* Search Assistant */}
+        <div className="relative">
+          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+          <input
+            type="text"
+            value={rankSearch}
+            onChange={e => setRankSearch(e.target.value)}
+            placeholder="Search ranked assistant or seller..."
+            className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+          />
+        </div>
+
+        {/* Ranked List */}
+        {visibleRanked.length === 0 ? (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl py-12 px-4 text-center space-y-2">
+            <Award className="w-9 h-9 text-slate-600 mx-auto" />
+            <div className="text-sm font-semibold text-slate-300">
+              {rankMode === 'mauzo'
+                ? 'No assistant sales recorded in this period'
+                : 'No above-reference sales by assistants in this period'}
+            </div>
+            <p className="text-xs text-slate-500 max-w-xs mx-auto">
+              Try switching to Week, Month, or Custom dates to view assistant rankings.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {visibleRanked.map(item => {
+              const isFirst = item.rank === 1;
+              const isSecond = item.rank === 2;
+              const isThird = item.rank === 3;
+              const primaryMetric =
+                rankMode === 'mauzo' ? item.totalSales : item.aboveRefTotalGain;
+              const pctOfLeader =
+                topValue > 0 ? Math.max(4, Math.min(100, Math.round((primaryMetric / topValue) * 100))) : 100;
+
+              if (isFirst) {
+                return (
+                  <div
+                    key={item.key}
+                    className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-amber-500/20 via-amber-950/20 to-slate-900 border border-amber-400/60 p-4 shadow-xl shadow-amber-950/30 space-y-3"
+                  >
+                    {/* Subtle Crown watermark */}
+                    <Crown className="w-24 h-24 text-amber-400/10 absolute -right-4 -top-4 rotate-12 pointer-events-none" />
+
+                    <div className="relative flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        {/* Crown + #1 Gold Medallion */}
+                        <div className="flex flex-col items-center shrink-0">
+                          <Crown className="w-5 h-5 text-amber-300 fill-amber-400/40 drop-shadow mb-0.5" />
+                          <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-300 via-yellow-400 to-amber-600 text-slate-950 font-black text-base font-mono flex items-center justify-center shadow-lg shadow-amber-500/30 ring-2 ring-amber-200/70">
+                            #1
+                          </div>
+                        </div>
+
+                        <div className="min-w-0">
+                          <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-400/20 border border-amber-400/40 text-amber-200 text-[10px] font-bold uppercase tracking-wider mb-1">
+                            <span>
+                              {rankMode === 'mauzo'
+                                ? 'Top Mauzo Mengi Leader'
+                                : 'Top Above Reference Leader'}
+                            </span>
+                          </div>
+                          <div className="text-base sm:text-lg font-extrabold text-white leading-tight truncate">
+                            1. {item.assistantName}
+                          </div>
+                          <div className="text-[11px] text-amber-100/75 truncate mt-0.5">
+                            Seller: {item.sellersLabel}
+                            {item.shopsLabel ? ` · ${item.shopsLabel}` : ''}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <div className="text-[10px] uppercase tracking-wider text-amber-200/80 font-semibold">
+                          {rankMode === 'mauzo' ? 'Total Sales' : 'Above Ref Gain'}
+                        </div>
+                        <div className="text-base sm:text-lg font-black font-mono tabular-nums text-amber-300">
+                          {rankMode === 'mauzo'
+                            ? formatCurrency(item.totalSales, settings.currencySymbol)
+                            : `+${formatCurrency(item.aboveRefTotalGain, settings.currencySymbol)}`}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Champion Metrics Strip */}
+                    {rankMode === 'mauzo' ? (
+                      <div className="relative grid grid-cols-3 gap-2 pt-2 border-t border-amber-400/20">
+                        <div className="bg-slate-950/60 rounded-xl px-2.5 py-2 border border-amber-500/20">
+                          <div className="text-[10px] text-slate-400">Orders</div>
+                          <div className="text-xs font-bold font-mono text-white mt-0.5">
+                            {item.orders.toLocaleString()}
+                          </div>
+                        </div>
+                        <div className="bg-slate-950/60 rounded-xl px-2.5 py-2 border border-amber-500/20">
+                          <div className="text-[10px] text-slate-400">Units Sold</div>
+                          <div className="text-xs font-bold font-mono text-blue-300 mt-0.5">
+                            {Number(item.itemsSold.toFixed(2)).toLocaleString()}
+                          </div>
+                        </div>
+                        <div className="bg-slate-950/60 rounded-xl px-2.5 py-2 border border-amber-500/20">
+                          <div className="text-[10px] text-slate-400">Profit</div>
+                          <div className="text-xs font-bold font-mono text-emerald-400 mt-0.5 truncate">
+                            +{formatCurrency(item.totalProfit, settings.currencySymbol)}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="relative grid grid-cols-3 gap-2 pt-2 border-t border-amber-400/20">
+                        <div className="bg-slate-950/60 rounded-xl px-2.5 py-2 border border-amber-500/20">
+                          <div className="text-[10px] text-slate-400">Above-Ref Items</div>
+                          <div className="text-xs font-bold font-mono text-white mt-0.5">
+                            {item.aboveRefItemsCount} ({item.aboveRefOrders}{' '}
+                            {item.aboveRefOrders === 1 ? 'sale' : 'sales'})
+                          </div>
+                        </div>
+                        <div className="bg-slate-950/60 rounded-xl px-2.5 py-2 border border-amber-500/20">
+                          <div className="text-[10px] text-slate-400">Units</div>
+                          <div className="text-xs font-bold font-mono text-blue-300 mt-0.5">
+                            {Number(item.aboveRefUnits.toFixed(2)).toLocaleString()}
+                          </div>
+                        </div>
+                        <div className="bg-slate-950/60 rounded-xl px-2.5 py-2 border border-amber-500/20">
+                          <div className="text-[10px] text-slate-400">Avg +/Unit</div>
+                          <div className="text-xs font-bold font-mono text-emerald-400 mt-0.5 truncate">
+                            +{formatCurrency(item.avgGainPerUnit, settings.currencySymbol)}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Leader Bar */}
+                    <div className="relative flex items-center gap-2">
+                      <div className="flex-1 h-2 rounded-full bg-slate-950/80 overflow-hidden">
+                        <div className="h-full w-full rounded-full bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-500" />
+                      </div>
+                      <span className="text-[10px] font-mono font-bold text-amber-300 shrink-0">
+                        100%
+                      </span>
+                    </div>
+                  </div>
+                );
+              }
+
+              // Ranks #2, #3, #4+
+              const badgeStyle = isSecond
+                ? 'bg-gradient-to-br from-slate-200 to-slate-400 text-slate-950 ring-1 ring-slate-200/60'
+                : isThird
+                  ? 'bg-gradient-to-br from-amber-600 to-orange-800 text-amber-50 ring-1 ring-amber-500/50'
+                  : 'bg-slate-800 text-slate-300 border border-slate-700';
+
+              const cardBorder = isSecond
+                ? 'border-slate-500/40'
+                : isThird
+                  ? 'border-amber-700/40'
+                  : 'border-slate-800';
+
+              return (
+                <div
+                  key={item.key}
+                  className={`rounded-2xl bg-slate-900 border ${cardBorder} p-3.5 space-y-2.5 shadow-sm`}
+                >
+                  <div className="flex items-center justify-between gap-2.5">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className={`w-9 h-9 rounded-xl font-extrabold text-xs font-mono flex items-center justify-center shrink-0 ${badgeStyle}`}
+                      >
+                        #{item.rank}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold text-white truncate">
+                          {item.rank}. {item.assistantName}
+                        </div>
+                        <div className="text-[11px] text-slate-400 truncate">
+                          Seller: {item.sellersLabel}
+                          {item.shopsLabel ? ` · ${item.shopsLabel}` : ''}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-right shrink-0">
+                      <div
+                        className={`text-sm font-extrabold font-mono tabular-nums ${
+                          rankMode === 'mauzo' ? 'text-blue-400' : 'text-emerald-400'
+                        }`}
+                      >
+                        {rankMode === 'mauzo'
+                          ? formatCurrency(item.totalSales, settings.currencySymbol)
+                          : `+${formatCurrency(item.aboveRefTotalGain, settings.currencySymbol)}`}
+                      </div>
+                      <div className="text-[10px] text-slate-400 font-mono">
+                        {rankMode === 'mauzo'
+                          ? `+${formatCurrency(item.totalProfit, settings.currencySymbol)} profit`
+                          : `${item.aboveRefItemsCount} ${item.aboveRefItemsCount === 1 ? 'item' : 'items'} above ref`}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] text-slate-400">
+                    {rankMode === 'mauzo' ? (
+                      <span>
+                        {item.orders} {item.orders === 1 ? 'order' : 'orders'} ·{' '}
+                        {Number(item.itemsSold.toFixed(2)).toLocaleString()} units · Avg{' '}
+                        {formatCurrency(item.avgOrder, settings.currencySymbol)}
+                      </span>
+                    ) : (
+                      <span>
+                        {item.aboveRefOrders} {item.aboveRefOrders === 1 ? 'sale' : 'sales'} ·{' '}
+                        {Number(item.aboveRefUnits.toFixed(2)).toLocaleString()} units · Avg +
+                        {formatCurrency(item.avgGainPerUnit, settings.currencySymbol)}/unit
+                      </span>
+                    )}
+                    <span className="font-mono text-[10px] text-slate-500 shrink-0 ml-2">
+                      {pctOfLeader}% of #1
+                    </span>
+                  </div>
+
+                  <div className="h-1.5 rounded-full bg-slate-950 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${
+                        rankMode === 'mauzo'
+                          ? 'bg-gradient-to-r from-blue-500 to-cyan-400'
+                          : 'bg-gradient-to-r from-emerald-500 to-teal-400'
+                      }`}
+                      style={{ width: `${pctOfLeader}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // ─────────────────────────────────────────────────────────────
   // Render
@@ -1873,6 +2530,22 @@ export const AdminReports: React.FC = () => {
             collapsed={assistantsCollapsed}
             onToggleCollapsed={() => setAssistantsCollapsed(v => !v)}
             accent="emerald"
+            actions={
+              <button
+                type="button"
+                onClick={() => {
+                  setRankPeriod(assistantPeriod === 'year' ? 'month' : assistantPeriod);
+                  setRankStart(assistantStart);
+                  setRankEnd(assistantEnd);
+                  setRankSearch('');
+                  setShowAssistantRankingPage(true);
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 active:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-[11px] font-bold transition shadow-sm"
+              >
+                <Crown className="w-3.5 h-3.5 text-amber-400" />
+                <span>List</span>
+              </button>
+            }
           />
           {!assistantsCollapsed && (
             <div className="p-3.5 space-y-3">

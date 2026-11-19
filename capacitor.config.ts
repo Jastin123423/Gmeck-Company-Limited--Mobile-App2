@@ -11,9 +11,16 @@ const config: CapacitorConfig = {
     SystemBars: {
       style: 'DARK',
       hidden: false
+    },
+    SplashScreen: {
+      launchShowDuration: 300,
+      launchAutoHide: true,
+      backgroundColor: '#020617',
+      showSpinner: false
     }
   },
   android: {
+    backgroundColor: '#020617',
     allowMixedContent: true,
     captureInput: true,
     webContentsDebuggingEnabled: false
