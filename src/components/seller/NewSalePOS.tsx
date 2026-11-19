@@ -68,6 +68,7 @@ export const NewSalePOS: React.FC = () => {
   const [amountReceived, setAmountReceived] = useState<string>('');
   const [saleNotes, setSaleNotes] = useState<string>('');
   const [assistantName, setAssistantName] = useState<string>('');
+  const [assistantNameError, setAssistantNameError] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
@@ -89,6 +90,7 @@ export const NewSalePOS: React.FC = () => {
   const [cartSearchVisibleCount, setCartSearchVisibleCount] = useState(PAGE_SIZE);
   const cartListRef = useRef<HTMLDivElement>(null);
   const cartSearchInputRef = useRef<HTMLInputElement>(null);
+  const assistantInputRef = useRef<HTMLInputElement>(null);
 
   const barcodeInputRef = useRef<HTMLInputElement>(null);
   const settings = dbState.settings;
@@ -241,12 +243,13 @@ export const NewSalePOS: React.FC = () => {
     return Number(discounted.toFixed(2));
   }, [subtotal, overallDiscount]);
 
-  const tenderValue = parseFloat(amountReceived) || 0;
-  const changeAmount = paymentMethod === 'CASH' ? Math.max(0, tenderValue - totalAmount) : 0;
+  const parsedTender = parseFloat(amountReceived);
+  const hasWrittenTender = amountReceived.trim() !== '' && Number.isFinite(parsedTender) && parsedTender >= 0;
+  const tenderValue = hasWrittenTender ? parsedTender : totalAmount;
 
   useEffect(() => {
     if (paymentMethod === 'CASH') {
-      setAmountReceived(totalAmount.toFixed(2));
+      setAmountReceived(totalAmount > 0 ? String(Number(totalAmount.toFixed(2))) : '');
     }
   }, [totalAmount, paymentMethod]);
 
@@ -593,6 +596,7 @@ export const NewSalePOS: React.FC = () => {
     setAmountReceived('');
     setSaleNotes('');
     setAssistantName('');
+    setAssistantNameError(false);
     setCartSearchQuery('');
     setIsMobileCartOpen(false);
   };
@@ -663,6 +667,18 @@ export const NewSalePOS: React.FC = () => {
       return;
     }
 
+    if (Boolean(settings.enableSalesAssistant) && !assistantName.trim()) {
+      setAssistantNameError(true);
+      assistantInputRef.current?.focus();
+      assistantInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      addToast({
+        type: 'error',
+        title: 'Jina la Muuzaji Linahitajika',
+        description: 'Tafadhali jaza Jina la Muuzaji kabla ya kukamilisha mauzo.',
+      });
+      return;
+    }
+
     const invalid = cart.find(i => {
       const q = qtyNum(i.quantity);
       return q < minQtyForUnit(i.product.unit);
@@ -686,16 +702,13 @@ export const NewSalePOS: React.FC = () => {
       return;
     }
 
-    const tender = paymentMethod === 'CASH' ? (parseFloat(amountReceived) || 0) : totalAmount;
-
-    if (paymentMethod === 'CASH' && tender < totalAmount) {
-      addToast({
-        type: 'error',
-        title: 'Insufficient Payment',
-        description: `Tendered cash (${formatCurrency(tender, settings.currencySymbol)}) is less than total due (${formatCurrency(totalAmount, settings.currencySymbol)}).`,
-      });
-      return;
-    }
+    // Accept whatever amount is written — never return change and never refuse below selling price
+    const tender =
+      paymentMethod === 'CASH'
+        ? hasWrittenTender
+          ? parsedTender
+          : totalAmount
+        : totalAmount;
 
     setIsProcessing(true);
 
@@ -939,9 +952,12 @@ export const NewSalePOS: React.FC = () => {
           cart.map(item => {
             const referencePrice =
               item.product.proposedSellingPrice || item.product.sellingPrice || 0;
+            const sellingRef = item.product.sellingPrice || 0;
             const unitPriceNum = priceNum(item.unitPrice);
             const isBelowReference =
-              referencePrice > 0 && unitPriceNum > 0 && unitPriceNum < referencePrice;
+              unitPriceNum > 0 &&
+              ((referencePrice > 0 && unitPriceNum < referencePrice) ||
+                (sellingRef > 0 && unitPriceNum < sellingRef));
             const decimalUnit = isDecimalUnit(item.product.unit);
 
             return (
@@ -1054,24 +1070,60 @@ export const NewSalePOS: React.FC = () => {
       )}
 
       {/* Checkout Panel (stays visible; compact on mobile while typing in search so results have full room above keyboard) */}
+      {(() => {
+        const isAssistantEnabled = Boolean(settings.enableSalesAssistant);
+        const isAssistantMissing = isAssistantEnabled && !assistantName.trim();
+        const hasValidItems =
+          cart.length > 0 &&
+          cart.every(
+            i =>
+              qtyNum(i.quantity) >= minQtyForUnit(i.product.unit) &&
+              priceNum(i.unitPrice) > 0
+          );
+        const isCheckoutReady = hasValidItems && !isAssistantMissing && !isProcessing;
+        const isTenderBelowTotal =
+          paymentMethod === 'CASH' &&
+          hasWrittenTender &&
+          totalAmount > 0 &&
+          tenderValue < totalAmount;
+
+        return (
       <div className={`p-3 sm:p-3.5 bg-slate-950 border-t border-slate-800 space-y-2.5 safe-bottom ${isSearchingInCart ? 'hidden lg:block' : ''}`}>
-        {Boolean(settings.enableSalesAssistant) && (
+        {isAssistantEnabled && (
           <div>
             <label
               htmlFor="pos-assistant-name-input"
-              className="block text-[10px] sm:text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1"
+              className={`block text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider mb-1 ${
+                assistantNameError && isAssistantMissing ? 'text-rose-400' : 'text-slate-400'
+              }`}
             >
-              Jina la Muuzaji
+              Jina la Muuzaji <span className="text-rose-400">*</span>
             </label>
             <input
+              ref={assistantInputRef}
               id="pos-assistant-name-input"
               type="text"
               value={assistantName}
-              onChange={e => setAssistantName(e.target.value)}
+              onChange={e => {
+                setAssistantName(e.target.value);
+                if (assistantNameError && e.target.value.trim()) {
+                  setAssistantNameError(false);
+                }
+              }}
               placeholder="Jina la Muuzaji..."
               autoComplete="off"
-              className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className={`w-full rounded-lg px-3 py-2 text-xs text-white focus:outline-none transition ${
+                assistantNameError && isAssistantMissing
+                  ? 'bg-rose-950/30 border border-rose-500 ring-2 ring-rose-500/40 placeholder-rose-300/70 focus:ring-rose-500'
+                  : 'bg-slate-900 border border-slate-800 placeholder-slate-500 focus:ring-1 focus:ring-blue-500'
+              }`}
             />
+            {assistantNameError && isAssistantMissing && (
+              <p className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-rose-400">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>Tafadhali jaza Jina la Muuzaji kabla ya kukamilisha mauzo.</span>
+              </p>
+            )}
           </div>
         )}
 
@@ -1122,15 +1174,17 @@ export const NewSalePOS: React.FC = () => {
               min="0"
               value={amountReceived}
               onChange={e => setAmountReceived(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono font-bold text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className={`w-full bg-slate-900 border rounded-lg px-3 py-2 text-sm font-mono font-bold text-white focus:outline-none focus:ring-1 ${
+                isTenderBelowTotal
+                  ? 'border-amber-500/60 focus:ring-amber-500'
+                  : 'border-slate-800 focus:ring-blue-500'
+              }`}
             />
 
-            {changeAmount > 0 && (
-              <div className="flex justify-between items-center px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-xs">
-                <span className="text-emerald-400 font-medium">Chenji (Change):</span>
-                <span className="text-emerald-300 font-bold font-mono">
-                  {formatCurrency(changeAmount, settings.currencySymbol)}
-                </span>
+            {isTenderBelowTotal && (
+              <div className="flex items-center gap-1.5 text-[10px] font-semibold text-amber-300 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/30">
+                <AlertTriangle className="w-3 h-3 shrink-0" />
+                <span>Pesa iliyopokelewa ipo chini ya jumla — mauzo yatakubaliwa.</span>
               </div>
             )}
           </div>
@@ -1159,13 +1213,20 @@ export const NewSalePOS: React.FC = () => {
           id="complete-sale-btn"
           onClick={handleCompleteSale}
           disabled={cart.length === 0 || isProcessing}
-          className="w-full py-3 rounded-xl font-bold text-sm text-white shadow-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
-          style={{ backgroundColor: sellerColor.primary }}
+          className={`w-full py-3 rounded-xl font-bold text-sm shadow-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 ${
+            isCheckoutReady
+              ? 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white shadow-blue-600/25'
+              : assistantNameError && isAssistantMissing
+                ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/25'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+          }`}
         >
           <CheckCircle className="w-5 h-5" />
           <span>Kamilisha Mauzo ({formatCurrency(totalAmount, settings.currencySymbol)})</span>
         </button>
       </div>
+        );
+      })()}
     </div>
     );
   };
@@ -1486,6 +1547,25 @@ export const NewSalePOS: React.FC = () => {
           currencySymbol={settings.currencySymbol}
           onCancel={() => setVoiceDraft(null)}
           onConfirm={async payload => {
+            if (!currentUser) return;
+            if (Boolean(settings.enableSalesAssistant) && !assistantName.trim()) {
+              addDraftToCart(payload.items);
+              setPaymentMethod(payload.paymentMethod as PaymentMethod);
+              setVoiceDraft(null);
+              if (window.innerWidth < 1024) setIsMobileCartOpen(true);
+              setAssistantNameError(true);
+              window.setTimeout(() => {
+                assistantInputRef.current?.focus();
+                assistantInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }, 120);
+              addToast({
+                type: 'error',
+                title: 'Jina la Muuzaji Linahitajika',
+                description: 'Tafadhali jaza Jina la Muuzaji kabla ya kukamilisha mauzo.',
+              });
+              return;
+            }
+
             const salePayload = {
               shopId: targetShopId === 'ALL' ? (dbState.shops[0]?.id || '') : (targetShopId || dbState.shops[0]?.id || ''),
               items: payload.items.map(i => ({
@@ -1503,7 +1583,6 @@ export const NewSalePOS: React.FC = () => {
                 : undefined,
             };
 
-            if (!currentUser) return;
             setIsProcessing(true);
             
             const result = SalesService.createSale(salePayload, currentUser);

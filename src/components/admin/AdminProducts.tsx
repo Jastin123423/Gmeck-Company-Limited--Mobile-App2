@@ -66,7 +66,7 @@ export const AdminProducts: React.FC = () => {
   const [purchasePrice, setPurchasePrice] = useState('');
   const [sellingPrice, setSellingPrice] = useState('');
   const [currentStock, setCurrentStock] = useState('0');
-  const [minStock, setMinStock] = useState('5');
+  const [minStock, setMinStock] = useState('');
   const [unit, setUnit] = useState('pcs');
   const [productImages, setProductImages] = useState<ProductImage[]>([]);
   const [destinationType, setDestinationType] = useState<'SHOP_FLOOR' | 'STORE'>('SHOP_FLOOR');
@@ -203,7 +203,7 @@ export const AdminProducts: React.FC = () => {
     setPurchasePrice('');
     setSellingPrice('');
     setCurrentStock('0');
-    setMinStock('5');
+    setMinStock('');
     setUnit('pcs');
     setProductImages([]);
     setDestinationType('SHOP_FLOOR');
@@ -278,6 +278,7 @@ export const AdminProducts: React.FC = () => {
       let result;
 
       if (editingProduct) {
+        const parsedMinStock = parseInt(minStock, 10);
         result = await ProductService.updateProduct(
           editingProduct.id,
           {
@@ -290,7 +291,7 @@ export const AdminProducts: React.FC = () => {
             purchasePrice: pPrice,
             sellingPrice: sPrice,
             currentStock: parseInt(currentStock, 10) || 0,
-            minStock: parseInt(minStock, 10) || 5,
+            minStock: Number.isFinite(parsedMinStock) && parsedMinStock >= 0 ? parsedMinStock : 0,
             unit,
             images: productImages,
           },
@@ -302,6 +303,7 @@ export const AdminProducts: React.FC = () => {
           setIsSaving(false);
           return;
         }
+        const parsedMinStock = parseInt(minStock, 10);
         result = await ProductService.createProduct(
           {
             shopId: productShopId,
@@ -314,7 +316,7 @@ export const AdminProducts: React.FC = () => {
             purchasePrice: pPrice,
             sellingPrice: sPrice,
             currentStock: parseInt(currentStock, 10) || 0,
-            minStock: parseInt(minStock, 10) || 5,
+            minStock: Number.isFinite(parsedMinStock) && parsedMinStock >= 0 ? parsedMinStock : 0,
             unit,
             images: productImages,
           },
@@ -1390,7 +1392,7 @@ export const AdminProducts: React.FC = () => {
                     inputMode="numeric"
                     value={minStock}
                     onChange={e => setMinStock(e.target.value)}
-                    placeholder="5"
+                    placeholder="0"
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                   />
                 </div>

@@ -276,7 +276,7 @@ export class ProductService {
       storeStock: isSentToStore ? initialQty : 0,
       ...(initialStoreStocks ? { storeStocks: initialStoreStocks } : {}),
       ...(initialStoreDetails ? { storeDetails: initialStoreDetails } : {}),
-      minStock: Number(data.minStock ?? 5),
+      minStock: Math.max(0, Number(data.minStock ?? 0)),
       unit: data.unit?.trim() || 'pcs',
       status: data.status || 'ACTIVE',
       images: normalizedImages,

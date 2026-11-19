@@ -113,15 +113,11 @@ export class SalesService {
     const discountedSubtotal = Math.max(0, subtotal - overallDiscount);
     const taxAmount = 0;
     const finalTotal = Number(discountedSubtotal.toFixed(2));
+    const safeAmountReceived = Number.isFinite(params.amountReceived) && params.amountReceived >= 0
+      ? params.amountReceived
+      : finalTotal;
 
-    if (params.amountReceived < finalTotal && params.paymentMethod === 'CASH') {
-      return {
-        success: false,
-        error: `Tendered amount (${settings.currencySymbol}${params.amountReceived.toFixed(2)}) is less than total balance (${settings.currencySymbol}${finalTotal.toFixed(2)})`,
-      };
-    }
-
-    const change = params.paymentMethod === 'CASH' ? Math.max(0, params.amountReceived - finalTotal) : 0;
+    const change = 0;
     const grossProfit = Number((finalTotal - totalCostOfGoods).toFixed(2));
 
     const saleId = generateUUID();
@@ -146,7 +142,7 @@ export class SalesService {
       costOfGoods: Number(totalCostOfGoods.toFixed(2)),
       grossProfit,
       paymentMethod: params.paymentMethod,
-      amountReceived: Number(params.amountReceived.toFixed(2)),
+      amountReceived: Number(safeAmountReceived.toFixed(2)),
       change: Number(change.toFixed(2)),
       status: 'COMPLETED',
       notes: params.notes?.trim(),

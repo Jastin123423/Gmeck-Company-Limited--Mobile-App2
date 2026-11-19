@@ -40,7 +40,7 @@ export const SellerProducts: React.FC = () => {
   const [purchasePrice, setPurchasePrice] = useState('');
   const [sellingPrice, setSellingPrice] = useState('');
   const [currentStock, setCurrentStock] = useState('0');
-  const [minStock, setMinStock] = useState('5');
+  const [minStock, setMinStock] = useState('');
   const [unit, setUnit] = useState('pcs');
   const [productImages, setProductImages] = useState<ProductImage[]>([]);
   const [destinationType, setDestinationType] = useState<'SHOP_FLOOR' | 'STORE'>('SHOP_FLOOR');
@@ -140,7 +140,10 @@ export const SellerProducts: React.FC = () => {
           purchasePrice: costPrice,
           sellingPrice: price,
           currentStock: parseInt(currentStock, 10) || 0,
-          minStock: parseInt(minStock, 10) || 5,
+          minStock:
+            Number.isFinite(parseInt(minStock, 10)) && parseInt(minStock, 10) >= 0
+              ? parseInt(minStock, 10)
+              : 0,
           unit,
           images: productImages,
         },
@@ -160,7 +163,7 @@ export const SellerProducts: React.FC = () => {
         setPurchasePrice('');
         setSellingPrice('');
         setCurrentStock('0');
-        setMinStock('5');
+        setMinStock('');
         setProductImages([]);
         setDestinationType('SHOP_FLOOR');
         setSelectedStoreId('');
@@ -686,6 +689,7 @@ export const SellerProducts: React.FC = () => {
                     min="0"
                     value={minStock}
                     onChange={e => setMinStock(e.target.value)}
+                    placeholder="0"
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                   />
                 </div>
