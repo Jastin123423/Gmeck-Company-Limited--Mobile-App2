@@ -10,6 +10,8 @@ import {
   Check,
   ChevronDown,
   Loader2,
+  Ban,
+  RotateCcw,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { PurchaseService } from '../../services/purchaseService';
@@ -266,6 +268,9 @@ export const AdminPurchases: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditMode, setIsEditMode] = useState(false);
   const [editingPurchase, setEditingPurchase] = useState<Purchase | null>(null);
+  const [voidingPurchase, setVoidingPurchase] = useState<Purchase | null>(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [isVoiding, setIsVoiding] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
   // Pagination
@@ -570,6 +575,43 @@ export const AdminPurchases: React.FC = () => {
     setIsEditMode(false);
   };
 
+  const openVoidPurchaseModal = (purchase: Purchase) => {
+    setVoidingPurchase(purchase);
+    setVoidReason('');
+  };
+
+  const handleExecuteVoid = () => {
+    if (!voidingPurchase) return;
+    if (!voidReason.trim()) {
+      addToast({
+        type: 'warning',
+        title: 'Reason Required',
+        description: 'Please enter a reason for voiding this purchase.',
+      });
+      return;
+    }
+
+    setIsVoiding(true);
+    const res = PurchaseService.voidPurchase(voidingPurchase.id, voidReason, currentUser);
+    setIsVoiding(false);
+
+    if (res.success) {
+      addToast({
+        type: 'success',
+        title: 'Purchase Voided & Deleted',
+        description: `${voidingPurchase.purchaseNumber || voidingPurchase.supplierName} was deleted and ${res.revertedUnits || 0} unit(s) were reverted from stock.`,
+      });
+      setVoidingPurchase(null);
+      setVoidReason('');
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Void Failed',
+        description: res.error || 'Could not void this purchase.',
+      });
+    }
+  };
+
   return (
     <div
       id="admin-purchases-view"
@@ -689,6 +731,13 @@ export const AdminPurchases: React.FC = () => {
                         <Pencil className="w-3.5 h-3.5" />
                         Edit / Correct
                       </button>
+                      <button
+                        onClick={() => openVoidPurchaseModal(purchase)}
+                        className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-rose-500/10 hover:bg-rose-600 active:bg-rose-700 text-rose-400 hover:text-white border border-rose-500/20 transition text-[11px] font-semibold"
+                      >
+                        <Ban className="w-3.5 h-3.5" />
+                        Void
+                      </button>
                     </div>
                   )}
                 </div>
@@ -757,13 +806,22 @@ export const AdminPurchases: React.FC = () => {
                       </td>
                       {canRecordPurchase && (
                         <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                          <button
-                            onClick={() => openEditPurchase(purchase)}
-                            className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition inline-flex items-center gap-1"
-                          >
-                            <Pencil className="w-3 h-3" />
-                            Edit
-                          </button>
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => openEditPurchase(purchase)}
+                              className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition inline-flex items-center gap-1"
+                            >
+                              <Pencil className="w-3 h-3" />
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => openVoidPurchaseModal(purchase)}
+                              className="px-2.5 py-1.5 rounded bg-rose-500/10 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/20 text-[11px] font-medium transition inline-flex items-center gap-1"
+                            >
+                              <Ban className="w-3 h-3" />
+                              Void
+                            </button>
+                          </div>
                         </td>
                       )}
                     </tr>
@@ -1115,6 +1173,119 @@ export const AdminPurchases: React.FC = () => {
                 </div>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Void & Delete Purchase Modal */}
+      {voidingPurchase && canRecordPurchase && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-5 sm:p-6 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
+              <div className="flex items-center gap-2 text-rose-400 min-w-0">
+                <Ban className="w-5 h-5 shrink-0" />
+                <h3 className="text-sm sm:text-base font-bold text-white truncate">
+                  Void Purchase {voidingPurchase.purchaseNumber || ''}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setVoidingPurchase(null);
+                  setVoidReason('');
+                }}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl text-xs mb-3 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-bold text-white truncate">
+                  {voidingPurchase.supplierName}
+                </div>
+                <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                  {formatDateTime(voidingPurchase.createdAt)}
+                </div>
+              </div>
+              <div className="font-mono font-bold text-white text-sm shrink-0">
+                {formatCurrency(voidingPurchase.totalAmount, settings.currencySymbol)}
+              </div>
+            </div>
+
+            <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-200 text-xs mb-4 space-y-2">
+              <div className="flex items-start gap-2">
+                <RotateCcw className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <strong>Automatic Stock Reversal &amp; Permanent Delete:</strong> Voiding will
+                  revert{' '}
+                  <strong>
+                    {(voidingPurchase.items || []).reduce((s, i) => s + (i.quantity || 0), 0)} units
+                  </strong>{' '}
+                  from{' '}
+                  <strong>
+                    {voidingPurchase.storeId
+                      ? `Store: ${
+                          voidingPurchase.storeName ||
+                          (dbState.stores || []).find(s => s.id === voidingPurchase.storeId)
+                            ?.name ||
+                          'Warehouse'
+                        }`
+                      : 'Shop Floor'}
+                  </strong>{' '}
+                  back to their previous quantities and permanently delete this purchase record.
+                </div>
+              </div>
+
+              {(voidingPurchase.items || []).length > 0 && (
+                <div className="pt-1.5 border-t border-amber-500/20 max-h-28 overflow-y-auto space-y-1 text-[11px]">
+                  {(voidingPurchase.items || []).map(item => (
+                    <div key={item.id} className="flex items-center justify-between gap-2">
+                      <span className="truncate text-amber-100">{item.productName}</span>
+                      <span className="font-mono font-bold text-rose-300 shrink-0">
+                        -{item.quantity}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2 text-xs mb-5">
+              <label className="block text-slate-300 font-semibold">
+                Void / Deletion Reason *
+              </label>
+              <textarea
+                required
+                rows={3}
+                value={voidReason}
+                onChange={e => setVoidReason(e.target.value)}
+                placeholder="e.g. Wrong purchase entry, duplicate stock-in, cancelled delivery..."
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-rose-500"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setVoidingPurchase(null);
+                  setVoidReason('');
+                }}
+                className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteVoid}
+                disabled={isVoiding}
+                className="px-4 py-2.5 rounded-lg bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white text-xs font-bold disabled:opacity-50 transition"
+              >
+                {isVoiding ? 'Processing...' : 'Confirm Void & Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}

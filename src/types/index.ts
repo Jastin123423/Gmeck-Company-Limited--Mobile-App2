@@ -409,6 +409,7 @@ export type SyncOperation =
   | 'VOID_SALE'
   | 'CREATE_PURCHASE'
   | 'UPDATE_PURCHASE'
+  | 'DELETE_PURCHASE'
   | 'CREATE_EXPENSE'
   | 'UPDATE_EXPENSE'
   | 'DELETE_EXPENSE'

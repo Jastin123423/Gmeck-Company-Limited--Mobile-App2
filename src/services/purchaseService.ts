@@ -499,6 +499,191 @@ export class PurchaseService {
   }
 
   /**
+   * Void and completely delete a purchase.
+   * Reverts all stock quantities previously added by this purchase (shop floor or store warehouse)
+   * back to their prior values, logs reversal movements, deletes the purchase record completely,
+   * and enqueues a DELETE_PURCHASE sync operation.
+   */
+  public static voidPurchase(
+    purchaseId: string,
+    reason: string,
+    currentUser: User
+  ): { success: boolean; revertedUnits?: number; error?: string } {
+    const purchases = db.getPurchases();
+    const index = purchases.findIndex(p => p.id === purchaseId);
+
+    if (index === -1) {
+      return { success: false, error: 'Purchase not found.' };
+    }
+
+    const current = purchases[index];
+
+    // Check permissions (matching updatePurchase)
+    const canVoid =
+      isPlatformAdmin(currentUser) ||
+      canAccessShopAsAdmin(currentUser, current.shopId) ||
+      current.createdByUserId === currentUser.id;
+
+    if (!canVoid) {
+      return {
+        success: false,
+        error: 'Permission Denied: You can only void purchases from your managed shop.',
+      };
+    }
+
+    const trimmedReason = reason?.trim();
+    if (!trimmedReason) {
+      return { success: false, error: 'Please provide a reason for voiding this purchase.' };
+    }
+
+    const nowIso = new Date().toISOString();
+    const products = [...db.getProducts()];
+    const reversalMovements = [];
+    const isStorePurchase = Boolean(current.storeId);
+    const resolvedStoreName =
+      current.storeName ||
+      (current.storeId
+        ? db.getStores().find(st => st.id === current.storeId)?.name
+        : undefined) ||
+      'Store';
+    let revertedUnits = 0;
+
+    for (const item of current.items || []) {
+      const qty = Number(item.quantity) || 0;
+      if (qty <= 0) continue;
+      revertedUnits += qty;
+
+      const prodIndex = products.findIndex(p => p.id === item.productId);
+      if (prodIndex === -1) continue;
+
+      const prod = products[prodIndex];
+
+      if (isStorePurchase && current.storeId) {
+        const prevStoreStock = prod.storeStock || 0;
+        const newStoreStock = Math.max(0, prevStoreStock - qty);
+        const nextStoreStocks = { ...(prod.storeStocks || {}) };
+        const prevSpecificStoreQty =
+          nextStoreStocks[current.storeId] !== undefined
+            ? Number(nextStoreStocks[current.storeId] || 0)
+            : prevStoreStock;
+        nextStoreStocks[current.storeId] = Math.max(0, prevSpecificStoreQty - qty);
+
+        const nextStoreDetails = prod.storeDetails ? { ...prod.storeDetails } : undefined;
+        if (nextStoreDetails && nextStoreDetails[current.storeId]) {
+          nextStoreDetails[current.storeId] = {
+            ...nextStoreDetails[current.storeId],
+            quantity: nextStoreStocks[current.storeId],
+          };
+        }
+
+        products[prodIndex] = {
+          ...prod,
+          storeStock: newStoreStock,
+          storeStocks: nextStoreStocks,
+          ...(nextStoreDetails ? { storeDetails: nextStoreDetails } : {}),
+          updatedAt: nowIso,
+        };
+
+        reversalMovements.push({
+          id: generateUUID(),
+          shopId: current.shopId,
+          shopName: current.shopName,
+          storeId: current.storeId,
+          productId: prod.id,
+          productName: prod.name,
+          previousQty: prevStoreStock,
+          changeQty: -qty,
+          newQty: newStoreStock,
+          type: 'VOID_RETURN' as const,
+          reason: `Voided & deleted PO ${current.purchaseNumber || current.id} from Store '${resolvedStoreName}': ${trimmedReason}`,
+          costValue: item.total,
+          referenceId: current.id,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          createdAt: nowIso,
+        });
+      } else {
+        const prevStock = prod.currentStock || 0;
+        const newStock = Math.max(0, prevStock - qty);
+        const synced = StoreService.applyFloorStockDeltaToProduct(prod, newStock);
+
+        products[prodIndex] = {
+          ...synced,
+          currentStock: newStock,
+          updatedAt: nowIso,
+        };
+
+        reversalMovements.push({
+          id: generateUUID(),
+          shopId: current.shopId,
+          shopName: current.shopName,
+          productId: prod.id,
+          productName: prod.name,
+          previousQty: prevStock,
+          changeQty: -qty,
+          newQty: newStock,
+          type: 'VOID_RETURN' as const,
+          reason: `Voided & deleted PO ${current.purchaseNumber || current.id} (${current.supplierName}): ${trimmedReason}`,
+          costValue: item.total,
+          referenceId: current.id,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          createdAt: nowIso,
+        });
+      }
+    }
+
+    // Save reverted product quantities & inventory movements
+    db.saveProducts(products);
+    if (reversalMovements.length > 0) {
+      db.saveMovements([...reversalMovements, ...db.getMovements()]);
+    }
+
+    // Delete the purchase record completely
+    const remainingPurchases = purchases.filter(p => p.id !== purchaseId);
+    db.savePurchases(remainingPurchases);
+
+    // Enqueue sync operation so D1 reverts stock and permanently deletes the purchase
+    db.enqueueSync({
+      id: generateUUID(),
+      operation: 'DELETE_PURCHASE',
+      entityType: 'PURCHASE',
+      entityId: purchaseId,
+      payload: {
+        id: purchaseId,
+        purchaseId,
+        purchaseNumber: current.purchaseNumber,
+        shopId: current.shopId,
+        shopName: current.shopName,
+        storeId: current.storeId,
+        storeName: current.storeName,
+        supplierName: current.supplierName,
+        items: current.items,
+        reason: trimmedReason,
+        voidedByUserId: currentUser.id,
+        voidedByName: currentUser.name,
+        voidedAt: nowIso,
+      },
+      status: 'PENDING',
+      createdAt: nowIso,
+    });
+
+    db.addAuditLog({
+      id: generateUUID(),
+      userId: currentUser.id,
+      userName: currentUser.name,
+      action: 'VOID_DELETE_PURCHASE',
+      details: `Voided and deleted purchase ${current.purchaseNumber || current.id} (${current.supplierName}), reverted ${revertedUnits} units. Reason: ${trimmedReason}`,
+      entityType: 'PURCHASE',
+      entityId: purchaseId,
+      shopId: current.shopId,
+      timestamp: nowIso,
+    });
+
+    return { success: true, revertedUnits };
+  }
+
+  /**
    * Get purchases filtered by shop, supplier, date.
    */
   public static getPurchases(
