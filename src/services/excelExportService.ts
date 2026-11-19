@@ -1,7 +1,23 @@
 // src/services/excelExportService.ts
 import * as XLSX from 'xlsx';
+import { Capacitor } from '@capacitor/core';
 import { db } from '../db/storage';
 import { Product, Store } from '../types';
+import { saveFileCrossPlatform } from '../utils/nativeDownload';
+
+function writeWorkbookCrossPlatform(wb: XLSX.WorkBook, fileName: string): void {
+  if (Capacitor.isNativePlatform()) {
+    const base64Data = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' }) as string;
+    void saveFileCrossPlatform({
+      fileName,
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      base64Data,
+      openAfterSave: true,
+    });
+    return;
+  }
+  XLSX.writeFile(wb, fileName);
+}
 
 export interface ExcelExportResult {
   success: boolean;
@@ -123,7 +139,7 @@ export class ExcelExportService {
       XLSX.utils.book_append_sheet(wb, ws, 'Products');
 
       const fileName = `products_${todayStamp()}.xlsx`;
-      XLSX.writeFile(wb, fileName);
+      writeWorkbookCrossPlatform(wb, fileName);
 
       return { success: true, fileName, rowCount: filtered.length };
     } catch (err: any) {
@@ -182,7 +198,7 @@ export class ExcelExportService {
       XLSX.utils.book_append_sheet(wb, ws, safeSheetName);
 
       const fileName = `${slugifyFileName(store.name)}_products_${todayStamp()}.xlsx`;
-      XLSX.writeFile(wb, fileName);
+      writeWorkbookCrossPlatform(wb, fileName);
 
       return { success: true, fileName, rowCount };
     } catch (err: any) {
@@ -213,7 +229,7 @@ export class ExcelExportService {
       XLSX.utils.book_append_sheet(wb, ws, 'All Stores Inventory');
 
       const fileName = `all_stores_products_${todayStamp()}.xlsx`;
-      XLSX.writeFile(wb, fileName);
+      writeWorkbookCrossPlatform(wb, fileName);
 
       return { success: true, fileName, rowCount: rows.length };
     } catch (err: any) {

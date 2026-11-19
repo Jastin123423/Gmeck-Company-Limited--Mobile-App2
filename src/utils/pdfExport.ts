@@ -12,6 +12,7 @@ import {
 import { formatCurrency, formatDateTime } from './formatters';
 import { formatSaleEditDetails, SaleEditsPrintMeta } from './saleEditsPrint';
 import { MovementsPrintMeta } from './movementsPrint';
+import { saveFileCrossPlatform } from './nativeDownload';
 
 type RGB = [number, number, number];
 
@@ -61,35 +62,22 @@ function sanitizeFilename(name: string): string {
   return cleaned.endsWith('.pdf') ? cleaned : `${cleaned || 'document'}.pdf`;
 }
 
-export function triggerPdfDownload(doc: jsPDF, rawFilename: string): boolean {
+export async function triggerPdfDownload(doc: jsPDF, rawFilename: string): Promise<boolean> {
   const filename = sanitizeFilename(rawFilename);
   try {
-    if (typeof document === 'undefined' || typeof URL === 'undefined') {
-      return false;
-    }
+    const base64Data = doc.output('datauristring');
     const blob = doc.output('blob');
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.rel = 'noopener';
-    link.style.display = 'none';
-    document.body.appendChild(link);
-    link.click();
-    window.setTimeout(() => {
-      if (link.parentNode) link.parentNode.removeChild(link);
-      URL.revokeObjectURL(url);
-    }, 5000);
-    return true;
+    const res = await saveFileCrossPlatform({
+      fileName: filename,
+      mimeType: 'application/pdf',
+      blob,
+      base64Data,
+      openAfterSave: true,
+    });
+    return res.ok;
   } catch (err) {
-    console.error('[pdfExport] Blob download failed, trying doc.save:', err);
-    try {
-      doc.save(filename);
-      return true;
-    } catch (saveErr) {
-      console.error('[pdfExport] doc.save failed:', saveErr);
-      return false;
-    }
+    console.error('[pdfExport] PDF download failed:', err);
+    return false;
   }
 }
 
@@ -324,7 +312,7 @@ export function buildSalesReportPdfDoc(
   return doc;
 }
 
-export function downloadSalesReportPdf(
+export async function downloadSalesReportPdf(
   sales: Sale[],
   settings: BusinessSettings,
   meta: {
@@ -334,7 +322,7 @@ export function downloadSalesReportPdf(
     totalRevenue: number;
     totalProfit: number;
   }
-): boolean {
+): Promise<boolean> {
   const doc = buildSalesReportPdfDoc(sales, settings, meta);
   const stamp = new Date().toISOString().slice(0, 10);
   return triggerPdfDownload(doc, `sales_report_${meta.shopLabel}_${stamp}.pdf`);
@@ -441,12 +429,12 @@ export function buildSaleEditsPdfDoc(
   return doc;
 }
 
-export function downloadSaleEditsPdf(
+export async function downloadSaleEditsPdf(
   requests: SaleEditRequest[],
   salesById: Map<string, Sale>,
   settings: BusinessSettings,
   meta: SaleEditsPrintMeta
-): boolean {
+): Promise<boolean> {
   const doc = buildSaleEditsPdfDoc(requests, salesById, settings, meta);
   const stamp = new Date().toISOString().slice(0, 10);
   return triggerPdfDownload(doc, `sale_edits_history_${stamp}.pdf`);
@@ -626,10 +614,10 @@ export function buildTransferVoucherPdfDoc(
   return doc;
 }
 
-export function downloadTransferVoucherPdf(
+export async function downloadTransferVoucherPdf(
   transfer: StockTransfer,
   settings: BusinessSettings
-): boolean {
+): Promise<boolean> {
   const doc = buildTransferVoucherPdfDoc(transfer, settings);
   return triggerPdfDownload(doc, `stock_transfer_${transfer.transferNumber}.pdf`);
 }
@@ -721,11 +709,11 @@ export function buildMovementsPdfDoc(
   return doc;
 }
 
-export function downloadMovementsReportPdf(
+export async function downloadMovementsReportPdf(
   movements: InventoryMovement[],
   settings: BusinessSettings,
   meta: MovementsPrintMeta
-): boolean {
+): Promise<boolean> {
   const doc = buildMovementsPdfDoc(movements, settings, meta);
   const stamp = new Date().toISOString().slice(0, 10);
   return triggerPdfDownload(doc, `stock_movements_${stamp}.pdf`);
@@ -734,12 +722,12 @@ export function downloadMovementsReportPdf(
 // =====================================================================
 // 5. LOW STOCK REPORT PDF (AdminInventory.tsx)
 // =====================================================================
-export function downloadLowStockReportPdf(
+export async function downloadLowStockReportPdf(
   lowStockProducts: Product[],
   shops: Shop[],
   settings: BusinessSettings,
   scopeLabel: string
-): boolean {
+): Promise<boolean> {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Inventory Control';
@@ -816,11 +804,11 @@ export function downloadLowStockReportPdf(
 // =====================================================================
 // 6. STOCK LOSS REPORT PDF (AdminInventory.tsx)
 // =====================================================================
-export function downloadLossReportPdf(
+export async function downloadLossReportPdf(
   losses: InventoryMovement[],
   settings: BusinessSettings,
   meta: { periodLabel: string; totalLossValue: number; totalLossUnits: number }
-): boolean {
+): Promise<boolean> {
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Inventory Control';
@@ -879,11 +867,11 @@ export function downloadLossReportPdf(
 // =====================================================================
 // 7. FINANCIAL REPORT PDF (AdminReports.tsx)
 // =====================================================================
-export function downloadFinancialReportPdf(
+export async function downloadFinancialReportPdf(
   incomeSummary: any,
   settings: BusinessSettings,
   meta: { shopLabel: string; from?: string; to?: string }
-): boolean {
+): Promise<boolean> {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Financial Report';
@@ -1015,13 +1003,13 @@ export function downloadFinancialReportPdf(
 // =====================================================================
 // 8. SHOP PROFIT & LOSS PDF (AdminReports.tsx)
 // =====================================================================
-export function downloadShopProfitLossPdf(
+export async function downloadShopProfitLossPdf(
   rows: any[],
   totals: any,
   generalCompanyExpenses: number,
   settings: BusinessSettings,
   meta: { from?: string; to?: string; periodLabel: string }
-): boolean {
+): Promise<boolean> {
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Business';
@@ -1127,12 +1115,12 @@ export function downloadShopProfitLossPdf(
 // =====================================================================
 // 9. PRICE DEVIATIONS AUDIT PDF (AdminReports.tsx)
 // =====================================================================
-export function downloadPriceDeviationsPdf(
+export async function downloadPriceDeviationsPdf(
   deviations: any[],
   stats: { belowCount: number; belowCostCount: number; aboveCount: number },
   settings: BusinessSettings,
   meta: { shopLabel: string; from?: string; to?: string; direction: string }
-): boolean {
+): Promise<boolean> {
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Price Audit';
@@ -1200,7 +1188,10 @@ export function downloadPriceDeviationsPdf(
 // =====================================================================
 // 10. POS COMMERCIAL RECEIPT PDF (ReceiptModal.tsx)
 // =====================================================================
-export function downloadReceiptPdf(sale: Sale, settings: BusinessSettings): boolean {
+export async function downloadReceiptPdf(
+  sale: Sale,
+  settings: BusinessSettings
+): Promise<boolean> {
   const itemCount = (sale.items || []).length;
   const estimatedHeight = Math.max(150, 105 + itemCount * 9);
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [88, estimatedHeight] });

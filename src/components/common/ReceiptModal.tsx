@@ -3,6 +3,7 @@ import { Printer, Download, Copy, X, Check, Store, Share2, MessageSquare } from 
 import { useApp } from '../../context/AppContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { downloadReceiptPdf } from '../../utils/pdfExport';
+import { saveTextFileCrossPlatform } from '../../utils/nativeDownload';
 
 export const ReceiptModal: React.FC = () => {
   const { activeReceipt, closeReceipt, dbState, addToast } = useApp();
@@ -13,19 +14,19 @@ export const ReceiptModal: React.FC = () => {
 
   const settings = dbState.settings;
 
-  const handlePrint = () => {
-    const ok = downloadReceiptPdf(activeReceipt, settings);
+  const handlePrint = async () => {
+    const ok = await downloadReceiptPdf(activeReceipt, settings);
     if (ok) {
       addToast({
         type: 'success',
         title: 'Receipt PDF Downloaded',
-        description: `Saved receipt_${activeReceipt.receiptNumber}.pdf`,
+        description: `Saved receipt_${activeReceipt.receiptNumber}.pdf to Downloads.`,
       });
     } else {
       addToast({
         type: 'error',
         title: 'PDF Failed',
-        description: 'Could not generate receipt PDF.',
+        description: 'Could not save receipt PDF on this device.',
       });
     }
   };
@@ -102,20 +103,23 @@ export const ReceiptModal: React.FC = () => {
     }
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     const text = generateReceiptPlainText();
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${activeReceipt.receiptNumber}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-    addToast({
-      type: 'success',
-      title: 'Receipt Downloaded',
-      description: `Saved as ${activeReceipt.receiptNumber}.txt`,
-    });
+    const fileName = `${activeReceipt.receiptNumber}.txt`;
+    const res = await saveTextFileCrossPlatform(text, fileName, 'text/plain;charset=utf-8');
+    if (res.ok) {
+      addToast({
+        type: 'success',
+        title: 'Receipt Downloaded',
+        description: `Saved ${res.location || fileName}.`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Download Failed',
+        description: res.error || 'Could not save receipt file.',
+      });
+    }
   };
 
   return (

@@ -266,7 +266,7 @@ export function printMovementsReportPdf(
   movements: InventoryMovement[],
   settings: BusinessSettings,
   meta: MovementsPrintMeta
-): boolean {
+): Promise<boolean> {
   return downloadMovementsReportPdf(movements, settings, meta);
 }
 

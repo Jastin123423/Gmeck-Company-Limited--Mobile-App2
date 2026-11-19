@@ -27,6 +27,7 @@ import {
   downloadPriceDeviationsPdf,
   downloadShopProfitLossPdf,
 } from '../../utils/pdfExport';
+import { saveTextFileCrossPlatform } from '../../utils/nativeDownload';
 import {
   getAdminManagedShops,
   hasAdminAccess,
@@ -443,9 +444,9 @@ export const AdminReports: React.FC = () => {
   // ─────────────────────────────────────────────────────────────
   // Print Main Report
   // ─────────────────────────────────────────────────────────────
-  const handlePrintReport = () => {
+  const handlePrintReport = async () => {
     setIsPrinting(true);
-    const ok = downloadFinancialReportPdf(incomeSummary, settings, {
+    const ok = await downloadFinancialReportPdf(incomeSummary, settings, {
       shopLabel: selectedShopName,
       from: incomeRange.from || undefined,
       to: incomeRange.to || undefined,
@@ -454,28 +455,28 @@ export const AdminReports: React.FC = () => {
       addToast({
         type: 'success',
         title: 'Financial PDF Downloaded',
-        description: `Financial report saved for ${selectedShopName}.`,
+        description: `Saved financial report for ${selectedShopName} to Downloads.`,
       });
     } else {
       addToast({
         type: 'error',
         title: 'PDF Export Failed',
-        description: 'Could not generate financial PDF report.',
+        description: 'Could not save financial PDF report on this device.',
       });
     }
-    setTimeout(() => setIsPrinting(false), 600);
+    setIsPrinting(false);
   };
 
   // ─────────────────────────────────────────────────────────────
   // Download Deviations PDF
   // ─────────────────────────────────────────────────────────────
-  const handlePrintDeviations = () => {
+  const handlePrintDeviations = async () => {
     if (deviations.length === 0) {
       addToast({ type: 'info', title: 'No Deviations', description: 'There are no price deviations in the current filter.' });
       return;
     }
 
-    const ok = downloadPriceDeviationsPdf(deviations, deviationStats, settings, {
+    const ok = await downloadPriceDeviationsPdf(deviations, deviationStats, settings, {
       shopLabel: selectedShopName,
       from: deviationRange.from || undefined,
       to: deviationRange.to || undefined,
@@ -485,13 +486,13 @@ export const AdminReports: React.FC = () => {
       addToast({
         type: 'success',
         title: 'Deviations PDF Downloaded',
-        description: `Saved PDF with ${deviations.length} price deviation(s).`,
+        description: `Saved PDF with ${deviations.length} price deviation(s) to Downloads.`,
       });
     } else {
       addToast({
         type: 'error',
         title: 'PDF Export Failed',
-        description: 'Could not generate price deviations PDF.',
+        description: 'Could not save price deviations PDF on this device.',
       });
     }
   };
@@ -499,7 +500,7 @@ export const AdminReports: React.FC = () => {
   // ─────────────────────────────────────────────────────────────
   // Export CSVs
   // ─────────────────────────────────────────────────────────────
-  const handleExportCSV = () => {
+  const handleExportCSV = async () => {
     const s: any = incomeSummary;
     let csv = `Financial Report - ${selectedShopName}\n`;
     csv += `Period: ${incomeRange.from || 'Beginning'} to ${incomeRange.to || 'Present'}\n\n`;
@@ -527,17 +528,16 @@ export const AdminReports: React.FC = () => {
       csv += `"${se.name}",${se.count},${se.total},${se.profit}\n`;
     });
 
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `financial_report_${selectedShopName.toLowerCase().replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-    addToast({ type: 'success', title: 'Report Exported', description: 'CSV report downloaded successfully.' });
+    const fileName = `financial_report_${selectedShopName.toLowerCase().replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`;
+    const res = await saveTextFileCrossPlatform(csv, fileName, 'text/csv;charset=utf-8');
+    if (res.ok) {
+      addToast({ type: 'success', title: 'Report Exported', description: `Saved ${res.location || fileName}.` });
+    } else {
+      addToast({ type: 'error', title: 'Export Failed', description: res.error || 'Could not save CSV report.' });
+    }
   };
 
-  const handleExportDeviationsCSV = () => {
+  const handleExportDeviationsCSV = async () => {
     if (deviations.length === 0) {
       addToast({ type: 'info', title: 'No Deviations', description: 'There are no price deviations in the current filter.' });
       return;
@@ -558,17 +558,16 @@ export const AdminReports: React.FC = () => {
       csv += `"${formatDateTime(d.createdAt)}","${d.receiptNumber}","${d.shopName}","${d.sellerName}","${d.productName}","${d.sku}",${d.referencePrice},${d.soldPrice},${d.purchasePrice},${d.diff},${d.quantity},${d.totalImpact},${d.direction},${d.belowCost ? 'YES' : 'NO'},"${d.usedSnapshot ? 'Snapshot' : 'Current price'}"\n`;
     });
 
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `price_deviations_${selectedShopName.toLowerCase().replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-    addToast({ type: 'success', title: 'Deviations Exported', description: `${deviations.length} deviation(s) saved.` });
+    const fileName = `price_deviations_${selectedShopName.toLowerCase().replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`;
+    const res = await saveTextFileCrossPlatform(csv, fileName, 'text/csv;charset=utf-8');
+    if (res.ok) {
+      addToast({ type: 'success', title: 'Deviations Exported', description: `Saved ${res.location || fileName}.` });
+    } else {
+      addToast({ type: 'error', title: 'Export Failed', description: res.error || 'Could not save CSV file.' });
+    }
   };
 
-  const handleExportShopProfitLossCSV = () => {
+  const handleExportShopProfitLossCSV = async () => {
     const rows = visiblePnlShops;
     if (rows.length === 0) {
       addToast({ type: 'info', title: 'Nothing to Export', description: 'No shop profit & loss rows match the current filter.' });
@@ -589,24 +588,23 @@ export const AdminReports: React.FC = () => {
       csv += `Consolidated Net After Company Expenses,,,,,,,,,,,,,,,,,${t.netAfterCompanyExpenses}\n`;
     }
 
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `shop_profit_and_loss_${pnlPeriod}_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-    addToast({ type: 'success', title: 'P&L Exported', description: `Shop Profit & Loss CSV saved (${rows.length} shop(s)).` });
+    const fileName = `shop_profit_and_loss_${pnlPeriod}_${new Date().toISOString().slice(0, 10)}.csv`;
+    const res = await saveTextFileCrossPlatform(csv, fileName, 'text/csv;charset=utf-8');
+    if (res.ok) {
+      addToast({ type: 'success', title: 'P&L Exported', description: `Saved ${res.location || fileName}.` });
+    } else {
+      addToast({ type: 'error', title: 'Export Failed', description: res.error || 'Could not save P&L CSV.' });
+    }
   };
 
-  const handlePrintShopProfitLoss = () => {
+  const handlePrintShopProfitLoss = async () => {
     const rows = visiblePnlShops;
     if (rows.length === 0) {
       addToast({ type: 'info', title: 'Nothing to Export', description: 'No shop profit & loss data available.' });
       return;
     }
 
-    const ok = downloadShopProfitLossPdf(
+    const ok = await downloadShopProfitLossPdf(
       rows,
       shopProfitLoss.totals,
       shopProfitLoss.generalCompanyExpenses,
@@ -621,13 +619,13 @@ export const AdminReports: React.FC = () => {
       addToast({
         type: 'success',
         title: 'P&L PDF Downloaded',
-        description: `Shop Profit & Loss PDF saved (${rows.length} shop(s)).`,
+        description: `Saved Shop Profit & Loss PDF (${rows.length} shop(s)) to Downloads.`,
       });
     } else {
       addToast({
         type: 'error',
         title: 'PDF Export Failed',
-        description: 'Could not generate Shop Profit & Loss PDF.',
+        description: 'Could not save Shop Profit & Loss PDF on this device.',
       });
     }
   };

@@ -4010,19 +4010,19 @@ export const AdminStores: React.FC = () => {
                             <button
                               type="button"
                               title="Download PDF"
-                              onClick={() => {
-                                const ok = printStockTransferVoucher(t, settings);
+                              onClick={async () => {
+                                const ok = await printStockTransferVoucher(t, settings);
                                 addToast(
                                   ok
                                     ? {
                                         type: 'success',
                                         title: 'Transfer PDF Downloaded',
-                                        description: `Saved stock_transfer_${t.transferNumber}.pdf`,
+                                        description: `Saved stock_transfer_${t.transferNumber}.pdf to Downloads.`,
                                       }
                                     : {
                                         type: 'error',
                                         title: 'PDF Export Failed',
-                                        description: 'Could not generate transfer voucher PDF.',
+                                        description: 'Could not save transfer voucher PDF on this device.',
                                       }
                                 );
                               }}
@@ -4116,19 +4116,19 @@ export const AdminStores: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
-                          const ok = printStockTransferVoucher(t, settings);
+                        onClick={async () => {
+                          const ok = await printStockTransferVoucher(t, settings);
                           addToast(
                             ok
                               ? {
                                   type: 'success',
                                   title: 'Transfer PDF Downloaded',
-                                  description: `Saved stock_transfer_${t.transferNumber}.pdf`,
+                                  description: `Saved stock_transfer_${t.transferNumber}.pdf to Downloads.`,
                                 }
                               : {
                                   type: 'error',
                                   title: 'PDF Export Failed',
-                                  description: 'Could not generate transfer voucher PDF.',
+                                  description: 'Could not save transfer voucher PDF on this device.',
                                 }
                           );
                         }}
@@ -4245,19 +4245,19 @@ export const AdminStores: React.FC = () => {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  const ok = printStockTransferVoucher(viewingTransfer, settings);
+                onClick={async () => {
+                  const ok = await printStockTransferVoucher(viewingTransfer, settings);
                   addToast(
                     ok
                       ? {
                           type: 'success',
                           title: 'Transfer PDF Downloaded',
-                          description: `Saved stock_transfer_${viewingTransfer.transferNumber}.pdf`,
+                          description: `Saved stock_transfer_${viewingTransfer.transferNumber}.pdf to Downloads.`,
                         }
                       : {
                           type: 'error',
                           title: 'PDF Export Failed',
-                          description: 'Could not generate transfer voucher PDF.',
+                          description: 'Could not save transfer voucher PDF on this device.',
                         }
                   );
                 }}

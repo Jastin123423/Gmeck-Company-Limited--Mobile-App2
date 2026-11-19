@@ -2,6 +2,7 @@ import { db } from '../db/storage';
 import { User } from '../types';
 import { generateUUID } from '../utils/crypto';
 import { CloudflareApi } from './cloudflareApi';
+import { saveTextFileCrossPlatform } from '../utils/nativeDownload';
 
 export class BackupService {
   /**
@@ -34,13 +35,8 @@ export class BackupService {
     const res = BackupService.exportBackup(currentUser);
     if (!res.success || !res.data) return;
 
-    const blob = new Blob([res.data], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = res.filename || `omnibiz_backup_${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const fileName = res.filename || `omnibiz_backup_${Date.now()}.json`;
+    void saveTextFileCrossPlatform(res.data, fileName, 'application/json');
   }
 
   /**

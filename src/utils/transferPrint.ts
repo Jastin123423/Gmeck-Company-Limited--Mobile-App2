@@ -376,7 +376,7 @@ export const buildTransferPrintHtml = (
 export const printStockTransferVoucher = (
   transfer: StockTransfer,
   settings: BusinessSettings
-): boolean => {
+): Promise<boolean> => {
   return downloadTransferVoucherPdf(transfer, settings);
 };
 

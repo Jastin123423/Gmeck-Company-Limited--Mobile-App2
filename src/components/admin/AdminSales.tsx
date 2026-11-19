@@ -30,6 +30,7 @@ import {
   printSaleEditsReportPdf,
 } from '../../utils/saleEditsPrint';
 import { downloadSalesReportPdf } from '../../utils/pdfExport';
+import { saveTextFileCrossPlatform } from '../../utils/nativeDownload';
 import {
   getAdminManagedShops,
   getShopAdminShopIds,
@@ -523,9 +524,9 @@ export const AdminSales: React.FC = () => {
     }
   };
 
-  const handlePrint = () => {
+  const handlePrint = async () => {
     setIsPrinting(true);
-    const ok = downloadSalesReportPdf(sales, settings, {
+    const ok = await downloadSalesReportPdf(sales, settings, {
       shopLabel: selectedShopName,
       startDate: startDate || undefined,
       endDate: endDate || undefined,
@@ -536,19 +537,19 @@ export const AdminSales: React.FC = () => {
       addToast({
         type: 'success',
         title: 'Sales PDF Downloaded',
-        description: `Exported ${sales.length} transaction(s) for ${selectedShopName}.`,
+        description: `Saved ${sales.length} transaction(s) for ${selectedShopName} to Downloads.`,
       });
     } else {
       addToast({
         type: 'error',
         title: 'PDF Export Failed',
-        description: 'Could not generate sales PDF document.',
+        description: 'Could not save sales PDF document on this device.',
       });
     }
-    setTimeout(() => setIsPrinting(false), 600);
+    setIsPrinting(false);
   };
 
-  const handleExportCSV = () => {
+  const handleExportCSV = async () => {
     let csv = `Sales Report - ${selectedShopName}\n`;
     csv += `Generated: ${new Date().toLocaleString()}\n\n`;
     csv += `Receipt #,Date,Shop,Seller,Products,Payment,Status,Total,Profit\n`;
@@ -560,15 +561,23 @@ export const AdminSales: React.FC = () => {
       csv += `"${sale.receiptNumber}","${formatDateTime(sale.createdAt)}","${sale.shopName || ''}","${sale.sellerName}","${products}","${sale.paymentMethod}","${sale.status}",${sale.total},${sale.status === 'COMPLETED' ? sale.grossProfit : 0}\n`;
     });
 
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `sales_report_${selectedShopName
+    const fileName = `sales_report_${selectedShopName
       .toLowerCase()
       .replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    const res = await saveTextFileCrossPlatform(csv, fileName, 'text/csv;charset=utf-8');
+    if (res.ok) {
+      addToast({
+        type: 'success',
+        title: 'CSV Downloaded',
+        description: `Saved ${res.location || fileName}.`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'CSV Export Failed',
+        description: res.error || 'Could not save CSV file.',
+      });
+    }
   };
 
   const hasActiveFilters =
@@ -684,8 +693,8 @@ export const AdminSales: React.FC = () => {
           ? 'Approved Only'
           : 'Rejected Only';
 
-    const handlePrintEditList = () => {
-      const ok = printSaleEditsReportPdf(filteredHandledEdits, salesById, settings, {
+    const handlePrintEditList = async () => {
+      const ok = await printSaleEditsReportPdf(filteredHandledEdits, salesById, settings, {
         periodLabel: editPeriodLabel,
         statusLabel: editStatusLabel,
         shopLabel: editShopLabel,
@@ -694,13 +703,13 @@ export const AdminSales: React.FC = () => {
         addToast({
           type: 'success',
           title: 'Edit History PDF Downloaded',
-          description: `Exported ${filteredHandledEdits.length} handled sale edit(s).`,
+          description: `Saved ${filteredHandledEdits.length} handled sale edit(s) to Downloads.`,
         });
       } else {
         addToast({
           type: 'error',
           title: 'PDF Export Failed',
-          description: 'Could not generate sale edits PDF.',
+          description: 'Could not save sale edits PDF on this device.',
         });
       }
     };

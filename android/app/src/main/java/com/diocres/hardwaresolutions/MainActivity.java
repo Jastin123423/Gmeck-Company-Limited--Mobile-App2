@@ -11,6 +11,7 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(NativeFileDownloadPlugin.class);
         super.onCreate(savedInstanceState);
 
         int appDarkColor = Color.parseColor("#020617");

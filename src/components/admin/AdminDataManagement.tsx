@@ -27,6 +27,7 @@ import { ImportProgressBar } from '../common/ImportProgressBar';
 import { ExcelExportService } from '../../services/excelExportService';
 import { CsvDataType } from '../../types';
 import { formatDateTime } from '../../utils/formatters';
+import { saveTextFileCrossPlatform } from '../../utils/nativeDownload';
 
 type ExportFormat = 'xlsx' | 'csv';
 
@@ -201,25 +202,25 @@ export const AdminDataManagement: React.FC = () => {
   // ==============================
   // EXPORT HANDLERS
   // ==============================
-  const handleExportCsv = () => {
+  const handleExportCsv = async () => {
     const { fileName, csvContent } = CsvDataService.exportDataToCsv(
       selectedExportType,
       selectedExportShopId || 'ALL'
     );
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', fileName);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-
-    addToast({
-      type: 'success',
-      title: 'CSV Export Generated',
-      description: `Downloaded ${fileName}.`,
-    });
+    const res = await saveTextFileCrossPlatform(csvContent, fileName, 'text/csv;charset=utf-8;');
+    addToast(
+      res.ok
+        ? {
+            type: 'success',
+            title: 'CSV Export Generated',
+            description: `Saved ${fileName}.`,
+          }
+        : {
+            type: 'error',
+            title: 'Export Failed',
+            description: res.error || 'Could not save CSV file.',
+          }
+    );
   };
 
   const handleExportProductsExcel = () => {
@@ -252,22 +253,22 @@ export const AdminDataManagement: React.FC = () => {
   // ==============================
   // CSV HANDLERS
   // ==============================
-  const handleDownloadTemplate = (type: CsvDataType) => {
+  const handleDownloadTemplate = async (type: CsvDataType) => {
     const { fileName, csvContent } = CsvDataService.getCsvTemplate(type);
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', fileName);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-
-    addToast({
-      type: 'info',
-      title: 'Template Downloaded',
-      description: `Downloaded ${fileName}.`,
-    });
+    const res = await saveTextFileCrossPlatform(csvContent, fileName, 'text/csv;charset=utf-8;');
+    addToast(
+      res.ok
+        ? {
+            type: 'info',
+            title: 'Template Downloaded',
+            description: `Saved ${fileName}.`,
+          }
+        : {
+            type: 'error',
+            title: 'Download Failed',
+            description: res.error || 'Could not save template file.',
+          }
+    );
   };
 
   const handleCsvFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {

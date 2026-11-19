@@ -477,7 +477,7 @@ export function printSaleEditsReportPdf(
   salesById: Map<string, Sale>,
   settings: BusinessSettings,
   meta: SaleEditsPrintMeta
-): boolean {
+): Promise<boolean> {
   return downloadSaleEditsPdf(requests, salesById, settings, meta);
 }
 

@@ -363,7 +363,7 @@ export const AdminInventory: React.FC = () => {
   // ==============================
   // DOWNLOAD LOW STOCK PDF
   // ==============================
-  const handlePrintLowStockReport = () => {
+  const handlePrintLowStockReport = async () => {
     const scopeLabel =
       shopAdmin && !platformAdmin
         ? shops.length === 1
@@ -371,25 +371,25 @@ export const AdminInventory: React.FC = () => {
           : 'Managed Shops'
         : 'All Shops Combined';
 
-    const ok = downloadLowStockReportPdf(allLowStockProducts, shops, settings, scopeLabel);
+    const ok = await downloadLowStockReportPdf(allLowStockProducts, shops, settings, scopeLabel);
     if (ok) {
       addToast({
         type: 'success',
         title: 'Low Stock PDF Downloaded',
-        description: `Saved PDF with ${allLowStockProducts.length} low stock item(s).`,
+        description: `Saved PDF with ${allLowStockProducts.length} low stock item(s) to Downloads.`,
       });
     } else {
       addToast({
         type: 'error',
         title: 'PDF Export Failed',
-        description: 'Could not generate low stock PDF report.',
+        description: 'Could not save low stock PDF report on this device.',
       });
     }
   };
 
   // Download Stock Loss Report PDF
-  const handlePrintLossReport = () => {
-    const ok = downloadLossReportPdf(filteredLosses, settings, {
+  const handlePrintLossReport = async () => {
+    const ok = await downloadLossReportPdf(filteredLosses, settings, {
       periodLabel: lossPeriod.toUpperCase(),
       totalLossValue,
       totalLossUnits,
@@ -398,19 +398,19 @@ export const AdminInventory: React.FC = () => {
       addToast({
         type: 'success',
         title: 'Loss Report PDF Downloaded',
-        description: `Saved PDF with ${filteredLosses.length} loss record(s).`,
+        description: `Saved PDF with ${filteredLosses.length} loss record(s) to Downloads.`,
       });
     } else {
       addToast({
         type: 'error',
         title: 'PDF Export Failed',
-        description: 'Could not generate stock loss PDF report.',
+        description: 'Could not save stock loss PDF report on this device.',
       });
     }
   };
 
   // Download Full-Screen Movements Report PDF
-  const handlePrintMovementsReport = () => {
+  const handlePrintMovementsReport = async () => {
     const periodLabel =
       movementPeriod === 'DAY'
         ? `Day (${movementStartDate})`
@@ -431,7 +431,7 @@ export const AdminInventory: React.FC = () => {
           : 'Managed Shops'
         : 'All Shops';
 
-    const ok = printMovementsReportPdf(movements, settings, {
+    const ok = await printMovementsReportPdf(movements, settings, {
       periodLabel,
       typeLabel,
       shopLabel,
@@ -440,13 +440,13 @@ export const AdminInventory: React.FC = () => {
       addToast({
         type: 'success',
         title: 'Movements PDF Downloaded',
-        description: `Saved PDF with ${movements.length} movement record(s).`,
+        description: `Saved PDF with ${movements.length} movement record(s) to Downloads.`,
       });
     } else {
       addToast({
         type: 'error',
         title: 'PDF Export Failed',
-        description: 'Could not generate movements PDF report.',
+        description: 'Could not save movements PDF report on this device.',
       });
     }
   };
