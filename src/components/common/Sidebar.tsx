@@ -6,6 +6,7 @@ import {
   Receipt,
   History,
   Users,
+  UserPlus,
   TrendingDown,
   BarChart3,
   Database,
@@ -74,6 +75,8 @@ export const Sidebar: React.FC = () => {
     openProductsSubTab,
     shopsSubTab,
     openShopsSubTab,
+    sellersSubTab,
+    openSellersSubTab,
     sellerColor,
     dbState,
   } = useApp();
@@ -86,6 +89,7 @@ export const Sidebar: React.FC = () => {
     purchases: activeTab === 'purchases',
     expenses: activeTab === 'expenses',
     products: activeTab === 'products',
+    sellers: activeTab === 'sellers',
   });
 
   useEffect(() => {
@@ -97,7 +101,8 @@ export const Sidebar: React.FC = () => {
       activeTab === 'inventory' ||
       activeTab === 'purchases' ||
       activeTab === 'expenses' ||
-      activeTab === 'products'
+      activeTab === 'products' ||
+      activeTab === 'sellers'
     ) {
       setExpandedGroups(prev => ({ ...prev, [activeTab]: true }));
     }
@@ -222,26 +227,6 @@ export const Sidebar: React.FC = () => {
       ],
     },
     {
-      id: 'sell',
-      label: 'Sell',
-      icon: ShoppingCart,
-      iconColor: 'text-emerald-400',
-      children: [
-        {
-          id: 'new_sale',
-          label: 'Add Sale (POS)',
-          icon: Plus,
-          iconColor: 'text-emerald-400',
-        },
-        {
-          id: hasAnyPermission(['canEditSales', 'canDeleteSales']) ? 'sales' : 'my_sales',
-          label: 'All Sales Reports',
-          icon: History,
-          iconColor: 'text-indigo-400',
-        },
-      ],
-    },
-    {
       id: 'purchases',
       label: 'Purchases',
       icon: PurchaseIcon,
@@ -265,6 +250,26 @@ export const Sidebar: React.FC = () => {
           icon: RotateCcw,
           iconColor: 'text-amber-400',
           badge: accessibleReturnsCount || undefined,
+        },
+      ],
+    },
+    {
+      id: 'sell',
+      label: 'Sell',
+      icon: ShoppingCart,
+      iconColor: 'text-emerald-400',
+      children: [
+        {
+          id: 'new_sale',
+          label: 'Add Sale (POS)',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: hasAnyPermission(['canEditSales', 'canDeleteSales']) ? 'sales' : 'my_sales',
+          label: 'All Sales Reports',
+          icon: History,
+          iconColor: 'text-indigo-400',
         },
       ],
     },
@@ -355,6 +360,20 @@ export const Sidebar: React.FC = () => {
       icon: Users,
       iconColor: 'text-blue-400',
       requiresPermission: 'canManageSellers',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Seller Account',
+          icon: UserPlus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'All Sellers (List)',
+          icon: Users,
+          iconColor: 'text-blue-400',
+        },
+      ],
     },
     { id: 'settings', label: 'Account Settings', icon: Settings, iconColor: 'text-sky-300' },
   ];
@@ -411,6 +430,33 @@ export const Sidebar: React.FC = () => {
           label: 'Category List',
           icon: FolderTree,
           iconColor: 'text-amber-400',
+        },
+      ],
+    },
+    {
+      id: 'purchases',
+      label: 'Purchases',
+      icon: PurchaseIcon,
+      iconColor: 'text-orange-400',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Purchase',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'Purchase List',
+          icon: ClipboardList,
+          iconColor: 'text-orange-400',
+        },
+        {
+          id: 'returns',
+          label: 'Return List',
+          icon: RotateCcw,
+          iconColor: 'text-amber-400',
+          badge: accessibleReturnsCount || undefined,
         },
       ],
     },
@@ -498,33 +544,6 @@ export const Sidebar: React.FC = () => {
       ],
     },
     {
-      id: 'purchases',
-      label: 'Purchases',
-      icon: PurchaseIcon,
-      iconColor: 'text-orange-400',
-      children: [
-        {
-          id: 'add',
-          label: 'Add Purchase',
-          icon: Plus,
-          iconColor: 'text-emerald-400',
-        },
-        {
-          id: 'list',
-          label: 'Purchase List',
-          icon: ClipboardList,
-          iconColor: 'text-orange-400',
-        },
-        {
-          id: 'returns',
-          label: 'Return List',
-          icon: RotateCcw,
-          iconColor: 'text-amber-400',
-          badge: accessibleReturnsCount || undefined,
-        },
-      ],
-    },
-    {
       id: 'expenses',
       label: 'Expenses',
       icon: TrendingDown,
@@ -553,7 +572,26 @@ export const Sidebar: React.FC = () => {
       badgeColor: 'red',
     },
     { id: 'reports', label: 'Reports & Analytics', icon: BarChart3, iconColor: 'text-fuchsia-400' },
-    { id: 'sellers', label: 'User Management', icon: Users, iconColor: 'text-blue-400' },
+    {
+      id: 'sellers',
+      label: 'User Management',
+      icon: Users,
+      iconColor: 'text-blue-400',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Seller Account',
+          icon: UserPlus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'All Sellers (List)',
+          icon: Users,
+          iconColor: 'text-blue-400',
+        },
+      ],
+    },
     {
       id: 'notifications',
       label: 'Notification Center',
@@ -615,12 +653,15 @@ export const Sidebar: React.FC = () => {
             if (hasChildren && item.children) {
               const isExpanded = Boolean(expandedGroups[item.id]);
               const isShopsGroup = item.id === 'shops';
+              const isSellersGroup = item.id === 'sellers';
               const isSellGroup = item.id === 'sell';
               const isInventoryGroup = item.id === 'inventory';
               const isPurchasesGroup = item.id === 'purchases';
               const isExpensesGroup = item.id === 'expenses';
               const isProductsGroup = item.id === 'products';
-              const activeParentClasses = isShopsGroup
+              const activeParentClasses = isSellersGroup
+                ? 'bg-blue-600/20 text-white border border-blue-500/35'
+                : isShopsGroup
                 ? 'bg-amber-600/20 text-white border border-amber-500/35'
                 : isSellGroup
                 ? 'bg-emerald-600/20 text-white border border-emerald-500/35'
@@ -633,7 +674,9 @@ export const Sidebar: React.FC = () => {
                 : isInventoryGroup
                 ? 'bg-teal-600/20 text-white border border-teal-500/35'
                 : 'bg-cyan-600/20 text-white border border-cyan-500/35';
-              const activeIconColor = isShopsGroup
+              const activeIconColor = isSellersGroup
+                ? 'text-blue-300'
+                : isShopsGroup
                 ? 'text-amber-300'
                 : isSellGroup
                 ? 'text-emerald-300'
@@ -646,7 +689,9 @@ export const Sidebar: React.FC = () => {
                 : isInventoryGroup
                 ? 'text-teal-300'
                 : 'text-cyan-300';
-              const activeChevronColor = isShopsGroup
+              const activeChevronColor = isSellersGroup
+                ? 'text-blue-400'
+                : isShopsGroup
                 ? 'text-amber-400'
                 : isSellGroup
                 ? 'text-emerald-400'
@@ -659,7 +704,9 @@ export const Sidebar: React.FC = () => {
                 : isInventoryGroup
                 ? 'text-teal-400'
                 : 'text-cyan-400';
-              const borderLineColor = isShopsGroup
+              const borderLineColor = isSellersGroup
+                ? 'border-blue-500/30'
+                : isShopsGroup
                 ? 'border-amber-500/30'
                 : isSellGroup
                 ? 'border-emerald-500/30'
@@ -734,6 +781,8 @@ export const Sidebar: React.FC = () => {
                           const isChildActive =
                             item.id === 'shops'
                               ? activeTab === 'shops' && shopsSubTab === child.id
+                              : item.id === 'sellers'
+                              ? activeTab === 'sellers' && sellersSubTab === child.id
                               : item.id === 'sell'
                               ? activeTab === child.id
                               : item.id === 'stores'
@@ -756,6 +805,8 @@ export const Sidebar: React.FC = () => {
                               onClick={() => {
                                 if (item.id === 'shops') {
                                   openShopsSubTab(child.id as 'add' | 'list');
+                                } else if (item.id === 'sellers') {
+                                  openSellersSubTab(child.id as 'add' | 'list');
                                 } else if (item.id === 'sell') {
                                   setActiveTab(child.id);
                                 } else if (item.id === 'stores') {

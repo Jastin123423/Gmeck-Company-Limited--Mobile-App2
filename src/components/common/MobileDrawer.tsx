@@ -6,6 +6,7 @@ import {
   Receipt,
   History,
   Users,
+  UserPlus,
   TrendingDown,
   BarChart3,
   Database,
@@ -87,6 +88,8 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
     openProductsSubTab,
     shopsSubTab,
     openShopsSubTab,
+    sellersSubTab,
+    openSellersSubTab,
     sellerColor,
     dbState,
     logout,
@@ -106,6 +109,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
     purchases: activeTab === 'purchases',
     expenses: activeTab === 'expenses',
     products: activeTab === 'products',
+    sellers: activeTab === 'sellers',
   });
 
   useEffect(() => {
@@ -117,7 +121,8 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       activeTab === 'inventory' ||
       activeTab === 'purchases' ||
       activeTab === 'expenses' ||
-      activeTab === 'products'
+      activeTab === 'products' ||
+      activeTab === 'sellers'
     ) {
       setExpandedGroups(prev => ({ ...prev, [activeTab]: true }));
     }
@@ -255,28 +260,6 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       ],
     },
     {
-      id: 'sell',
-      label: 'Sell',
-      icon: ShoppingCart,
-      iconColor: 'text-emerald-400',
-      iconBg: 'bg-emerald-500/15',
-      category: 'core',
-      children: [
-        {
-          id: 'new_sale',
-          label: 'Add Sale (POS)',
-          icon: Plus,
-          iconColor: 'text-emerald-400',
-        },
-        {
-          id: hasAnyPermission(['canEditSales', 'canDeleteSales']) ? 'sales' : 'my_sales',
-          label: 'All Sales Reports',
-          icon: History,
-          iconColor: 'text-indigo-400',
-        },
-      ],
-    },
-    {
       id: 'purchases',
       label: 'Purchases',
       icon: PurchaseIcon,
@@ -302,6 +285,28 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
           icon: RotateCcw,
           iconColor: 'text-amber-400',
           badge: accessibleReturnsCount || undefined,
+        },
+      ],
+    },
+    {
+      id: 'sell',
+      label: 'Sell',
+      icon: ShoppingCart,
+      iconColor: 'text-emerald-400',
+      iconBg: 'bg-emerald-500/15',
+      category: 'core',
+      children: [
+        {
+          id: 'new_sale',
+          label: 'Add Sale (POS)',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: hasAnyPermission(['canEditSales', 'canDeleteSales']) ? 'sales' : 'my_sales',
+          label: 'All Sales Reports',
+          icon: History,
+          iconColor: 'text-indigo-400',
         },
       ],
     },
@@ -414,6 +419,20 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       iconBg: 'bg-blue-500/15',
       category: 'management',
       requiresPermission: 'canManageSellers',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Seller Account',
+          icon: UserPlus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'All Sellers (List)',
+          icon: Users,
+          iconColor: 'text-blue-400',
+        },
+      ],
     },
     {
       id: 'settings',
@@ -488,6 +507,35 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
           label: 'Category List',
           icon: FolderTree,
           iconColor: 'text-amber-400',
+        },
+      ],
+    },
+    {
+      id: 'purchases',
+      label: 'Purchases',
+      icon: PurchaseIcon,
+      iconColor: 'text-orange-400',
+      iconBg: 'bg-orange-500/15',
+      category: 'operations',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Purchase',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'Purchase List',
+          icon: ClipboardList,
+          iconColor: 'text-orange-400',
+        },
+        {
+          id: 'returns',
+          label: 'Return List',
+          icon: RotateCcw,
+          iconColor: 'text-amber-400',
+          badge: accessibleReturnsCount || undefined,
         },
       ],
     },
@@ -581,35 +629,6 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       ],
     },
     {
-      id: 'purchases',
-      label: 'Purchases',
-      icon: PurchaseIcon,
-      iconColor: 'text-orange-400',
-      iconBg: 'bg-orange-500/15',
-      category: 'operations',
-      children: [
-        {
-          id: 'add',
-          label: 'Add Purchase',
-          icon: Plus,
-          iconColor: 'text-emerald-400',
-        },
-        {
-          id: 'list',
-          label: 'Purchase List',
-          icon: ClipboardList,
-          iconColor: 'text-orange-400',
-        },
-        {
-          id: 'returns',
-          label: 'Return List',
-          icon: RotateCcw,
-          iconColor: 'text-amber-400',
-          badge: accessibleReturnsCount || undefined,
-        },
-      ],
-    },
-    {
       id: 'expenses',
       label: 'Expenses',
       icon: TrendingDown,
@@ -658,6 +677,20 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       iconColor: 'text-blue-400',
       iconBg: 'bg-blue-500/15',
       category: 'management',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Seller Account',
+          icon: UserPlus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'All Sellers (List)',
+          icon: Users,
+          iconColor: 'text-blue-400',
+        },
+      ],
     },
     {
       id: 'notifications',
@@ -705,6 +738,8 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
   const handleGroupChildClick = (parentId: string, childId: string) => {
     if (parentId === 'shops') {
       openShopsSubTab(childId as 'add' | 'list');
+    } else if (parentId === 'sellers') {
+      openSellersSubTab(childId as 'add' | 'list');
     } else if (parentId === 'sell') {
       setActiveTab(childId);
     } else if (parentId === 'stores') {
@@ -875,12 +910,15 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
             if (hasChildren && item.children) {
               const isExpanded = Boolean(expandedGroups[item.id]);
               const isShopsGroup = item.id === 'shops';
+              const isSellersGroup = item.id === 'sellers';
               const isSellGroup = item.id === 'sell';
               const isInventoryGroup = item.id === 'inventory';
               const isPurchasesGroup = item.id === 'purchases';
               const isExpensesGroup = item.id === 'expenses';
               const isProductsGroup = item.id === 'products';
-              const activeParentClasses = isShopsGroup
+              const activeParentClasses = isSellersGroup
+                ? 'bg-blue-600/20 text-white border border-blue-500/40 shadow-sm'
+                : isShopsGroup
                 ? 'bg-amber-600/20 text-white border border-amber-500/40 shadow-sm'
                 : isSellGroup
                 ? 'bg-emerald-600/20 text-white border border-emerald-500/40 shadow-sm'
@@ -893,7 +931,9 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                 : isInventoryGroup
                 ? 'bg-teal-600/20 text-white border border-teal-500/40 shadow-sm'
                 : 'bg-cyan-600/20 text-white border border-cyan-500/40 shadow-sm';
-              const activeIconClasses = isShopsGroup
+              const activeIconClasses = isSellersGroup
+                ? 'bg-blue-500/25 text-blue-300'
+                : isShopsGroup
                 ? 'bg-amber-500/25 text-amber-300'
                 : isSellGroup
                 ? 'bg-emerald-500/25 text-emerald-300'
@@ -906,7 +946,9 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                 : isInventoryGroup
                 ? 'bg-teal-500/25 text-teal-300'
                 : 'bg-cyan-500/25 text-cyan-300';
-              const activeChevronColor = isShopsGroup
+              const activeChevronColor = isSellersGroup
+                ? 'text-blue-400'
+                : isShopsGroup
                 ? 'text-amber-400'
                 : isSellGroup
                 ? 'text-emerald-400'
@@ -919,7 +961,9 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                 : isInventoryGroup
                 ? 'text-teal-400'
                 : 'text-cyan-400';
-              const borderLineColor = isShopsGroup
+              const borderLineColor = isSellersGroup
+                ? 'border-blue-500/30'
+                : isShopsGroup
                 ? 'border-amber-500/30'
                 : isSellGroup
                 ? 'border-emerald-500/30'
@@ -1002,6 +1046,8 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                           const isChildActive =
                             item.id === 'shops'
                               ? activeTab === 'shops' && shopsSubTab === child.id
+                              : item.id === 'sellers'
+                              ? activeTab === 'sellers' && sellersSubTab === child.id
                               : item.id === 'sell'
                               ? activeTab === child.id
                               : item.id === 'stores'

@@ -1318,7 +1318,7 @@ export const AdminStores: React.FC = () => {
     if (transferStatus === 'COMPLETED' && available <= 0) {
       addToast({
         type: 'warning',
-        title: 'Out of Stock at Location Source',
+        title: 'Out of Stock at Location From',
         description: `"${product.name}" currently has 0 units at ${selectedSourceLocation?.name || 'source location'}.`,
       });
       return;
@@ -1448,11 +1448,11 @@ export const AdminStores: React.FC = () => {
       return;
     }
     if (!srcLoc) {
-      setTransferError('Please select a Location Source.');
+      setTransferError('Please select a Location From.');
       return;
     }
     if (!dstLoc) {
-      setTransferError('Please select a Location Destination.');
+      setTransferError('Please select a Location To.');
       return;
     }
     if (selectedTransferEntries.length === 0) {
@@ -3016,11 +3016,11 @@ export const AdminStores: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 2. Location Source & Location Destination */}
+                {/* 2. Location From & Location To */}
                 <div className="px-3.5 sm:px-6 grid grid-cols-1 md:grid-cols-2 gap-3.5">
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1.5">
-                      Location Source *
+                      Location From *
                     </label>
                     <select
                       value={effectiveSourceLocationKey}
@@ -3028,7 +3028,7 @@ export const AdminStores: React.FC = () => {
                       required
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                     >
-                      <option value="">-- Select Location Source --</option>
+                      <option value="">-- Select Location From --</option>
                       {sourceLocationOptions.map(opt => (
                         <option key={opt.key} value={opt.key}>
                           {opt.label}
@@ -3039,7 +3039,7 @@ export const AdminStores: React.FC = () => {
 
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1.5">
-                      Location Destination *
+                      Location To *
                     </label>
                     <select
                       value={effectiveDestLocationKey}
@@ -3052,12 +3052,12 @@ export const AdminStores: React.FC = () => {
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {!selectedSourceLocation ? (
-                        <option value="">-- Select Location Source first --</option>
+                        <option value="">-- Select Location From first --</option>
                       ) : destLocationOptions.length === 0 ? (
                         <option value="">No valid destination available</option>
                       ) : (
                         <>
-                          <option value="">-- Select Location Destination --</option>
+                          <option value="">-- Select Location To --</option>
                           {destLocationOptions.map(opt => (
                             <option key={opt.key} value={opt.key}>
                               {opt.label}
@@ -3110,7 +3110,7 @@ export const AdminStores: React.FC = () => {
                         placeholder={
                           selectedSourceLocation
                             ? 'Search product name, SKU, or barcode — tap to add...'
-                            : 'Select Location Source above to search products...'
+                            : 'Select Location From above to search products...'
                         }
                         className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
                       />
@@ -3148,7 +3148,7 @@ export const AdminStores: React.FC = () => {
                   {/* Matching Results List — strictly shown ONLY when productSearch has input */}
                   {!selectedSourceLocation ? (
                     <p className="text-[11px] text-slate-500 px-1">
-                      Choose a <span className="text-slate-300 font-medium">Location Source</span>{' '}
+                      Choose a <span className="text-slate-300 font-medium">Location From</span>{' '}
                       first, then search and tap products to add them below.
                     </p>
                   ) : productSearch.trim() ? (
@@ -4151,11 +4151,11 @@ export const AdminStores: React.FC = () => {
             </div>
           </div>
 
-          {/* Location Source & Destination Cards */}
+          {/* Location From & To Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
               <div className="text-[10px] font-bold uppercase tracking-wider text-blue-400 mb-1">
-                Location Source (From)
+                Location From
               </div>
               <div className="text-sm font-bold text-white">{viewingTransfer.sourceName}</div>
               <div className="text-xs text-slate-400 mt-0.5">
@@ -4166,7 +4166,7 @@ export const AdminStores: React.FC = () => {
 
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
               <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 mb-1">
-                Location Destination (To)
+                Location To
               </div>
               <div className="text-sm font-bold text-white">{viewingTransfer.destName}</div>
               <div className="text-xs text-slate-400 mt-0.5">

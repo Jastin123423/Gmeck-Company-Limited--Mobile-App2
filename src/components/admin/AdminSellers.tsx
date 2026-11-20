@@ -19,6 +19,7 @@ import {
   MoreVertical,
   ChevronDown,
   ChevronUp,
+  ArrowLeft,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { SellerService } from '../../services/sellerService';
@@ -245,7 +246,15 @@ const SellerActionSheet: React.FC<{
 // Main component
 // ─────────────────────────────────────────────────────────────
 export const AdminSellers: React.FC = () => {
-  const { currentUser, dbState, addToast, refreshUser } = useApp();
+  const {
+    currentUser,
+    dbState,
+    addToast,
+    refreshUser,
+    sellersSubTab,
+    setSellersSubTab,
+    sellersNavTick,
+  } = useApp();
 
   // Modals
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -362,8 +371,7 @@ export const AdminSellers: React.FC = () => {
     if (file && sellerId) handleAvatarUpload(sellerId, file);
   };
 
-  // ── Modal openers ──────────────────────────────────────────
-  const openAddModal = () => {
+  const resetAddSellerForm = () => {
     setName('');
     setUsername('');
     setPassword('');
@@ -378,7 +386,20 @@ export const AdminSellers: React.FC = () => {
     }
     setSellerPermissions({});
     setFormError('');
-    setIsAddModalOpen(true);
+  };
+
+  // Sync with collapsible User Management menu
+  useEffect(() => {
+    if (sellersSubTab === 'add') {
+      resetAddSellerForm();
+      setIsAddModalOpen(false);
+    }
+  }, [sellersSubTab, sellersNavTick]);
+
+  // ── Modal openers ──────────────────────────────────────────
+  const openAddModal = () => {
+    resetAddSellerForm();
+    setSellersSubTab('add');
   };
 
   const openEditModal = (s: User) => {
@@ -435,6 +456,7 @@ export const AdminSellers: React.FC = () => {
     if (res.success) {
       addToast({ type: 'success', title: 'Seller Account Created', description: `Account for '${name}' (@${username}) is ready for login.` });
       setIsAddModalOpen(false);
+      setSellersSubTab('list');
     } else {
       setFormError(res.error || 'Failed to create seller.');
     }
@@ -522,6 +544,170 @@ export const AdminSellers: React.FC = () => {
     setDeletingSeller(null);
   };
 
+  if (sellersSubTab === 'add') {
+    return (
+      <div
+        id="admin-sellers-add-page"
+        className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-6"
+      >
+        <div className="max-w-2xl mx-auto space-y-4 sm:space-y-5">
+          {/* Header */}
+          <div className="flex items-center gap-3 pb-3.5 border-b border-slate-800">
+            <button
+              type="button"
+              onClick={() => setSellersSubTab('list')}
+              className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+              title="Back to All Sellers"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <UserPlus className="w-5 h-5 text-blue-400 shrink-0" />
+                <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                  Add Seller Account
+                </h2>
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Create a new seller login, assign shop units, configure permissions, and choose a theme color.
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl">
+            {formError && (
+              <div className="mb-4 p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{formError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleCreateSeller} className="space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1.5">Full Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={name}
+                    onChange={e => setName(e.target.value)}
+                    placeholder="e.g. David Brown"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1.5">
+                    Username / Account ID *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={username}
+                    onChange={e => setUsername(e.target.value)}
+                    placeholder="e.g. david"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-medium mb-1.5">
+                  Initial Password *
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="Set login password..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5 flex items-center justify-between">
+                  <span>Assigned Shop Units *</span>
+                  <span className="text-[10px] text-slate-400 font-normal">
+                    {platformAdmin ? 'Select one or more' : 'Auto-scoped to your shop'}
+                  </span>
+                </label>
+                <div className="space-y-1.5 max-h-44 overflow-y-auto p-2.5 rounded-xl bg-slate-950 border border-slate-800">
+                  {manageableShops.map(sh => (
+                    <label
+                      key={sh.id}
+                      className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-slate-900 cursor-pointer active:bg-slate-800/80"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={assignedShopIds.includes(sh.id)}
+                        onChange={() => toggleShopSelection(sh.id)}
+                        className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-xs text-slate-200">
+                        🏪 {sh.name}
+                        {sh.status === 'INACTIVE' && (
+                          <span className="text-rose-400 text-[10px] ml-1">(Inactive)</span>
+                        )}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {platformAdmin && (
+                <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} />
+              )}
+
+              <div>
+                <label className="block text-slate-300 font-medium mb-1.5">
+                  Signature Color Theme
+                </label>
+                <div className="grid grid-cols-4 gap-2">
+                  {SELLER_COLORS.map(c => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => setSelectedColor(c.id)}
+                      className={`p-2 rounded-xl border text-center transition flex flex-col items-center gap-1 ${
+                        selectedColor === c.id
+                          ? 'bg-slate-800 border-white text-white'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      <span
+                        className="w-5 h-5 rounded-full flex items-center justify-center"
+                        style={{ backgroundColor: c.primary }}
+                      >
+                        {selectedColor === c.id && <Check className="w-3 h-3 text-white" />}
+                      </span>
+                      <span className="text-[10px]">{c.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-slate-800 flex justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setSellersSubTab('list')}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow transition"
+                >
+                  Create Account
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div id="admin-sellers-view" className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto space-y-4 sm:space-y-6">
       <input ref={avatarInputRef} type="file" accept="image/*" onChange={handleFileChange} className="hidden" />
@@ -529,7 +715,7 @@ export const AdminSellers: React.FC = () => {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 pb-3.5 sm:pb-4 border-b border-slate-800">
         <div>
-          <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">Seller Account & Shop Assignments</h2>
+          <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">All Sellers (List)</h2>
           <p className="text-xs text-slate-400 mt-0.5">
             {platformAdmin
               ? 'Create cashier logins, assign shops, grant granular permissions, override passwords, and manage access.'

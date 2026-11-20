@@ -940,6 +940,17 @@ export class PurchaseService {
       createdAt: nowIso,
     });
 
+    // Sync the purchase return record and its items to D1 (purchase_returns & purchase_return_items)
+    db.enqueueSync({
+      id: generateUUID(),
+      operation: 'CREATE_PURCHASE_RETURN',
+      entityType: 'PURCHASE_RETURN',
+      entityId: purchaseReturn.id,
+      payload: purchaseReturn,
+      status: 'PENDING',
+      createdAt: nowIso,
+    });
+
     db.addAuditLog({
       id: generateUUID(),
       userId: currentUser.id,

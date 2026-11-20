@@ -14,6 +14,7 @@ export type PurchasesSubTab = 'list' | 'add' | 'returns';
 export type ExpensesSubTab = 'list' | 'add';
 export type ProductsSubTab = 'product_list' | 'add_product' | 'category_list' | 'add_category';
 export type ShopsSubTab = 'list' | 'add';
+export type SellersSubTab = 'list' | 'add';
 
 interface AppContextType {
   currentUser: User | null;
@@ -44,6 +45,10 @@ interface AppContextType {
   setShopsSubTab: (tab: ShopsSubTab) => void;
   shopsNavTick: number;
   openShopsSubTab: (tab: ShopsSubTab) => void;
+  sellersSubTab: SellersSubTab;
+  setSellersSubTab: (tab: SellersSubTab) => void;
+  sellersNavTick: number;
+  openSellersSubTab: (tab: SellersSubTab) => void;
   login: (user: User) => void;
   logout: () => void;
   refreshUser: () => void;
@@ -138,6 +143,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveTab('shops');
     setShopsSubTab(tab);
     setShopsNavTick(t => t + 1);
+  };
+
+  const [sellersSubTab, setSellersSubTab] = useState<SellersSubTab>('list');
+  const [sellersNavTick, setSellersNavTick] = useState<number>(0);
+
+  const openSellersSubTab = (tab: SellersSubTab) => {
+    setActiveTab('sellers');
+    setSellersSubTab(tab);
+    setSellersNavTick(t => t + 1);
   };
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [activeReceipt, setActiveReceipt] = useState<Sale | null>(null);
@@ -657,6 +671,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setShopsSubTab,
         shopsNavTick,
         openShopsSubTab,
+        sellersSubTab,
+        setSellersSubTab,
+        sellersNavTick,
+        openSellersSubTab,
         login,
         logout,
         refreshUser,
