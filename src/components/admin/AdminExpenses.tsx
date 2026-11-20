@@ -1,9 +1,7 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   CreditCard,
   Plus,
-  Calendar,
-  DollarSign,
   Search,
   PieChart,
   X,
@@ -16,6 +14,8 @@ import {
   AlertTriangle,
   Filter,
   ChevronDown,
+  ArrowLeft,
+  ClipboardList,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ExpenseService } from '../../services/expenseService';
@@ -53,8 +53,15 @@ interface CustomCategory {
 }
 
 export const AdminExpenses: React.FC = () => {
-  const { currentUser, dbState, addToast, selectedShopId } = useApp();
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  const {
+    currentUser,
+    dbState,
+    addToast,
+    selectedShopId,
+    expensesSubTab,
+    setExpensesSubTab,
+    expensesNavTick,
+  } = useApp();
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [isFilterSheetOpen, setIsFilterSheetOpen] = useState(false);
 
@@ -209,7 +216,7 @@ export const AdminExpenses: React.FC = () => {
     return found ? found.label : catId;
   };
 
-  const openAddModal = () => {
+  const initAddExpenseForm = () => {
     setEditingExpense(null);
     const defaultShop =
       shopAdmin && !platformAdmin
@@ -227,10 +234,36 @@ export const AdminExpenses: React.FC = () => {
     setReference('');
     setNotes('');
     setFormError('');
-    setIsModalOpen(true);
   };
 
-  const openEditModal = (expense: Expense) => {
+  // Initialize fresh Add Expense form when navigating to 'add' from menu
+  useEffect(() => {
+    if (expensesSubTab === 'add' && !editingExpense) {
+      initAddExpenseForm();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expensesSubTab, expensesNavTick]);
+
+  // Reset form if user clicks "Add Expense" or "List" in menu while editing
+  const prevExpenseNavTickRef = useRef(expensesNavTick);
+  useEffect(() => {
+    if (prevExpenseNavTickRef.current !== expensesNavTick) {
+      prevExpenseNavTickRef.current = expensesNavTick;
+      if (expensesSubTab === 'add') {
+        initAddExpenseForm();
+      } else {
+        setEditingExpense(null);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expensesNavTick, expensesSubTab]);
+
+  const openAddPage = () => {
+    initAddExpenseForm();
+    setExpensesSubTab('add');
+  };
+
+  const openEditPage = (expense: Expense) => {
     setEditingExpense(expense);
     setShopIdInput(expense.shopId || 'GENERAL');
     setTitle(expense.title || expense.description);
@@ -240,7 +273,13 @@ export const AdminExpenses: React.FC = () => {
     setReference(expense.reference || '');
     setNotes(expense.notes || '');
     setFormError('');
-    setIsModalOpen(true);
+    setExpensesSubTab('add');
+  };
+
+  const handleCancelForm = () => {
+    setEditingExpense(null);
+    setFormError('');
+    setExpensesSubTab('list');
   };
 
   const handleSaveExpense = (e: React.FormEvent) => {
@@ -287,8 +326,8 @@ export const AdminExpenses: React.FC = () => {
           title: 'Expense Updated',
           description: `Expense updated successfully.`,
         });
-        setIsModalOpen(false);
         setEditingExpense(null);
+        setExpensesSubTab('list');
       } else {
         setFormError(res.error || 'Failed to update expense.');
       }
@@ -316,7 +355,7 @@ export const AdminExpenses: React.FC = () => {
             settings.currencySymbol
           )} logged under ${getCategoryLabel(category)}.`,
         });
-        setIsModalOpen(false);
+        setExpensesSubTab('list');
       } else {
         setFormError(res.error || 'Failed to record expense.');
       }
@@ -454,6 +493,204 @@ export const AdminExpenses: React.FC = () => {
     categoryFilter !== 'ALL' ||
     shopFilter !== 'ALL';
 
+  // ─────────────────────────────────────────────────────────────
+  // FULL-PAGE VIEW: ADD / EDIT EXPENSE
+  // ─────────────────────────────────────────────────────────────
+  if (expensesSubTab === 'add' && canRecordExpense) {
+    return (
+      <div
+        id="admin-expenses-add-page"
+        className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-8"
+      >
+        <div className="max-w-2xl mx-auto">
+          {/* Page Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={handleCancelForm}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+                title="Back to Expense List"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <TrendingDown className="w-5 h-5 text-rose-400 shrink-0" />
+                  <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                    {editingExpense ? 'Edit Expense' : 'Add Expense'}
+                  </h2>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {editingExpense
+                    ? 'Update expense details and recalculate operating totals'
+                    : 'Record an operating cost, utility bill, salary, or maintenance spend'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleCancelForm}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition shrink-0"
+            >
+              <ClipboardList className="w-3.5 h-3.5 text-rose-400" />
+              <span>Expense List</span>
+            </button>
+          </div>
+
+          {formError && (
+            <div className="mb-4 p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-medium">
+              {formError}
+            </div>
+          )}
+
+          {/* Full-Page Form Card */}
+          <form
+            onSubmit={handleSaveExpense}
+            className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl space-y-4 text-xs"
+          >
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1.5">
+                Shop / Unit {shopAdmin && !platformAdmin ? '*' : ''}
+              </label>
+              <select
+                value={shopIdInput}
+                onChange={e => setShopIdInput(e.target.value)}
+                required={shopAdmin && !platformAdmin}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                {(!shopAdmin || platformAdmin) && (
+                  <option value="GENERAL">🏢 General Company (All Shops)</option>
+                )}
+                {shops.map(s => (
+                  <option key={s.id} value={s.id}>
+                    🏪 {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1.5">
+                Expense Description *
+              </label>
+              <input
+                type="text"
+                required
+                value={title}
+                onChange={e => setTitle(e.target.value)}
+                placeholder="e.g. Electricity Bill - July 2026"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">Category</label>
+                <select
+                  value={category}
+                  onChange={e => setCategory(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  {DEFAULT_EXPENSE_CATEGORIES.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                  {customCategories.length > 0 && (
+                    <optgroup label="Custom Categories">
+                      {customCategories.map(c => (
+                        <option key={c.id} value={c.id}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">Amount Spent *</label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-2.5 text-slate-500 font-mono">
+                    {settings.currencySymbol}
+                  </span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    required
+                    value={amount}
+                    onChange={e => setAmount(formatPriceInput(e.target.value))}
+                    placeholder="0"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">Payment Method</label>
+                <select
+                  value={paymentMethod}
+                  onChange={e => setPaymentMethod(e.target.value as PaymentMethod)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="CASH">Cash</option>
+                  <option value="BANK">Bank Transfer / Check</option>
+                  <option value="CARD">Debit / Credit Card</option>
+                  <option value="MOBILE_MONEY">Mobile Money</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Receipt / Invoice #
+                </label>
+                <input
+                  type="text"
+                  value={reference}
+                  onChange={e => setReference(e.target.value)}
+                  placeholder="e.g. UTL-9912"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1.5">Notes (Optional)</label>
+              <textarea
+                rows={3}
+                value={notes}
+                onChange={e => setNotes(e.target.value)}
+                placeholder="Additional context or account reference..."
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="pt-4 border-t border-slate-800 flex flex-col sm:flex-row gap-2.5">
+              <button
+                type="button"
+                onClick={handleCancelForm}
+                className="sm:w-40 px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="flex-1 px-4 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-bold shadow-lg transition flex items-center justify-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                <span>{editingExpense ? 'Save Changes' : 'Save Expense'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       id="admin-expenses-view"
@@ -484,11 +721,11 @@ export const AdminExpenses: React.FC = () => {
           {canRecordExpense && (
             <button
               id="record-expense-btn"
-              onClick={openAddModal}
+              onClick={openAddPage}
               className="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold text-xs shadow-lg transition"
             >
               <Plus className="w-4 h-4" />
-              <span>Record Expense</span>
+              <span>Add Expense</span>
             </button>
           )}
         </div>
@@ -667,7 +904,7 @@ export const AdminExpenses: React.FC = () => {
                   {canManageExpense(expense) && (
                     <div className="flex items-center gap-2 pt-1.5 border-t border-slate-800/60">
                       <button
-                        onClick={() => openEditModal(expense)}
+                        onClick={() => openEditPage(expense)}
                         className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-800 hover:bg-blue-600 active:bg-blue-700 text-slate-300 hover:text-white transition text-[11px] font-semibold"
                       >
                         <Edit2 className="w-3.5 h-3.5" />
@@ -740,7 +977,7 @@ export const AdminExpenses: React.FC = () => {
                           {canManageExpense(expense) && (
                             <>
                               <button
-                                onClick={() => openEditModal(expense)}
+                                onClick={() => openEditPage(expense)}
                                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white transition"
                                 title="Edit expense"
                               >
@@ -907,177 +1144,7 @@ export const AdminExpenses: React.FC = () => {
         </div>
       )}
 
-      {/* Modal: Record / Edit Expense */}
-      {isModalOpen && canRecordExpense && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-4 sm:p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
-              <div className="flex items-center gap-2">
-                <CreditCard className="w-5 h-5 text-blue-400" />
-                <h3 className="text-base font-bold text-white">
-                  {editingExpense ? 'Edit Expense' : 'Record Operating Expense'}
-                </h3>
-              </div>
-              <button
-                onClick={() => {
-                  setIsModalOpen(false);
-                  setEditingExpense(null);
-                }}
-                className="text-slate-400 hover:text-white p-1"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            {formError && (
-              <div className="mb-4 p-3 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs">
-                {formError}
-              </div>
-            )}
-
-            <form onSubmit={handleSaveExpense} className="space-y-4 text-xs">
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">
-                  Shop / Unit {shopAdmin && !platformAdmin ? '*' : ''}
-                </label>
-                <select
-                  value={shopIdInput}
-                  onChange={e => setShopIdInput(e.target.value)}
-                  required={shopAdmin && !platformAdmin}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                >
-                  {(!shopAdmin || platformAdmin) && (
-                    <option value="GENERAL">🏢 General Company (All Shops)</option>
-                  )}
-                  {shops.map(s => (
-                    <option key={s.id} value={s.id}>
-                      🏪 {s.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">
-                  Expense Description *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={title}
-                  onChange={e => setTitle(e.target.value)}
-                  placeholder="e.g. Electricity Bill - July 2026"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
-
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">Category</label>
-                  <select
-                    value={category}
-                    onChange={e => setCategory(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    {DEFAULT_EXPENSE_CATEGORIES.map(c => (
-                      <option key={c.id} value={c.id}>
-                        {c.label}
-                      </option>
-                    ))}
-                    {customCategories.length > 0 && (
-                      <optgroup label="Custom Categories">
-                        {customCategories.map(c => (
-                          <option key={c.id} value={c.id}>
-                            {c.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                    )}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">Amount Spent *</label>
-                  <div className="relative">
-                    <span className="absolute left-3 top-2.5 text-slate-500 font-mono">
-                      {settings.currencySymbol}
-                    </span>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      required
-                      value={amount}
-                      onChange={e => setAmount(formatPriceInput(e.target.value))}
-                      placeholder="0"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">Payment Method</label>
-                  <select
-                    value={paymentMethod}
-                    onChange={e => setPaymentMethod(e.target.value as PaymentMethod)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    <option value="CASH">Cash</option>
-                    <option value="BANK">Bank Transfer / Check</option>
-                    <option value="CARD">Debit / Credit Card</option>
-                    <option value="MOBILE_MONEY">Mobile Money</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Receipt / Invoice #
-                  </label>
-                  <input
-                    type="text"
-                    value={reference}
-                    onChange={e => setReference(e.target.value)}
-                    placeholder="e.g. UTL-9912"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">Notes (Optional)</label>
-                <textarea
-                  rows={2}
-                  value={notes}
-                  onChange={e => setNotes(e.target.value)}
-                  placeholder="Additional context or account reference..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
-
-              <div className="pt-3 border-t border-slate-800 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsModalOpen(false);
-                    setEditingExpense(null);
-                  }}
-                  className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow transition flex items-center gap-1.5"
-                >
-                  <Save className="w-3.5 h-3.5" />
-                  {editingExpense ? 'Save Changes' : 'Save Expense'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* Modal: Manage Categories */}
       {isCategoryModalOpen && isAdmin && (

@@ -167,7 +167,7 @@ export const AdminStores: React.FC = () => {
   const [selectedTransferMap, setSelectedTransferMap] = useState<Record<string, string>>({});
   const [selectedPriceMap, setSelectedPriceMap] = useState<Record<string, string>>({});
   const [productSearch, setProductSearch] = useState('');
-  const [transferStockedOnly, setTransferStockedOnly] = useState(true);
+  const [transferStockedOnly] = useState(true);
   const [transferVisibleLimit, setTransferVisibleLimit] = useState(STORE_PAGE_SIZE);
   const [selectedQueueFilter, setSelectedQueueFilter] = useState('');
   const [selectedQueueVisibleLimit, setSelectedQueueVisibleLimit] = useState(STORE_PAGE_SIZE);
@@ -3091,31 +3091,6 @@ export const AdminStores: React.FC = () => {
 
                 {/* 3. Purchase-Style Quick Product Search (Tap to Add, Auto-Clears — No Tick Checkboxes) */}
                 <div className="px-3.5 sm:px-6 space-y-2.5">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <label className="block text-slate-300 font-semibold">
-                      Search & Add Products *
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setTransferStockedOnly(v => !v);
-                          setTransferVisibleLimit(STORE_PAGE_SIZE);
-                        }}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${
-                          transferStockedOnly
-                            ? 'bg-blue-600/20 border-blue-500/40 text-blue-300'
-                            : 'bg-slate-950 border-slate-800 text-slate-400'
-                        }`}
-                      >
-                        {transferStockedOnly ? 'In Stock Only' : 'Include Out-of-Stock'}
-                      </button>
-                      <span className="text-[11px] font-mono tabular-nums text-blue-300">
-                        {transferSelectionSummary.selectedCount.toLocaleString()} / 1,000 added
-                      </span>
-                    </div>
-                  </div>
-
                   {/* Single-letter & multi-token responsive search bar + Clear All button */}
                   <div className="flex items-center gap-2">
                     <div className="relative flex-1 min-w-0">

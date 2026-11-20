@@ -336,6 +336,37 @@ export interface Purchase {
   updatedAt?: string;
 }
 
+export interface PurchaseReturnItem {
+  id: string;
+  productId: string;
+  productName: string;
+  originalQty: number;
+  returnQty: number;
+  remainingQty: number;
+  unitCost: number;
+  returnTotal: number;
+}
+
+export interface PurchaseReturn {
+  id: string;
+  returnNumber: string;
+  purchaseId: string;
+  purchaseNumber: string;
+  shopId: string;
+  shopName?: string;
+  storeId?: string;
+  storeName?: string;
+  supplierName: string;
+  invoiceNumber?: string;
+  items: PurchaseReturnItem[];
+  totalReturnQty: number;
+  totalReturnAmount: number;
+  reason: string;
+  returnedByUserId: string;
+  returnedByName: string;
+  createdAt: string;
+}
+
 export type ExpenseCategory =
   | 'ELECTRICITY'
   | 'RENT'

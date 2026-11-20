@@ -1,5 +1,12 @@
 import { db } from '../db/storage';
-import { Purchase, PurchaseItem, PaymentStatus, User } from '../types';
+import {
+  Purchase,
+  PurchaseItem,
+  PurchaseReturn,
+  PurchaseReturnItem,
+  PaymentStatus,
+  User,
+} from '../types';
 import { generateUUID } from '../utils/crypto';
 import { generatePurchaseNumber } from '../utils/formatters';
 import { StoreService } from './storeService';
@@ -681,6 +688,317 @@ export class PurchaseService {
     });
 
     return { success: true, revertedUnits };
+  }
+
+  /**
+   * Return specific quantities from an existing purchase.
+   * Reduces the purchased item quantities & total amount on the purchase,
+   * deducts the returned units from Shop Floor or Store Warehouse stock,
+   * records a PurchaseReturn entry for the Return List, and syncs the updated purchase.
+   */
+  public static returnPurchaseItems(
+    purchaseId: string,
+    returnSelections: { productId: string; itemId?: string; returnQty: number }[],
+    reason: string,
+    currentUser: User
+  ): {
+    success: boolean;
+    purchaseReturn?: PurchaseReturn;
+    updatedPurchase?: Purchase;
+    error?: string;
+  } {
+    const purchases = db.getPurchases();
+    const index = purchases.findIndex(p => p.id === purchaseId);
+
+    if (index === -1) {
+      return { success: false, error: 'Purchase not found.' };
+    }
+
+    const current = purchases[index];
+
+    const canReturn =
+      isPlatformAdmin(currentUser) ||
+      canAccessShopAsAdmin(currentUser, current.shopId) ||
+      current.createdByUserId === currentUser.id;
+
+    if (!canReturn) {
+      return {
+        success: false,
+        error: 'Permission Denied: You can only return purchases from your managed shop.',
+      };
+    }
+
+    const trimmedReason = reason?.trim();
+    if (!trimmedReason) {
+      return { success: false, error: 'Please provide a reason for this purchase return.' };
+    }
+
+    const validSelections = (returnSelections || []).filter(
+      s => Number.isFinite(Number(s.returnQty)) && Number(s.returnQty) > 0
+    );
+
+    if (validSelections.length === 0) {
+      return { success: false, error: 'Enter a return quantity greater than 0 for at least one product.' };
+    }
+
+    const nowIso = new Date().toISOString();
+    const dateStamp = nowIso.slice(0, 10).replace(/-/g, '');
+    const returnNumber = `PR-${dateStamp}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const products = [...db.getProducts()];
+    const isStorePurchase = Boolean(current.storeId);
+    const resolvedStoreName =
+      current.storeName ||
+      (current.storeId
+        ? db.getStores().find(st => st.id === current.storeId)?.name
+        : undefined) ||
+      'Store';
+
+    const returnedItems: PurchaseReturnItem[] = [];
+    const updatedPurchaseItems: PurchaseItem[] = [];
+    const movementsToAdd = [];
+    let totalReturnQty = 0;
+    let totalReturnAmount = 0;
+
+    for (const item of current.items || []) {
+      const sel = validSelections.find(
+        s => (s.itemId && s.itemId === item.id) || (!s.itemId && s.productId === item.productId)
+      );
+      const returnQty = sel ? Number(sel.returnQty) : 0;
+
+      if (returnQty > item.quantity) {
+        return {
+          success: false,
+          error: `Return quantity (${returnQty}) for ${item.productName} cannot exceed purchased quantity (${item.quantity}).`,
+        };
+      }
+
+      if (returnQty > 0) {
+        const remainingQty = Math.max(0, Number((item.quantity - returnQty).toFixed(4)));
+        const returnTotal = Number((returnQty * item.unitCost).toFixed(2));
+        const remainingTotal = Number((remainingQty * item.unitCost).toFixed(2));
+
+        totalReturnQty += returnQty;
+        totalReturnAmount += returnTotal;
+
+        returnedItems.push({
+          id: generateUUID(),
+          productId: item.productId,
+          productName: item.productName,
+          originalQty: item.quantity,
+          returnQty,
+          remainingQty,
+          unitCost: item.unitCost,
+          returnTotal,
+        });
+
+        if (remainingQty > 0) {
+          updatedPurchaseItems.push({
+            ...item,
+            quantity: remainingQty,
+            total: remainingTotal,
+          });
+        }
+
+        // Deduct returned quantity from product stock (Store or Shop Floor)
+        const prodIndex = products.findIndex(p => p.id === item.productId);
+        if (prodIndex !== -1) {
+          const prod = products[prodIndex];
+
+          if (isStorePurchase && current.storeId) {
+            const prevStoreStock = prod.storeStock || 0;
+            const newStoreStock = Math.max(0, prevStoreStock - returnQty);
+            const nextStoreStocks = { ...(prod.storeStocks || {}) };
+            const prevSpecificStoreQty =
+              nextStoreStocks[current.storeId] !== undefined
+                ? Number(nextStoreStocks[current.storeId] || 0)
+                : prevStoreStock;
+            nextStoreStocks[current.storeId] = Math.max(0, prevSpecificStoreQty - returnQty);
+
+            const nextStoreDetails = prod.storeDetails ? { ...prod.storeDetails } : undefined;
+            if (nextStoreDetails && nextStoreDetails[current.storeId]) {
+              nextStoreDetails[current.storeId] = {
+                ...nextStoreDetails[current.storeId],
+                quantity: nextStoreStocks[current.storeId],
+              };
+            }
+
+            products[prodIndex] = {
+              ...prod,
+              storeStock: newStoreStock,
+              storeStocks: nextStoreStocks,
+              ...(nextStoreDetails ? { storeDetails: nextStoreDetails } : {}),
+              updatedAt: nowIso,
+            };
+
+            movementsToAdd.push({
+              id: generateUUID(),
+              shopId: current.shopId,
+              shopName: current.shopName,
+              storeId: current.storeId,
+              productId: prod.id,
+              productName: prod.name,
+              previousQty: prevStoreStock,
+              changeQty: -returnQty,
+              newQty: newStoreStock,
+              type: 'RETURN' as const,
+              reason: `Purchase Return ${returnNumber} (PO ${current.purchaseNumber}) from Store '${resolvedStoreName}': ${trimmedReason}`,
+              costValue: returnTotal,
+              referenceId: current.id,
+              userId: currentUser.id,
+              userName: currentUser.name,
+              createdAt: nowIso,
+            });
+          } else {
+            const prevStock = prod.currentStock || 0;
+            const newStock = Math.max(0, prevStock - returnQty);
+            const synced = StoreService.applyFloorStockDeltaToProduct(prod, newStock);
+
+            products[prodIndex] = {
+              ...synced,
+              currentStock: newStock,
+              updatedAt: nowIso,
+            };
+
+            movementsToAdd.push({
+              id: generateUUID(),
+              shopId: current.shopId,
+              shopName: current.shopName,
+              productId: prod.id,
+              productName: prod.name,
+              previousQty: prevStock,
+              changeQty: -returnQty,
+              newQty: newStock,
+              type: 'RETURN' as const,
+              reason: `Purchase Return ${returnNumber} (PO ${current.purchaseNumber} - ${current.supplierName}): ${trimmedReason}`,
+              costValue: returnTotal,
+              referenceId: current.id,
+              userId: currentUser.id,
+              userName: currentUser.name,
+              createdAt: nowIso,
+            });
+          }
+        }
+      } else {
+        updatedPurchaseItems.push(item);
+      }
+    }
+
+    if (returnedItems.length === 0) {
+      return { success: false, error: 'No matching purchase items were selected for return.' };
+    }
+
+    const newPurchaseTotal = Number(
+      updatedPurchaseItems.reduce((sum, i) => sum + i.total, 0).toFixed(2)
+    );
+
+    const updatedPurchase: Purchase = {
+      ...current,
+      items: updatedPurchaseItems,
+      totalAmount: newPurchaseTotal,
+      updatedAt: nowIso,
+    };
+
+    const purchaseReturn: PurchaseReturn = {
+      id: generateUUID(),
+      returnNumber,
+      purchaseId: current.id,
+      purchaseNumber: current.purchaseNumber,
+      shopId: current.shopId,
+      shopName: current.shopName,
+      storeId: current.storeId,
+      storeName: current.storeId ? resolvedStoreName : undefined,
+      supplierName: current.supplierName,
+      invoiceNumber: current.invoiceNumber,
+      items: returnedItems,
+      totalReturnQty,
+      totalReturnAmount: Number(totalReturnAmount.toFixed(2)),
+      reason: trimmedReason,
+      returnedByUserId: currentUser.id,
+      returnedByName: currentUser.name,
+      createdAt: nowIso,
+    };
+
+    // Save products, movements, updated purchase, and purchase return record
+    db.saveProducts(products);
+    if (movementsToAdd.length > 0) {
+      db.saveMovements([...movementsToAdd, ...db.getMovements()]);
+    }
+
+    purchases[index] = updatedPurchase;
+    db.savePurchases(purchases);
+    db.savePurchaseReturns([purchaseReturn, ...db.getPurchaseReturns()]);
+
+    // Sync updated purchase quantities, total amount, and stock to D1
+    db.enqueueSync({
+      id: generateUUID(),
+      operation: 'UPDATE_PURCHASE',
+      entityType: 'PURCHASE',
+      entityId: purchaseId,
+      payload: updatedPurchase,
+      status: 'PENDING',
+      createdAt: nowIso,
+    });
+
+    db.addAuditLog({
+      id: generateUUID(),
+      userId: currentUser.id,
+      userName: currentUser.name,
+      action: 'PURCHASE_RETURN',
+      details: `Returned ${totalReturnQty} unit(s) (${returnNumber}) from PO ${current.purchaseNumber} (${current.supplierName}). Remaining purchase total: ${newPurchaseTotal}. Reason: ${trimmedReason}`,
+      entityType: 'PURCHASE',
+      entityId: purchaseId,
+      shopId: current.shopId,
+      timestamp: nowIso,
+    });
+
+    return {
+      success: true,
+      purchaseReturn,
+      updatedPurchase,
+    };
+  }
+
+  /**
+   * Get purchase returns filtered by shop and search query.
+   */
+  public static getPurchaseReturns(
+    options?: {
+      shopId?: string;
+      search?: string;
+    },
+    currentUser?: User
+  ): PurchaseReturn[] {
+    let returns = db.getPurchaseReturns();
+
+    if (currentUser && !isPlatformAdmin(currentUser) && isShopAdmin(currentUser)) {
+      const managedIds = getShopAdminShopIds(currentUser);
+      returns = returns.filter(r => managedIds.includes(r.shopId));
+    } else if (currentUser && !isPlatformAdmin(currentUser) && !isShopAdmin(currentUser)) {
+      const assigned = currentUser.assignedShopIds || [];
+      if (assigned.length > 0) {
+        returns = returns.filter(r => assigned.includes(r.shopId));
+      }
+    }
+
+    if (options?.shopId && options.shopId !== 'ALL') {
+      returns = returns.filter(r => r.shopId === options.shopId);
+    }
+
+    if (options?.search?.trim()) {
+      const q = options.search.trim().toLowerCase();
+      returns = returns.filter(
+        r =>
+          r.returnNumber.toLowerCase().includes(q) ||
+          r.purchaseNumber.toLowerCase().includes(q) ||
+          r.supplierName.toLowerCase().includes(q) ||
+          r.reason.toLowerCase().includes(q) ||
+          (r.returnedByName && r.returnedByName.toLowerCase().includes(q)) ||
+          (r.items || []).some(i => i.productName.toLowerCase().includes(q))
+      );
+    }
+
+    return returns;
   }
 
   /**

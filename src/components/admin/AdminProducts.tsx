@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Search,
   Plus,
@@ -8,6 +8,7 @@ import {
   X,
   AlertCircle,
   FolderTree,
+  FolderPlus,
   Tag,
   Store,
   Check,
@@ -17,6 +18,7 @@ import {
   Loader2,
   Layers,
   History,
+  ArrowLeft,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ProductService } from '../../services/productService';
@@ -36,8 +38,15 @@ import {
 const PAGE_SIZE = 5;
 
 export const AdminProducts: React.FC = () => {
-  const { currentUser, dbState, addToast, selectedShopId } = useApp();
-  const [activeSubTab, setActiveSubTab] = useState<'products' | 'categories'>('products');
+  const {
+    currentUser,
+    dbState,
+    addToast,
+    selectedShopId,
+    productsSubTab,
+    setProductsSubTab,
+    productsNavTick,
+  } = useApp();
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('ALL');
@@ -51,8 +60,7 @@ export const AdminProducts: React.FC = () => {
   const [visibleCounts, setVisibleCounts] = useState<Record<string, number>>({});
   const [loadingShops, setLoadingShops] = useState<Set<string>>(new Set());
 
-  // Add / Edit Product Modal
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  // Product edit / delete state
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [deletingProduct, setDeletingProduct] = useState<Product | null>(null);
 
@@ -182,7 +190,7 @@ export const AdminProducts: React.FC = () => {
     }));
   };
 
-  const openAddModal = () => {
+  const initAddProductForm = () => {
     setEditingProduct(null);
     const initialShopId =
       selectedShopId && selectedShopId !== 'ALL' && visibleShopIdSet.has(selectedShopId)
@@ -212,10 +220,55 @@ export const AdminProducts: React.FC = () => {
     );
     setSelectedStoreId(shopStores[0]?.id || '');
     setFormError('');
-    setIsModalOpen(true);
   };
 
-  const openEditModal = (p: Product) => {
+  const initAddCategoryForm = (targetShopId?: string) => {
+    setEditingCategory(null);
+    const defaultShop =
+      targetShopId && visibleShopIdSet.has(targetShopId)
+        ? targetShopId
+        : selectedShopId && selectedShopId !== 'ALL' && visibleShopIdSet.has(selectedShopId)
+          ? selectedShopId
+          : shops[0]?.id || '';
+    setCatShopIdInput(defaultShop);
+    setCatNameInput('');
+    setCatColorInput('#3b82f6');
+    setCatModalError('');
+  };
+
+  // Initialize fresh forms when mounting directly into add_product / add_category
+  useEffect(() => {
+    if (productsSubTab === 'add_product' && !editingProduct) {
+      initAddProductForm();
+    } else if (productsSubTab === 'add_category' && !editingCategory) {
+      initAddCategoryForm();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productsSubTab, productsNavTick]);
+
+  // Reset editing state when navigating via sidebar/drawer menu
+  const prevProductsNavTickRef = useRef(productsNavTick);
+  useEffect(() => {
+    if (prevProductsNavTickRef.current !== productsNavTick) {
+      prevProductsNavTickRef.current = productsNavTick;
+      if (productsSubTab === 'add_product') {
+        initAddProductForm();
+      } else if (productsSubTab === 'add_category') {
+        initAddCategoryForm();
+      } else {
+        setEditingProduct(null);
+        setEditingCategory(null);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productsNavTick, productsSubTab]);
+
+  const openAddProductPage = () => {
+    initAddProductForm();
+    setProductsSubTab('add_product');
+  };
+
+  const openEditProductPage = (p: Product) => {
     setEditingProduct(p);
     const pShopId = p.shopId && visibleShopIdSet.has(p.shopId) ? p.shopId : shops[0]?.id || '';
     setProductShopId(pShopId);
@@ -233,7 +286,13 @@ export const AdminProducts: React.FC = () => {
     setDestinationType('SHOP_FLOOR');
     setSelectedStoreId('');
     setFormError('');
-    setIsModalOpen(true);
+    setProductsSubTab('add_product');
+  };
+
+  const handleCancelProductForm = () => {
+    setEditingProduct(null);
+    setFormError('');
+    setProductsSubTab('product_list');
   };
 
   const handleProductShopChange = (newShopId: string) => {
@@ -332,7 +391,8 @@ export const AdminProducts: React.FC = () => {
             ? `'${name}' details updated.`
             : `'${name}' added to inventory catalog.`,
         });
-        setIsModalOpen(false);
+        setEditingProduct(null);
+        setProductsSubTab('product_list');
       } else {
         setFormError(result.error || 'Failed to save product.');
       }
@@ -378,22 +438,18 @@ export const AdminProducts: React.FC = () => {
   };
 
   // Category Actions
-  const openAddCategoryModal = (targetShopId?: string) => {
-    setEditingCategory(null);
-    const defaultShop =
-      targetShopId && visibleShopIdSet.has(targetShopId)
-        ? targetShopId
-        : selectedShopId && selectedShopId !== 'ALL' && visibleShopIdSet.has(selectedShopId)
-          ? selectedShopId
-          : shops[0]?.id || '';
-    setCatShopIdInput(defaultShop);
-    setCatNameInput('');
-    setCatColorInput('#3b82f6');
-    setCatModalError('');
+  const openAddCategoryPage = (targetShopId?: string) => {
+    initAddCategoryForm(targetShopId);
+    setProductsSubTab('add_category');
+  };
+
+  // Inline quick category modal (used from inside Add Product form without losing product inputs)
+  const openQuickCategoryModal = (targetShopId?: string) => {
+    initAddCategoryForm(targetShopId);
     setIsCategoryModalOpen(true);
   };
 
-  const openEditCategoryModal = (cat: Category) => {
+  const openEditCategoryPage = (cat: Category) => {
     setEditingCategory(cat);
     setCatShopIdInput(
       cat.shopId && visibleShopIdSet.has(cat.shopId) ? cat.shopId : shops[0]?.id || ''
@@ -401,7 +457,13 @@ export const AdminProducts: React.FC = () => {
     setCatNameInput(cat.name);
     setCatColorInput(cat.color || '#3b82f6');
     setCatModalError('');
-    setIsCategoryModalOpen(true);
+    setProductsSubTab('add_category');
+  };
+
+  const handleCancelCategoryForm = () => {
+    setEditingCategory(null);
+    setCatModalError('');
+    setProductsSubTab('category_list');
   };
 
   const handleSaveCategory = (e: React.FormEvent) => {
@@ -430,7 +492,9 @@ export const AdminProducts: React.FC = () => {
           title: 'Category Updated',
           description: `Category '${catNameInput}' updated.`,
         });
+        setEditingCategory(null);
         setIsCategoryModalOpen(false);
+        setProductsSubTab('category_list');
       } else {
         setCatModalError(res.error || 'Failed to update category.');
       }
@@ -445,7 +509,15 @@ export const AdminProducts: React.FC = () => {
           title: 'Category Created',
           description: `New category '${catNameInput}' created.`,
         });
-        setIsCategoryModalOpen(false);
+        if (isCategoryModalOpen) {
+          // Inline modal from Add Product form — select newly created category & stay on product form
+          if (res.category?.id && catShopIdInput === productShopId) {
+            setCategoryId(res.category.id);
+          }
+          setIsCategoryModalOpen(false);
+        } else {
+          setProductsSubTab('category_list');
+        }
       } else {
         setCatModalError(res.error || 'Failed to create category.');
       }
@@ -603,7 +675,7 @@ export const AdminProducts: React.FC = () => {
             {canEdit && (
               <>
                 <button
-                  onClick={() => openEditModal(product)}
+                  onClick={() => openEditProductPage(product)}
                   className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 text-xs font-semibold flex items-center gap-1 transition"
                 >
                   <Edit className="w-3.5 h-3.5" />
@@ -637,76 +709,666 @@ export const AdminProducts: React.FC = () => {
     );
   };
 
+  // Inline Quick Category Modal (shared with Add Product page)
+  const quickCategoryModal = isCategoryModalOpen ? (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-4 sm:p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
+          <div className="flex items-center gap-2">
+            <FolderTree className="w-5 h-5 text-emerald-400" />
+            <h3 className="text-base font-bold text-white">Create Category</h3>
+          </div>
+          <button
+            onClick={() => setIsCategoryModalOpen(false)}
+            className="text-slate-400 hover:text-white p-1"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {catModalError && (
+          <div className="mb-4 p-3 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{catModalError}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleSaveCategory} className="space-y-4 text-xs">
+          <div>
+            <label className="block text-slate-300 font-medium mb-1">Shop *</label>
+            <select
+              value={catShopIdInput}
+              onChange={e => setCatShopIdInput(e.target.value)}
+              required
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+            >
+              <option value="" disabled>
+                Select target shop...
+              </option>
+              {shops.map(s => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.code || 'UNIT'})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-slate-300 font-medium mb-1">Category Name *</label>
+            <input
+              type="text"
+              required
+              value={catNameInput}
+              onChange={e => setCatNameInput(e.target.value)}
+              placeholder="e.g. Plumbing, Tools, Paint..."
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-slate-300 font-medium mb-1">Color Theme</label>
+            <div className="flex items-center gap-2 flex-wrap">
+              {[
+                '#3b82f6',
+                '#10b981',
+                '#f59e0b',
+                '#ec4899',
+                '#8b5cf6',
+                '#06b6d4',
+                '#64748b',
+              ].map(color => (
+                <button
+                  key={color}
+                  type="button"
+                  onClick={() => setCatColorInput(color)}
+                  className={`w-8 h-8 rounded-full transition flex items-center justify-center ${
+                    catColorInput === color
+                      ? 'ring-2 ring-white ring-offset-2 ring-offset-slate-900 scale-110'
+                      : 'opacity-70 hover:opacity-100'
+                  }`}
+                  style={{ backgroundColor: color }}
+                >
+                  {catColorInput === color && <Check className="w-3.5 h-3.5 text-white" />}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="pt-3 border-t border-slate-800 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setIsCategoryModalOpen(false)}
+              className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold shadow transition"
+            >
+              Create
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  ) : null;
+
+  // ─────────────────────────────────────────────────────────────
+  // VIEW 1: FULL-PAGE ADD / EDIT PRODUCT
+  // ─────────────────────────────────────────────────────────────
+  if (productsSubTab === 'add_product') {
+    const activeShopStores = (dbState.stores || []).filter(
+      st => st.shopId === productShopId && st.status === 'ACTIVE'
+    );
+
+    return (
+      <div
+        id="admin-products-add-page"
+        className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-8"
+      >
+        <div className="max-w-2xl mx-auto">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={handleCancelProductForm}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+                title="Back to Product List"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <Package className="w-5 h-5 text-violet-400 shrink-0" />
+                  <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                    {editingProduct ? 'Edit Product' : 'Add Product'}
+                  </h2>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {editingProduct
+                    ? 'Update product pricing, stock levels, category, and images'
+                    : 'Create a new product in your shop catalog with pricing and initial stock'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleCancelProductForm}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition shrink-0"
+            >
+              <Package className="w-3.5 h-3.5 text-violet-400" />
+              <span>Product List</span>
+            </button>
+          </div>
+
+          {formError && (
+            <div className="mb-4 p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{formError}</span>
+            </div>
+          )}
+
+          <form
+            onSubmit={handleSaveProduct}
+            className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl space-y-4 text-xs"
+          >
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1.5">
+                Assigned Shop / Unit *
+              </label>
+              <select
+                value={productShopId}
+                onChange={e => handleProductShopChange(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="">Select shop...</option>
+                {shops.map(s => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.code || 'UNIT'})
+                  </option>
+                ))}
+              </select>
+              {shops.length === 0 && (
+                <p className="text-[10px] text-rose-400 mt-1">
+                  No shops available. Create a shop first!
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="sm:col-span-2">
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Product Title *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  placeholder="e.g. Bosch Hammer Drill 650W"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Variation (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={variation}
+                  onChange={e => setVariation(e.target.value)}
+                  placeholder="e.g. 12 Inch, Black"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Purchasing Price
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  inputMode="decimal"
+                  value={purchasePrice}
+                  onChange={e => setPurchasePrice(e.target.value)}
+                  placeholder="0"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Selling Price *
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  inputMode="decimal"
+                  required
+                  value={sellingPrice}
+                  onChange={e => setSellingPrice(e.target.value)}
+                  placeholder="0"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            {!editingProduct && (
+              <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                <label className="block text-slate-300 font-semibold">Stock Destination *</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDestinationType('SHOP_FLOOR')}
+                    className={`px-3 py-2.5 rounded-xl border text-left font-semibold transition ${
+                      destinationType === 'SHOP_FLOOR'
+                        ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Direct to Shop Floor
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDestinationType('STORE');
+                      if (!selectedStoreId && activeShopStores.length > 0) {
+                        setSelectedStoreId(activeShopStores[0].id);
+                      }
+                    }}
+                    className={`px-3 py-2.5 rounded-xl border text-left font-semibold transition ${
+                      destinationType === 'STORE'
+                        ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Send to Store (Warehouse)
+                  </button>
+                </div>
+
+                {destinationType === 'STORE' && (
+                  <div>
+                    <label className="block text-slate-400 text-[11px] mb-1">
+                      Select Store (Warehouse) *
+                    </label>
+                    {activeShopStores.length > 0 ? (
+                      <select
+                        value={selectedStoreId}
+                        onChange={e => setSelectedStoreId(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      >
+                        <option value="">Select destination store...</option>
+                        {activeShopStores.map(st => (
+                          <option key={st.id} value={st.id}>
+                            {st.name}
+                            {st.location ? ` — ${st.location}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <p className="text-[11px] text-amber-400 py-1">
+                        No active stores exist for this shop yet. Create one in Stores &amp;
+                        Transfer or choose Direct to Shop Floor.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  {editingProduct
+                    ? 'Current Floor Stock'
+                    : destinationType === 'STORE'
+                      ? 'Initial Store Stock'
+                      : 'Initial Shop Floor Stock'}
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  inputMode="numeric"
+                  value={currentStock}
+                  onChange={e => setCurrentStock(e.target.value)}
+                  placeholder="0"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">Min Threshold</label>
+                <input
+                  type="number"
+                  min="0"
+                  inputMode="numeric"
+                  value={minStock}
+                  onChange={e => setMinStock(e.target.value)}
+                  placeholder="0"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-slate-300 font-semibold">Category *</label>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() => openQuickCategoryModal(productShopId)}
+                      className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-0.5 font-semibold"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>New</span>
+                    </button>
+                  )}
+                </div>
+                <select
+                  value={categoryId}
+                  onChange={e => setCategoryId(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="">Select category...</option>
+                  {categories
+                    .filter(
+                      c =>
+                        c.shopId === productShopId &&
+                        (c.status !== 'INACTIVE' || c.id === categoryId)
+                    )
+                    .map(c => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} {c.status === 'INACTIVE' ? '(Inactive)' : ''}
+                      </option>
+                    ))}
+                </select>
+                {categories.filter(c => c.shopId === productShopId).length === 0 && (
+                  <p className="text-[10px] text-amber-400 mt-1">
+                    No categories exist for this shop yet. Click &quot;+ New&quot; above.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Unit of Measure *
+                </label>
+                <select
+                  value={unit}
+                  onChange={e => setUnit(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="pcs">Pieces (pcs)</option>
+                  <option value="meter">Meter (m)</option>
+                  <option value="pack">Pack</option>
+                  <option value="box">Box</option>
+                  <option value="kg">Kilogram (kg)</option>
+                  <option value="pair">Pair</option>
+                  <option value="roll">Roll</option>
+                  <option value="liter">Liter</option>
+                  <option value="set">Set</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">SKU / Code</label>
+                <input
+                  type="text"
+                  value={sku}
+                  onChange={e => setSku(e.target.value)}
+                  placeholder="Auto if empty"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">Barcode</label>
+                <input
+                  type="text"
+                  value={barcode}
+                  onChange={e => setBarcode(e.target.value)}
+                  placeholder="Scan or enter"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-slate-800/80">
+              <ProductImageUpload
+                images={productImages}
+                onChange={setProductImages}
+                productId={editingProduct?.id}
+              />
+            </div>
+
+            <div className="pt-4 border-t border-slate-800 flex flex-col sm:flex-row gap-2.5">
+              <button
+                type="button"
+                onClick={handleCancelProductForm}
+                className="sm:w-40 px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSaving || shops.length === 0}
+                className="flex-1 px-4 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-bold shadow-lg transition disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <Check className="w-4 h-4" />
+                <span>
+                  {isSaving
+                    ? 'Saving...'
+                    : editingProduct
+                      ? 'Save Changes'
+                      : 'Create Product'}
+                </span>
+              </button>
+            </div>
+          </form>
+        </div>
+
+        {quickCategoryModal}
+      </div>
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // VIEW 2: FULL-PAGE ADD / EDIT CATEGORY
+  // ─────────────────────────────────────────────────────────────
+  if (productsSubTab === 'add_category') {
+    return (
+      <div
+        id="admin-categories-add-page"
+        className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-8"
+      >
+        <div className="max-w-xl mx-auto">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={handleCancelCategoryForm}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+                title="Back to Category List"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <FolderPlus className="w-5 h-5 text-sky-400 shrink-0" />
+                  <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                    {editingCategory ? 'Edit Category' : 'Add Category'}
+                  </h2>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {editingCategory
+                    ? 'Update category details and color tag'
+                    : 'Create a shop-specific product category to organize inventory'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleCancelCategoryForm}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition shrink-0"
+            >
+              <FolderTree className="w-3.5 h-3.5 text-amber-400" />
+              <span>Category List</span>
+            </button>
+          </div>
+
+          {catModalError && (
+            <div className="mb-4 p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{catModalError}</span>
+            </div>
+          )}
+
+          <form
+            onSubmit={handleSaveCategory}
+            className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl space-y-4 text-xs"
+          >
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1.5">Shop *</label>
+              <select
+                value={catShopIdInput}
+                onChange={e => setCatShopIdInput(e.target.value)}
+                required
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              >
+                <option value="" disabled>
+                  Select target shop...
+                </option>
+                {shops.map(s => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.code || 'UNIT'})
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Categories are strictly assigned to this specific shop.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1.5">Category Name *</label>
+              <input
+                type="text"
+                required
+                value={catNameInput}
+                onChange={e => setCatNameInput(e.target.value)}
+                placeholder="e.g. Plumbing, Tools, Paint..."
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1.5">Color Theme</label>
+              <div className="flex items-center gap-2.5 flex-wrap">
+                {[
+                  '#3b82f6',
+                  '#10b981',
+                  '#f59e0b',
+                  '#ec4899',
+                  '#8b5cf6',
+                  '#06b6d4',
+                  '#64748b',
+                ].map(color => (
+                  <button
+                    key={color}
+                    type="button"
+                    onClick={() => setCatColorInput(color)}
+                    className={`w-9 h-9 rounded-full transition flex items-center justify-center ${
+                      catColorInput === color
+                        ? 'ring-2 ring-white ring-offset-2 ring-offset-slate-900 scale-110'
+                        : 'opacity-70 hover:opacity-100'
+                    }`}
+                    style={{ backgroundColor: color }}
+                  >
+                    {catColorInput === color && <Check className="w-4 h-4 text-white" />}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="pt-4 border-t border-slate-800 flex flex-col sm:flex-row gap-2.5">
+              <button
+                type="button"
+                onClick={handleCancelCategoryForm}
+                className="sm:w-40 px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="flex-1 px-4 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold shadow-lg transition flex items-center justify-center gap-2"
+              >
+                <Check className="w-4 h-4" />
+                <span>{editingCategory ? 'Save Changes' : 'Create Category'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  const isCategoryListView = productsSubTab === 'category_list';
+
   return (
     <div
       id="admin-products-view"
       className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-6"
     >
       {/* Header */}
-      <div className="flex flex-col gap-3 mb-5 pb-4 border-b border-slate-800">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
         <div>
           <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
-            Products & Categories
+            {isCategoryListView ? 'Category List' : 'Product List'}
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Configure catalog pricing, active/deactivated items, and product classification
+            {isCategoryListView
+              ? 'Manage shop-specific product categories and color tags'
+              : 'Configure catalog pricing, active/deactivated items, and product classification'}
           </p>
         </div>
 
-        <div className="flex items-center gap-2 overflow-x-auto">
-          <div className="flex bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs">
+        <div className="flex items-center gap-2">
+          {!isCategoryListView ? (
             <button
-              onClick={() => setActiveSubTab('products')}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
-                activeSubTab === 'products'
-                  ? 'bg-blue-600 text-white shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Package className="w-3.5 h-3.5" />
-              <span>Products</span>
-            </button>
-            <button
-              onClick={() => setActiveSubTab('categories')}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
-                activeSubTab === 'categories'
-                  ? 'bg-blue-600 text-white shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <FolderTree className="w-3.5 h-3.5" />
-              <span>Categories</span>
-              <span className="px-1.5 py-0.2 rounded bg-slate-800 text-[10px] font-mono">
-                {categories.length}
-              </span>
-            </button>
-          </div>
-        </div>
-
-        {activeSubTab === 'products' ? (
-          <button
-            id="admin-add-product-btn"
-            onClick={openAddModal}
-            className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold text-xs shadow-lg transition"
-          >
-            <Plus className="w-4 h-4" />
-            <span>New Product</span>
-          </button>
-        ) : (
-          canEdit && (
-            <button
-              onClick={() => openAddCategoryModal()}
-              className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-semibold text-xs shadow-lg transition"
+              id="admin-add-product-btn"
+              onClick={openAddProductPage}
+              className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold text-xs shadow-lg transition"
             >
               <Plus className="w-4 h-4" />
-              <span>New Category</span>
+              <span>Add Product</span>
             </button>
-          )
-        )}
+          ) : (
+            canEdit && (
+              <button
+                onClick={() => openAddCategoryPage()}
+                className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-semibold text-xs shadow-lg transition"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add Category</span>
+              </button>
+            )
+          )}
+        </div>
       </div>
 
-      {/* PRODUCTS TAB */}
-      {activeSubTab === 'products' && (
+      {/* PRODUCTS LIST VIEW */}
+      {!isCategoryListView && (
         <>
           {/* Filters */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 mb-4 space-y-2.5 text-xs">
@@ -927,8 +1589,8 @@ export const AdminProducts: React.FC = () => {
         </>
       )}
 
-      {/* CATEGORIES TAB */}
-      {activeSubTab === 'categories' && (
+      {/* CATEGORIES LIST VIEW */}
+      {isCategoryListView && (
         <div className="space-y-4">
           {/* Header + Shop filter chips */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-3">
@@ -975,7 +1637,7 @@ export const AdminProducts: React.FC = () => {
             {canEdit && (
               <button
                 onClick={() =>
-                  openAddCategoryModal(
+                  openAddCategoryPage(
                     categoryShopFilter === 'ALL' ? undefined : categoryShopFilter
                   )
                 }
@@ -1045,7 +1707,7 @@ export const AdminProducts: React.FC = () => {
                           </p>
                           {canEdit && (
                             <button
-                              onClick={() => openAddCategoryModal(shop.id)}
+                              onClick={() => openAddCategoryPage(shop.id)}
                               className="mt-3 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white text-xs font-semibold transition"
                             >
                               <Plus className="w-3.5 h-3.5" />
@@ -1103,7 +1765,7 @@ export const AdminProducts: React.FC = () => {
                                 {canEdit && (
                                   <div className="flex items-center gap-1.5 pt-2.5 border-t border-slate-800/80">
                                     <button
-                                      onClick={() => openEditCategoryModal(cat)}
+                                      onClick={() => openEditCategoryPage(cat)}
                                       className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 text-xs font-semibold transition"
                                     >
                                       Edit
@@ -1180,462 +1842,7 @@ export const AdminProducts: React.FC = () => {
         </div>
       )}
 
-      {/* Add / Edit Product Modal */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-lg w-full p-4 sm:p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
-              <div className="flex items-center gap-2">
-                <Package className="w-5 h-5 text-blue-400" />
-                <h3 className="text-base font-bold text-white">
-                  {editingProduct ? 'Edit Product' : 'Create New Product'}
-                </h3>
-              </div>
-              <button
-                onClick={() => setIsModalOpen(false)}
-                className="text-slate-400 hover:text-white p-1"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {formError && (
-              <div className="mb-4 p-3 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{formError}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleSaveProduct} className="space-y-4 text-xs">
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">
-                  Assigned Shop / Unit *
-                </label>
-                <select
-                  value={productShopId}
-                  onChange={e => handleProductShopChange(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                >
-                  <option value="">Select shop...</option>
-                  {shops.map(s => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.code || 'UNIT'})
-                    </option>
-                  ))}
-                </select>
-                {shops.length === 0 && (
-                  <p className="text-[10px] text-rose-400 mt-1">
-                    No shops available. Create a shop first!
-                  </p>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="sm:col-span-2">
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Product Title *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={name}
-                    onChange={e => setName(e.target.value)}
-                    placeholder="e.g. Bosch Hammer Drill 650W"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Variation (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={variation}
-                    onChange={e => setVariation(e.target.value)}
-                    placeholder="e.g. 12 Inch, Black"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Purchasing Price
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    inputMode="decimal"
-                    value={purchasePrice}
-                    onChange={e => setPurchasePrice(e.target.value)}
-                    placeholder="0"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Selling Price *
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    inputMode="decimal"
-                    required
-                    value={sellingPrice}
-                    onChange={e => setSellingPrice(e.target.value)}
-                    placeholder="0"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-
-              {!editingProduct && (() => {
-                const activeShopStores = (dbState.stores || []).filter(
-                  st => st.shopId === productShopId && st.status === 'ACTIVE'
-                );
-                return (
-                  <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
-                    <label className="block text-slate-300 font-medium">
-                      Stock Destination *
-                    </label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setDestinationType('SHOP_FLOOR')}
-                        className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
-                          destinationType === 'SHOP_FLOOR'
-                            ? 'bg-blue-600/20 border-blue-500 text-blue-300'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        Direct to Shop Floor
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDestinationType('STORE');
-                          if (!selectedStoreId && activeShopStores.length > 0) {
-                            setSelectedStoreId(activeShopStores[0].id);
-                          }
-                        }}
-                        className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
-                          destinationType === 'STORE'
-                            ? 'bg-blue-600/20 border-blue-500 text-blue-300'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        Send to Store (Warehouse)
-                      </button>
-                    </div>
-
-                    {destinationType === 'STORE' && (
-                      <div>
-                        <label className="block text-slate-400 text-[11px] mb-1">
-                          Select Store (Warehouse) *
-                        </label>
-                        {activeShopStores.length > 0 ? (
-                          <select
-                            value={selectedStoreId}
-                            onChange={e => setSelectedStoreId(e.target.value)}
-                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                          >
-                            <option value="">Select destination store...</option>
-                            {activeShopStores.map(st => (
-                              <option key={st.id} value={st.id}>
-                                {st.name}
-                                {st.location ? ` — ${st.location}` : ''}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <p className="text-[11px] text-amber-400 py-1">
-                            No active stores exist for this shop yet. Create one in Stores &amp; Transfers or choose Direct to Shop Floor.
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    {editingProduct
-                      ? 'Current Floor Stock'
-                      : destinationType === 'STORE'
-                        ? 'Initial Store Stock'
-                        : 'Initial Shop Floor Stock'}
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    inputMode="numeric"
-                    value={currentStock}
-                    onChange={e => setCurrentStock(e.target.value)}
-                    placeholder="0"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Min Threshold
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    inputMode="numeric"
-                    value={minStock}
-                    onChange={e => setMinStock(e.target.value)}
-                    placeholder="0"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="block text-slate-300 font-medium">
-                      Category *
-                    </label>
-                    {canEdit && (
-                      <button
-                        type="button"
-                        onClick={() => openAddCategoryModal(productShopId)}
-                        className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-0.5"
-                      >
-                        <Plus className="w-3 h-3" />
-                        <span>New</span>
-                      </button>
-                    )}
-                  </div>
-                  <select
-                    value={categoryId}
-                    onChange={e => setCategoryId(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    <option value="">Select category...</option>
-                    {categories
-                      .filter(
-                        c =>
-                          c.shopId === productShopId &&
-                          (c.status !== 'INACTIVE' || c.id === categoryId)
-                      )
-                      .map(c => (
-                        <option key={c.id} value={c.id}>
-                          {c.name} {c.status === 'INACTIVE' ? '(Inactive)' : ''}
-                        </option>
-                      ))}
-                  </select>
-                  {categories.filter(c => c.shopId === productShopId).length === 0 && (
-                    <p className="text-[10px] text-amber-400 mt-1">
-                      No categories exist for this shop yet. Click "+ New" above.
-                    </p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Unit of Measure *
-                  </label>
-                  <select
-                    value={unit}
-                    onChange={e => setUnit(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    <option value="pcs">Pieces (pcs)</option>
-                    <option value="meter">Meter (m)</option>
-                    <option value="pack">Pack</option>
-                    <option value="box">Box</option>
-                    <option value="kg">Kilogram (kg)</option>
-                    <option value="pair">Pair</option>
-                    <option value="roll">Roll</option>
-                    <option value="liter">Liter</option>
-                    <option value="set">Set</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    SKU / Code
-                  </label>
-                  <input
-                    type="text"
-                    value={sku}
-                    onChange={e => setSku(e.target.value)}
-                    placeholder="Auto if empty"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">Barcode</label>
-                  <input
-                    type="text"
-                    value={barcode}
-                    onChange={e => setBarcode(e.target.value)}
-                    placeholder="Scan or enter"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-2 border-t border-slate-800/80">
-                <ProductImageUpload
-                  images={productImages}
-                  onChange={setProductImages}
-                  productId={editingProduct?.id}
-                />
-              </div>
-
-              <div className="pt-3 border-t border-slate-800 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSaving || shops.length === 0}
-                  className="px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow transition disabled:opacity-50"
-                >
-                  {isSaving
-                    ? 'Saving...'
-                    : editingProduct
-                    ? 'Save Changes'
-                    : 'Create Product'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Add / Edit Category Modal */}
-      {isCategoryModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-4 sm:p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
-              <div className="flex items-center gap-2">
-                <FolderTree className="w-5 h-5 text-emerald-400" />
-                <h3 className="text-base font-bold text-white">
-                  {editingCategory ? 'Edit Category' : 'Create Category'}
-                </h3>
-              </div>
-              <button
-                onClick={() => setIsCategoryModalOpen(false)}
-                className="text-slate-400 hover:text-white p-1"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {catModalError && (
-              <div className="mb-4 p-3 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{catModalError}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleSaveCategory} className="space-y-4 text-xs">
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">Shop *</label>
-                <select
-                  value={catShopIdInput}
-                  onChange={e => setCatShopIdInput(e.target.value)}
-                  required
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                >
-                  <option value="" disabled>
-                    Select target shop...
-                  </option>
-                  {shops.map(s => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.code || 'UNIT'})
-                    </option>
-                  ))}
-                </select>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  Categories are strictly assigned to this specific shop.
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">
-                  Category Name *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={catNameInput}
-                  onChange={e => setCatNameInput(e.target.value)}
-                  placeholder="e.g. Plumbing, Tools, Paint..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">
-                  Color Theme
-                </label>
-                <div className="flex items-center gap-2 flex-wrap">
-                  {[
-                    '#3b82f6',
-                    '#10b981',
-                    '#f59e0b',
-                    '#ec4899',
-                    '#8b5cf6',
-                    '#06b6d4',
-                    '#64748b',
-                  ].map(color => (
-                    <button
-                      key={color}
-                      type="button"
-                      onClick={() => setCatColorInput(color)}
-                      className={`w-8 h-8 rounded-full transition flex items-center justify-center ${
-                        catColorInput === color
-                          ? 'ring-2 ring-white ring-offset-2 ring-offset-slate-900 scale-110'
-                          : 'opacity-70 hover:opacity-100'
-                      }`}
-                      style={{ backgroundColor: color }}
-                    >
-                      {catColorInput === color && (
-                        <Check className="w-3.5 h-3.5 text-white" />
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-slate-800 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsCategoryModalOpen(false)}
-                  className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold shadow transition"
-                >
-                  {editingCategory ? 'Save' : 'Create'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {quickCategoryModal}
 
       <ProductImageViewerModal
         product={viewingProduct}

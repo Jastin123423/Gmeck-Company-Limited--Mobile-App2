@@ -22,7 +22,17 @@ import { ProductImageUpload } from '../common/ProductImageUpload';
 const PAGE_SIZE = 10;
 
 export const SellerProducts: React.FC = () => {
-  const { currentUser, dbState, addToast, sellerColor, selectedShopId, currentShop } = useApp();
+  const {
+    currentUser,
+    dbState,
+    addToast,
+    sellerColor,
+    selectedShopId,
+    currentShop,
+    productsSubTab,
+    setProductsSubTab,
+    productsNavTick,
+  } = useApp();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -75,6 +85,22 @@ export const SellerProducts: React.FC = () => {
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
   }, [searchQuery, selectedCategory, targetShopId]);
+
+  // Sync with collapsible Products & Categories menu
+  useEffect(() => {
+    if (productsSubTab === 'add_product') {
+      setCategoryId(prev => prev || shopCategories[0]?.id || '');
+      setDestinationType('SHOP_FLOOR');
+      const shopStores = (dbState.stores || []).filter(
+        st => st.shopId === targetShopId && st.status === 'ACTIVE'
+      );
+      setSelectedStoreId(prev => prev || shopStores[0]?.id || '');
+      setFormError('');
+      setShowAddModal(true);
+    } else {
+      setShowAddModal(false);
+    }
+  }, [productsSubTab, productsNavTick]);
 
   const visibleProducts = products.slice(0, visibleCount);
   const hasMore = products.length > visibleCount;
@@ -157,6 +183,7 @@ export const SellerProducts: React.FC = () => {
           description: `'${name}' has been added to catalog and saved locally.`,
         });
         setShowAddModal(false);
+        setProductsSubTab('product_list');
         setName('');
         setSku('');
         setBarcode('');
@@ -204,6 +231,7 @@ export const SellerProducts: React.FC = () => {
             setSelectedStoreId(shopStores[0]?.id || '');
             setFormError('');
             setShowAddModal(true);
+            setProductsSubTab('add_product');
           }}
           className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-xs text-white shadow-lg transition-all active:scale-95"
           style={{ backgroundColor: sellerColor.primary }}
@@ -467,7 +495,10 @@ export const SellerProducts: React.FC = () => {
                 <h3 className="text-sm sm:text-base font-bold text-white">Add New Product</h3>
               </div>
               <button
-                onClick={() => setShowAddModal(false)}
+                onClick={() => {
+                  setShowAddModal(false);
+                  setProductsSubTab('product_list');
+                }}
                 className="text-slate-400 hover:text-white p-1 rounded-lg"
               >
                 <X className="w-5 h-5" />
@@ -702,7 +733,10 @@ export const SellerProducts: React.FC = () => {
               <div className="pt-3 border-t border-slate-800 flex justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setShowAddModal(false)}
+                  onClick={() => {
+                    setShowAddModal(false);
+                    setProductsSubTab('product_list');
+                  }}
                   className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
                 >
                   Cancel

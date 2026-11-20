@@ -9,6 +9,11 @@ import { generateUUID } from '../utils/crypto';
 import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export type StoresSubTab = 'stores' | 'inventory' | 'transfer' | 'list' | 'transfer_view';
+export type InventoryLocationFilter = 'ALL' | 'SHOP' | 'STORE';
+export type PurchasesSubTab = 'list' | 'add' | 'returns';
+export type ExpensesSubTab = 'list' | 'add';
+export type ProductsSubTab = 'product_list' | 'add_product' | 'category_list' | 'add_category';
+export type ShopsSubTab = 'list' | 'add';
 
 interface AppContextType {
   currentUser: User | null;
@@ -19,6 +24,26 @@ interface AppContextType {
   setStoresSubTab: (tab: StoresSubTab) => void;
   storesNavTick: number;
   openStoresSubTab: (tab: 'stores' | 'inventory' | 'transfer' | 'list') => void;
+  inventoryFilter: InventoryLocationFilter;
+  setInventoryFilter: (filter: InventoryLocationFilter) => void;
+  inventoryNavTick: number;
+  openInventoryFilter: (filter: InventoryLocationFilter) => void;
+  purchasesSubTab: PurchasesSubTab;
+  setPurchasesSubTab: (tab: PurchasesSubTab) => void;
+  purchasesNavTick: number;
+  openPurchasesSubTab: (tab: PurchasesSubTab) => void;
+  expensesSubTab: ExpensesSubTab;
+  setExpensesSubTab: (tab: ExpensesSubTab) => void;
+  expensesNavTick: number;
+  openExpensesSubTab: (tab: ExpensesSubTab) => void;
+  productsSubTab: ProductsSubTab;
+  setProductsSubTab: (tab: ProductsSubTab) => void;
+  productsNavTick: number;
+  openProductsSubTab: (tab: ProductsSubTab) => void;
+  shopsSubTab: ShopsSubTab;
+  setShopsSubTab: (tab: ShopsSubTab) => void;
+  shopsNavTick: number;
+  openShopsSubTab: (tab: ShopsSubTab) => void;
   login: (user: User) => void;
   logout: () => void;
   refreshUser: () => void;
@@ -68,6 +93,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveTab('stores');
     setStoresSubTab(tab);
     setStoresNavTick(t => t + 1);
+  };
+
+  const [inventoryFilter, setInventoryFilter] = useState<InventoryLocationFilter>('ALL');
+  const [inventoryNavTick, setInventoryNavTick] = useState<number>(0);
+
+  const openInventoryFilter = (filter: InventoryLocationFilter) => {
+    setActiveTab('inventory');
+    setInventoryFilter(filter);
+    setInventoryNavTick(t => t + 1);
+  };
+
+  const [purchasesSubTab, setPurchasesSubTab] = useState<PurchasesSubTab>('list');
+  const [purchasesNavTick, setPurchasesNavTick] = useState<number>(0);
+
+  const openPurchasesSubTab = (tab: PurchasesSubTab) => {
+    setActiveTab('purchases');
+    setPurchasesSubTab(tab);
+    setPurchasesNavTick(t => t + 1);
+  };
+
+  const [expensesSubTab, setExpensesSubTab] = useState<ExpensesSubTab>('list');
+  const [expensesNavTick, setExpensesNavTick] = useState<number>(0);
+
+  const openExpensesSubTab = (tab: ExpensesSubTab) => {
+    setActiveTab('expenses');
+    setExpensesSubTab(tab);
+    setExpensesNavTick(t => t + 1);
+  };
+
+  const [productsSubTab, setProductsSubTab] = useState<ProductsSubTab>('product_list');
+  const [productsNavTick, setProductsNavTick] = useState<number>(0);
+
+  const openProductsSubTab = (tab: ProductsSubTab) => {
+    setActiveTab('products');
+    setProductsSubTab(tab);
+    setProductsNavTick(t => t + 1);
+  };
+
+  const [shopsSubTab, setShopsSubTab] = useState<ShopsSubTab>('list');
+  const [shopsNavTick, setShopsNavTick] = useState<number>(0);
+
+  const openShopsSubTab = (tab: ShopsSubTab) => {
+    setActiveTab('shops');
+    setShopsSubTab(tab);
+    setShopsNavTick(t => t + 1);
   };
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [activeReceipt, setActiveReceipt] = useState<Sale | null>(null);
@@ -567,6 +637,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setStoresSubTab,
         storesNavTick,
         openStoresSubTab,
+        inventoryFilter,
+        setInventoryFilter,
+        inventoryNavTick,
+        openInventoryFilter,
+        purchasesSubTab,
+        setPurchasesSubTab,
+        purchasesNavTick,
+        openPurchasesSubTab,
+        expensesSubTab,
+        setExpensesSubTab,
+        expensesNavTick,
+        openExpensesSubTab,
+        productsSubTab,
+        setProductsSubTab,
+        productsNavTick,
+        openProductsSubTab,
+        shopsSubTab,
+        setShopsSubTab,
+        shopsNavTick,
+        openShopsSubTab,
         login,
         logout,
         refreshUser,

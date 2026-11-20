@@ -1,6 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
-  Truck,
   Plus,
   Trash2,
   Search,
@@ -12,8 +11,15 @@ import {
   Loader2,
   Ban,
   RotateCcw,
+  ArrowLeft,
+  ClipboardList,
+  Store,
+  Warehouse,
+  User as UserIcon,
+  Calendar,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { PurchaseIcon } from '../common/PurchaseIcon';
 import { PurchaseService } from '../../services/purchaseService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import type { Purchase } from '../../types';
@@ -264,20 +270,41 @@ const ProductSearchSelect: React.FC<{
 // Main component
 // ─────────────────────────────────────────────────────────────
 export const AdminPurchases: React.FC = () => {
-  const { currentUser, dbState, addToast, selectedShopId, currentShop } = useApp();
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  const {
+    currentUser,
+    dbState,
+    addToast,
+    selectedShopId,
+    currentShop,
+    purchasesSubTab,
+    setPurchasesSubTab,
+    purchasesNavTick,
+  } = useApp();
+
   const [isEditMode, setIsEditMode] = useState(false);
   const [editingPurchase, setEditingPurchase] = useState<Purchase | null>(null);
   const [voidingPurchase, setVoidingPurchase] = useState<Purchase | null>(null);
   const [voidReason, setVoidReason] = useState('');
   const [isVoiding, setIsVoiding] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
 
-  // Pagination
+  // Purchase Return modal state
+  const [returningPurchase, setReturningPurchase] = useState<Purchase | null>(null);
+  const [returnQuantities, setReturnQuantities] = useState<Record<string, string>>({});
+  const [returnReason, setReturnReason] = useState('');
+  const [returnError, setReturnError] = useState('');
+  const [isReturning, setIsReturning] = useState(false);
+
+  // List search & pagination
+  const [searchQuery, setSearchQuery] = useState('');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
 
-  // Form state
+  // Return List search, period filter & pagination
+  const [returnSearchQuery, setReturnSearchQuery] = useState('');
+  const [returnPeriod, setReturnPeriod] = useState<'ALL' | 'TODAY' | 'WEEK' | 'MONTH'>('ALL');
+  const [visibleReturnsCount, setVisibleReturnsCount] = useState(PAGE_SIZE);
+
+  // Form state (full-page Add / Edit Purchase)
   const [purchaseShopId, setPurchaseShopId] = useState('');
   const [destinationType, setDestinationType] = useState<'SHOP_FLOOR' | 'STORE'>('SHOP_FLOOR');
   const [purchaseStoreId, setPurchaseStoreId] = useState('');
@@ -353,15 +380,70 @@ export const AdminPurchases: React.FC = () => {
     });
   }, [dbState.purchases, searchQuery, selectedShopId, currentShop, currentUser, isSeller]);
 
+  // Filter purchase returns (Return List)
+  const purchaseReturns = useMemo(() => {
+    const raw = PurchaseService.getPurchaseReturns(
+      {
+        shopId: isSeller
+          ? currentShop?.id || selectedShopId
+          : selectedShopId === 'ALL'
+          ? undefined
+          : selectedShopId,
+        search: returnSearchQuery,
+      },
+      currentUser
+    );
+
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const weekAgo = startOfToday - 6 * 24 * 60 * 60 * 1000;
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+
+    const periodFiltered = raw.filter(ret => {
+      if (returnPeriod === 'ALL') return true;
+      const t = new Date(ret.createdAt).getTime();
+      if (returnPeriod === 'TODAY') return t >= startOfToday;
+      if (returnPeriod === 'WEEK') return t >= weekAgo;
+      if (returnPeriod === 'MONTH') return t >= startOfMonth;
+      return true;
+    });
+
+    return [...periodFiltered].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }, [
+    dbState.purchaseReturns,
+    returnSearchQuery,
+    returnPeriod,
+    selectedShopId,
+    currentShop,
+    currentUser,
+    isSeller,
+  ]);
+
+  const returnMetrics = useMemo(() => {
+    const totalReturns = purchaseReturns.length;
+    const totalUnits = purchaseReturns.reduce((s, r) => s + (r.totalReturnQty || 0), 0);
+    const totalValue = purchaseReturns.reduce((s, r) => s + (r.totalReturnAmount || 0), 0);
+    return { totalReturns, totalUnits, totalValue };
+  }, [purchaseReturns]);
+
   // Reset pagination on search or shop change
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
   }, [searchQuery, selectedShopId]);
 
+  useEffect(() => {
+    setVisibleReturnsCount(PAGE_SIZE);
+  }, [returnSearchQuery, returnPeriod, selectedShopId]);
+
   // Visible slice
   const visiblePurchases = purchases.slice(0, visibleCount);
   const hasMore = purchases.length > visibleCount;
   const remaining = purchases.length - visibleCount;
+
+  const visibleReturns = purchaseReturns.slice(0, visibleReturnsCount);
+  const hasMoreReturns = purchaseReturns.length > visibleReturnsCount;
 
   const handleSeeMore = () => {
     setIsLoadingMore(true);
@@ -375,7 +457,7 @@ export const AdminPurchases: React.FC = () => {
     setVisibleCount(PAGE_SIZE);
   };
 
-  const openNewPurchaseModal = () => {
+  const initNewPurchaseForm = () => {
     const targetShop =
       (currentShop?.id && visibleShopIdSet.has(currentShop.id) ? currentShop.id : undefined) ||
       (selectedShopId !== 'ALL' && visibleShopIdSet.has(selectedShopId)
@@ -406,7 +488,34 @@ export const AdminPurchases: React.FC = () => {
       },
     ]);
     setFormError('');
-    setIsModalOpen(true);
+  };
+
+  // Initialize fresh Add Purchase form whenever user selects "Add Purchase" from menu
+  useEffect(() => {
+    if (purchasesSubTab === 'add' && !isEditMode) {
+      initNewPurchaseForm();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [purchasesSubTab, purchasesNavTick]);
+
+  // Clicking "Add Purchase" in menu while editing resets to fresh new purchase form
+  const prevNavTickRef = useRef(purchasesNavTick);
+  useEffect(() => {
+    if (prevNavTickRef.current !== purchasesNavTick) {
+      prevNavTickRef.current = purchasesNavTick;
+      if (purchasesSubTab === 'add') {
+        initNewPurchaseForm();
+      } else {
+        setEditingPurchase(null);
+        setIsEditMode(false);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [purchasesNavTick, purchasesSubTab]);
+
+  const openNewPurchasePage = () => {
+    initNewPurchaseForm();
+    setPurchasesSubTab('add');
   };
 
   const openEditPurchase = (purchase: Purchase) => {
@@ -429,7 +538,7 @@ export const AdminPurchases: React.FC = () => {
     );
 
     setFormError('');
-    setIsModalOpen(true);
+    setPurchasesSubTab('add');
   };
 
   const addItemRow = () => {
@@ -528,9 +637,9 @@ export const AdminPurchases: React.FC = () => {
             editingPurchase.purchaseNumber || editingPurchase.id
           } updated. Stock recalculated.`,
         });
-        setIsModalOpen(false);
         setEditingPurchase(null);
         setIsEditMode(false);
+        setPurchasesSubTab('list');
       } else {
         setFormError(res.error || 'Failed to update purchase.');
       }
@@ -562,17 +671,121 @@ export const AdminPurchases: React.FC = () => {
               ? `Order from ${finalSupplierName} recorded and added to Store warehouse stock.`
               : `Order from ${finalSupplierName} recorded. Shop floor inventories were restocked.`,
         });
-        setIsModalOpen(false);
+        setPurchasesSubTab('list');
       } else {
         setFormError(res.error || 'Failed to record purchase.');
       }
     }
   };
 
-  const closeModal = () => {
-    setIsModalOpen(false);
+  const handleCancelForm = () => {
     setEditingPurchase(null);
     setIsEditMode(false);
+    setFormError('');
+    setPurchasesSubTab('list');
+  };
+
+  // Purchase Return handlers
+  const openReturnPurchaseModal = (purchase: Purchase) => {
+    setReturningPurchase(purchase);
+    const initialMap: Record<string, string> = {};
+    (purchase.items || []).forEach(item => {
+      initialMap[item.id] = '';
+    });
+    setReturnQuantities(initialMap);
+    setReturnReason('');
+    setReturnError('');
+  };
+
+  const closeReturnPurchaseModal = () => {
+    setReturningPurchase(null);
+    setReturnQuantities({});
+    setReturnReason('');
+    setReturnError('');
+  };
+
+  const returnPreview = useMemo(() => {
+    if (!returningPurchase) {
+      return { totalReturnUnits: 0, totalReturnAmount: 0, updatedPurchaseTotal: 0 };
+    }
+    let totalReturnUnits = 0;
+    let totalReturnAmount = 0;
+    for (const item of returningPurchase.items || []) {
+      const qty = Math.max(0, parseFloat(returnQuantities[item.id] || '0') || 0);
+      const clamped = Math.min(qty, item.quantity);
+      if (clamped > 0) {
+        totalReturnUnits += clamped;
+        totalReturnAmount += clamped * item.unitCost;
+      }
+    }
+    const updatedPurchaseTotal = Math.max(
+      0,
+      Number((returningPurchase.totalAmount - totalReturnAmount).toFixed(2))
+    );
+    return {
+      totalReturnUnits: Number(totalReturnUnits.toFixed(4)),
+      totalReturnAmount: Number(totalReturnAmount.toFixed(2)),
+      updatedPurchaseTotal,
+    };
+  }, [returningPurchase, returnQuantities]);
+
+  const handleExecuteReturn = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!returningPurchase) return;
+    setReturnError('');
+
+    const selections: { productId: string; itemId: string; returnQty: number }[] = [];
+    for (const item of returningPurchase.items || []) {
+      const raw = returnQuantities[item.id];
+      if (!raw || !raw.trim()) continue;
+      const qty = parseFloat(raw);
+      if (!Number.isFinite(qty) || qty < 0) {
+        setReturnError(`Enter a valid return quantity for ${item.productName}.`);
+        return;
+      }
+      if (qty > item.quantity) {
+        setReturnError(
+          `Return quantity (${qty}) for ${item.productName} exceeds purchased quantity (${item.quantity}).`
+        );
+        return;
+      }
+      if (qty > 0) {
+        selections.push({ productId: item.productId, itemId: item.id, returnQty: qty });
+      }
+    }
+
+    if (selections.length === 0) {
+      setReturnError('Enter a return quantity greater than 0 for at least one product.');
+      return;
+    }
+
+    if (!returnReason.trim()) {
+      setReturnError('Please provide a reason for returning these items.');
+      return;
+    }
+
+    setIsReturning(true);
+    const res = PurchaseService.returnPurchaseItems(
+      returningPurchase.id,
+      selections,
+      returnReason,
+      currentUser
+    );
+    setIsReturning(false);
+
+    if (res.success && res.purchaseReturn) {
+      addToast({
+        type: 'success',
+        title: 'Purchase Return Processed',
+        description: `Returned ${res.purchaseReturn.totalReturnQty} unit(s) (${formatCurrency(
+          res.purchaseReturn.totalReturnAmount,
+          settings.currencySymbol
+        )}). Stock and purchase total reduced.`,
+      });
+      closeReturnPurchaseModal();
+    } else {
+      setReturnError(res.error || 'Could not process purchase return.');
+    }
   };
 
   const openVoidPurchaseModal = (purchase: Purchase) => {
@@ -612,32 +825,738 @@ export const AdminPurchases: React.FC = () => {
     }
   };
 
+  // ─────────────────────────────────────────────────────────────
+  // VIEW 1: FULL-PAGE ADD / EDIT PURCHASE
+  // ─────────────────────────────────────────────────────────────
+  if (purchasesSubTab === 'add' && canRecordPurchase) {
+    const activeShopStores = (dbState.stores || []).filter(
+      st => st.shopId === purchaseShopId && st.status === 'ACTIVE'
+    );
+
+    return (
+      <div
+        id="admin-purchases-add-page"
+        className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-8"
+      >
+        <div className="max-w-3xl mx-auto">
+          {/* Page Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={handleCancelForm}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition shrink-0"
+                title="Back to Purchase List"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  {isEditMode ? (
+                    <Pencil className="w-5 h-5 text-amber-400 shrink-0" />
+                  ) : (
+                    <PurchaseIcon className="w-5 h-5 text-orange-400 shrink-0" />
+                  )}
+                  <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                    {editingPurchase
+                      ? `Edit Purchase ${editingPurchase.purchaseNumber || ''}`
+                      : 'Add Purchase'}
+                  </h2>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {editingPurchase
+                    ? 'Correct purchased quantities or costs and recalculate inventory automatically'
+                    : 'Record incoming supplier stock and add quantities directly to Shop Floor or Store Warehouse'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleCancelForm}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition shrink-0"
+            >
+              <ClipboardList className="w-3.5 h-3.5 text-orange-400" />
+              <span>Purchase List</span>
+            </button>
+          </div>
+
+          {formError && (
+            <div className="mb-4 p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-medium">
+              {formError}
+            </div>
+          )}
+
+          {/* Full-Page Form Card */}
+          <form
+            onSubmit={handleSavePurchase}
+            className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl space-y-5 text-xs"
+          >
+            {!isEditMode && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1.5">
+                    Target Shop / Unit *
+                  </label>
+                  <select
+                    value={purchaseShopId}
+                    onChange={e => {
+                      const nextShopId = e.target.value;
+                      setPurchaseShopId(nextShopId);
+                      const nextStores = (dbState.stores || []).filter(
+                        st => st.shopId === nextShopId && st.status === 'ACTIVE'
+                      );
+                      setPurchaseStoreId(nextStores[0]?.id || '');
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  >
+                    {availableShops.map(s => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.code || 'UNIT'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                  <label className="block text-slate-300 font-semibold">Destination *</label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setDestinationType('SHOP_FLOOR')}
+                      className={`px-3.5 py-2.5 rounded-xl border text-left font-semibold flex items-center gap-2 transition ${
+                        destinationType === 'SHOP_FLOOR'
+                          ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Store className="w-4 h-4 shrink-0" />
+                      <span>Direct to Shop Floor</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDestinationType('STORE');
+                        if (!purchaseStoreId && activeShopStores.length > 0) {
+                          setPurchaseStoreId(activeShopStores[0].id);
+                        }
+                      }}
+                      className={`px-3.5 py-2.5 rounded-xl border text-left font-semibold flex items-center gap-2 transition ${
+                        destinationType === 'STORE'
+                          ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Warehouse className="w-4 h-4 shrink-0" />
+                      <span>Send to Store (Warehouse)</span>
+                    </button>
+                  </div>
+
+                  {destinationType === 'STORE' && (
+                    <div className="pt-1">
+                      <label className="block text-slate-400 text-[11px] mb-1">
+                        Select Store (Warehouse) *
+                      </label>
+                      {activeShopStores.length > 0 ? (
+                        <select
+                          value={purchaseStoreId}
+                          onChange={e => setPurchaseStoreId(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        >
+                          <option value="">Select destination store...</option>
+                          {activeShopStores.map(st => (
+                            <option key={st.id} value={st.id}>
+                              {st.name}
+                              {st.location ? ` — ${st.location}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <p className="text-[11px] text-amber-400 py-1">
+                          No active stores exist for this shop yet. Create one in Stores &amp;
+                          Transfer or choose Direct to Shop Floor.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Supplier / Vendor (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={supplierName}
+                  onChange={e => setSupplierName(e.target.value)}
+                  placeholder="Leave blank for 'Walk-in Supplier'"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">
+                  Vendor Invoice # (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={invoiceNumber}
+                  onChange={e => setInvoiceNumber(e.target.value)}
+                  placeholder="e.g. INV-98442"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            {/* Line Items */}
+            <div>
+              <div className="flex items-center justify-between mb-2.5">
+                <label className="block text-slate-300 font-bold uppercase tracking-wider text-[11px]">
+                  {isEditMode ? 'Correct Items' : 'Received Items'} ({items.length})
+                </label>
+                <button
+                  type="button"
+                  onClick={addItemRow}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600/15 hover:bg-blue-600/25 border border-blue-500/30 text-blue-400 hover:text-blue-300 font-semibold transition"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Item</span>
+                </button>
+              </div>
+
+              {isEditMode && (
+                <div className="mb-3 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[11px]">
+                  Changing quantities recalculates stock automatically. Old quantities will be
+                  reversed and new ones applied.
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {items.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                        Item #{idx + 1}
+                      </span>
+                      {items.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => removeItemRow(idx)}
+                          className="text-slate-500 hover:text-rose-400 inline-flex items-center gap-1 text-[11px] font-medium transition"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Remove</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <ProductSearchSelect
+                      products={shopProducts.length > 0 ? shopProducts : visibleProducts}
+                      value={item.productId}
+                      onChange={productId => updateItemRow(idx, 'productId', productId)}
+                      currencySymbol={settings.currencySymbol}
+                      placeholder="Search name or SKU..."
+                    />
+
+                    <div className="grid grid-cols-3 gap-2.5 items-end">
+                      <div>
+                        <label className="block text-slate-400 text-[10px] mb-1">Quantity</label>
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          min="0"
+                          value={item.quantity}
+                          onChange={e => updateItemRow(idx, 'quantity', e.target.value)}
+                          placeholder="0"
+                          className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs text-center focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-400 text-[10px] mb-1">
+                          Buy Price ({settings.currencySymbol})
+                        </label>
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          step="0.01"
+                          min="0"
+                          value={item.unitCost}
+                          onChange={e => updateItemRow(idx, 'unitCost', e.target.value)}
+                          placeholder="0"
+                          className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+
+                      <div className="text-right pb-1.5">
+                        <label className="block text-slate-500 text-[10px] mb-1">Subtotal</label>
+                        <div className="font-mono font-bold text-emerald-400 text-xs sm:text-sm truncate">
+                          {formatCurrency(
+                            (parseFloat(item.quantity as string) || 0) *
+                              (parseFloat(item.unitCost as string) || 0),
+                            settings.currencySymbol
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">Payment Status</label>
+                <select
+                  value={paymentStatus}
+                  onChange={e => setPaymentStatus(e.target.value as any)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="PAID">Paid in Full</option>
+                  <option value="PARTIAL">Partially Paid</option>
+                  <option value="UNPAID">Pending / On Credit</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1.5">Notes</label>
+                <input
+                  type="text"
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="e.g. Delivered by freight truck"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            {/* Footer Total & Actions */}
+            <div className="pt-4 border-t border-slate-800 space-y-3.5">
+              <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-950 border border-slate-800">
+                <div>
+                  <span className="text-slate-400 font-medium block">Total Purchase Cost</span>
+                  <span className="text-[10px] text-slate-500">
+                    {items.reduce((s, i) => s + (parseFloat(i.quantity as string) || 0), 0)} total
+                    units across {items.length} item(s)
+                  </span>
+                </div>
+                <span className="text-lg sm:text-xl font-bold font-mono text-white">
+                  {formatCurrency(calculatedTotal, settings.currencySymbol)}
+                </span>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2.5">
+                <button
+                  type="button"
+                  onClick={handleCancelForm}
+                  className="sm:w-40 px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 px-4 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-bold shadow-lg transition flex items-center justify-center gap-2"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>{editingPurchase ? 'Update & Recalculate Stock' : 'Record Purchase & Add Stock'}</span>
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // VIEW 2: PURCHASE RETURN LIST
+  // ─────────────────────────────────────────────────────────────
+  if (purchasesSubTab === 'returns') {
+    return (
+      <div
+        id="admin-purchase-returns-view"
+        className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-6"
+      >
+        {/* Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
+          <div>
+            <div className="flex items-center gap-2">
+              <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/25">
+                <RotateCcw className="w-5 h-5 text-amber-400" />
+              </div>
+              <div>
+                <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+                  Purchase Return List
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Complete audit trail of returned supplier items, stock deductions, and value
+                  adjustments
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setPurchasesSubTab('list')}
+            className="inline-flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-semibold text-xs transition"
+          >
+            <ClipboardList className="w-4 h-4 text-orange-400" />
+            <span>Purchase List</span>
+          </button>
+        </div>
+
+        {/* Summary KPI Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
+            <div className="text-[11px] font-medium text-slate-400 flex items-center justify-between">
+              <span>Total Returns</span>
+              <RotateCcw className="w-4 h-4 text-amber-400" />
+            </div>
+            <div className="text-xl font-bold font-mono text-white mt-1">
+              {returnMetrics.totalReturns}
+            </div>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
+            <div className="text-[11px] font-medium text-slate-400 flex items-center justify-between">
+              <span>Units Returned</span>
+              <Package className="w-4 h-4 text-orange-400" />
+            </div>
+            <div className="text-xl font-bold font-mono text-amber-300 mt-1">
+              {returnMetrics.totalUnits}
+            </div>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
+            <div className="text-[11px] font-medium text-slate-400 flex items-center justify-between">
+              <span>Total Deducted Value</span>
+              <PurchaseIcon className="w-4 h-4 text-rose-400" />
+            </div>
+            <div className="text-xl font-bold font-mono text-rose-400 mt-1">
+              {formatCurrency(returnMetrics.totalValue, settings.currencySymbol)}
+            </div>
+          </div>
+        </div>
+
+        {/* Toolbar: Search + Period Filter */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 mb-4 space-y-2.5 text-xs">
+          <div className="flex flex-col sm:flex-row gap-2.5">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                value={returnSearchQuery}
+                onChange={e => setReturnSearchQuery(e.target.value)}
+                placeholder="Search return #, PO #, supplier, product, reason..."
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+              />
+            </div>
+
+            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 shrink-0">
+              {(
+                [
+                  { id: 'ALL', label: 'All' },
+                  { id: 'TODAY', label: 'Today' },
+                  { id: 'WEEK', label: 'Week' },
+                  { id: 'MONTH', label: 'Month' },
+                ] as const
+              ).map(p => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setReturnPeriod(p.id)}
+                  className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition ${
+                    returnPeriod === p.id
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Returns List Container */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+          {purchaseReturns.length === 0 ? (
+            <div className="py-14 text-center text-slate-500 px-4">
+              <RotateCcw className="w-9 h-9 mx-auto mb-2.5 opacity-35 text-amber-400" />
+              <p className="text-sm font-semibold text-slate-300">No purchase returns recorded</p>
+              <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                Use the Return button on any purchase in Purchase List to return items to a
+                supplier and automatically adjust stock and purchase totals.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Mobile Cards (< md) */}
+              <div className="md:hidden divide-y divide-slate-800/80">
+                {visibleReturns.map(ret => (
+                  <div key={ret.id} className="p-3.5 space-y-2.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-mono text-[11px] font-bold text-amber-300 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded">
+                            {ret.returnNumber}
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-400">
+                            PO: {ret.purchaseNumber}
+                          </span>
+                        </div>
+                        <h4 className="font-bold text-xs text-white truncate mt-1">
+                          {ret.supplierName}
+                        </h4>
+                        <div className="flex items-center gap-2 text-[10px] text-slate-400 mt-0.5">
+                          <span className="inline-flex items-center gap-1 font-mono">
+                            <Calendar className="w-3 h-3" />
+                            {formatDateTime(ret.createdAt)}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="font-mono font-bold text-rose-400 text-sm">
+                          -{formatCurrency(ret.totalReturnAmount, settings.currencySymbol)}
+                        </div>
+                        <span className="text-[10px] font-bold text-amber-300">
+                          -{ret.totalReturnQty} unit{ret.totalReturnQty === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Returned items breakdown */}
+                    <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-2.5 space-y-1.5">
+                      <div className="flex items-center justify-between text-[10px] text-slate-400">
+                        <span className="font-semibold uppercase tracking-wider">
+                          Returned Items
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-semibold ${
+                            ret.storeId
+                              ? 'bg-indigo-500/15 text-indigo-300'
+                              : 'bg-emerald-500/15 text-emerald-300'
+                          }`}
+                        >
+                          {ret.storeId ? `Store: ${ret.storeName || 'Warehouse'}` : 'Shop Floor'}
+                        </span>
+                      </div>
+                      {(ret.items || []).map(item => (
+                        <div
+                          key={item.id}
+                          className="flex items-center justify-between gap-2 text-[11px] pt-1 border-t border-slate-800/60"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-slate-200 font-medium truncate">
+                              {item.productName}
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              Purchased {item.originalQty} → Returned{' '}
+                              <span className="text-amber-300 font-bold">{item.returnQty}</span> ·{' '}
+                              <span className="text-emerald-400">{item.remainingQty} left</span>
+                            </div>
+                          </div>
+                          <div className="font-mono font-bold text-rose-300 shrink-0">
+                            -{formatCurrency(item.returnTotal, settings.currencySymbol)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Reason & Staff */}
+                    <div className="flex items-start justify-between gap-2 text-[11px] bg-amber-500/5 border border-amber-500/20 rounded-lg px-2.5 py-2">
+                      <div className="text-slate-300">
+                        <span className="text-amber-400 font-semibold">Reason: </span>
+                        {ret.reason}
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 pt-0.5">
+                      <span className="inline-flex items-center gap-1">
+                        <UserIcon className="w-3 h-3 text-slate-500" />
+                        Processed by <strong className="text-slate-300">{ret.returnedByName}</strong>
+                      </span>
+                      {ret.shopName && <span>{ret.shopName}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop Table (md+) */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400">
+                      <th className="py-3 px-4 font-semibold">Return # &amp; Date</th>
+                      <th className="py-3 px-4 font-semibold">Supplier &amp; PO #</th>
+                      <th className="py-3 px-4 font-semibold">Returned Products</th>
+                      <th className="py-3 px-4 font-semibold">Reason</th>
+                      <th className="py-3 px-4 font-semibold">Processed By</th>
+                      <th className="py-3 px-4 text-right font-semibold">Deducted Value</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {visibleReturns.map(ret => (
+                      <tr key={ret.id} className="hover:bg-slate-800/30 transition align-top">
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <span className="font-mono text-[11px] font-bold text-amber-300 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded inline-block">
+                            {ret.returnNumber}
+                          </span>
+                          <div className="text-[10px] font-mono text-slate-400 mt-1">
+                            {formatDateTime(ret.createdAt)}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="font-bold text-white">{ret.supplierName}</div>
+                          <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+                            PO: {ret.purchaseNumber}
+                          </div>
+                          <span
+                            className={`inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                              ret.storeId
+                                ? 'bg-indigo-500/15 text-indigo-300'
+                                : 'bg-emerald-500/15 text-emerald-300'
+                            }`}
+                          >
+                            {ret.storeId ? `Store: ${ret.storeName || 'Warehouse'}` : 'Shop Floor'}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="space-y-1.5 max-w-sm">
+                            {(ret.items || []).map(item => (
+                              <div
+                                key={item.id}
+                                className="flex items-center justify-between gap-3 bg-slate-950/70 border border-slate-800/80 rounded-lg px-2.5 py-1.5"
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-slate-200 font-semibold truncate">
+                                    {item.productName}
+                                  </div>
+                                  <div className="text-[10px] font-mono text-slate-400">
+                                    Qty: {item.originalQty} →{' '}
+                                    <span className="text-amber-300 font-bold">
+                                      -{item.returnQty} returned
+                                    </span>{' '}
+                                    ({item.remainingQty} left) @{' '}
+                                    {formatCurrency(item.unitCost, settings.currencySymbol)}
+                                  </div>
+                                </div>
+                                <div className="font-mono text-[11px] font-bold text-rose-300 shrink-0">
+                                  -{formatCurrency(item.returnTotal, settings.currencySymbol)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4 max-w-xs">
+                          <p className="text-slate-300 text-xs leading-relaxed">{ret.reason}</p>
+                        </td>
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <div className="text-slate-200 font-medium">{ret.returnedByName}</div>
+                          {ret.shopName && (
+                            <div className="text-[10px] text-slate-500 mt-0.5">{ret.shopName}</div>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                          <div className="font-mono font-bold text-rose-400 text-sm">
+                            -{formatCurrency(ret.totalReturnAmount, settings.currencySymbol)}
+                          </div>
+                          <div className="text-[10px] font-semibold text-amber-300 mt-0.5">
+                            -{ret.totalReturnQty} unit{ret.totalReturnQty === 1 ? '' : 's'}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {purchaseReturns.length > PAGE_SIZE && (
+                <div className="p-3 bg-slate-950/40 border-t border-slate-800/80 flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-slate-400">
+                    Showing {Math.min(visibleReturnsCount, purchaseReturns.length)} of{' '}
+                    {purchaseReturns.length} returns
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {visibleReturnsCount > PAGE_SIZE && (
+                      <button
+                        type="button"
+                        onClick={() => setVisibleReturnsCount(PAGE_SIZE)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold"
+                      >
+                        Show Less
+                      </button>
+                    )}
+                    {hasMoreReturns && (
+                      <button
+                        type="button"
+                        onClick={() => setVisibleReturnsCount(prev => prev + PAGE_SIZE)}
+                        className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-semibold"
+                      >
+                        See More
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // VIEW 3: PURCHASE LIST (Default)
+  // ─────────────────────────────────────────────────────────────
   return (
     <div
       id="admin-purchases-view"
       className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-6"
     >
       {/* Header */}
-      <div className="flex flex-col gap-3 mb-5 pb-4 border-b border-slate-800">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-800">
         <div>
           <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
-            Supplier Purchases
+            Purchase List
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Log procurement orders, record cost of goods, and automatically increase inventory
+            View procurement orders, edit entries, return purchased stock, or void orders
           </p>
         </div>
 
-        {canRecordPurchase && (
+        <div className="flex items-center gap-2">
           <button
-            id="new-purchase-btn"
-            onClick={openNewPurchaseModal}
-            className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold text-xs shadow-lg transition"
+            type="button"
+            onClick={() => setPurchasesSubTab('returns')}
+            className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-amber-300 font-semibold text-xs transition"
           >
-            <Plus className="w-4 h-4" />
-            <span>Record Purchase</span>
+            <RotateCcw className="w-4 h-4" />
+            <span>Return List</span>
+            {purchaseReturns.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-bold">
+                {purchaseReturns.length}
+              </span>
+            )}
           </button>
-        )}
+
+          {canRecordPurchase && (
+            <button
+              id="new-purchase-btn"
+              onClick={openNewPurchasePage}
+              className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold text-xs shadow-lg transition"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Purchase</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Toolbar */}
@@ -662,7 +1581,7 @@ export const AdminPurchases: React.FC = () => {
       <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
         {purchases.length === 0 ? (
           <div className="py-12 text-center text-slate-500">
-            <Truck className="w-8 h-8 mx-auto mb-2 opacity-40" />
+            <PurchaseIcon className="w-8 h-8 mx-auto mb-2 opacity-40" />
             <p className="text-xs">No supplier purchases recorded yet.</p>
           </div>
         ) : (
@@ -729,7 +1648,15 @@ export const AdminPurchases: React.FC = () => {
                         className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-800 hover:bg-blue-600 active:bg-blue-700 text-slate-300 hover:text-white transition text-[11px] font-semibold"
                       >
                         <Pencil className="w-3.5 h-3.5" />
-                        Edit / Correct
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => openReturnPurchaseModal(purchase)}
+                        disabled={(purchase.items || []).length === 0}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-amber-500/10 hover:bg-amber-600 active:bg-amber-700 text-amber-400 hover:text-white border border-amber-500/25 transition text-[11px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Return
                       </button>
                       <button
                         onClick={() => openVoidPurchaseModal(purchase)}
@@ -815,6 +1742,14 @@ export const AdminPurchases: React.FC = () => {
                               Edit
                             </button>
                             <button
+                              onClick={() => openReturnPurchaseModal(purchase)}
+                              disabled={(purchase.items || []).length === 0}
+                              className="px-2.5 py-1.5 rounded bg-amber-500/10 hover:bg-amber-600 text-amber-400 hover:text-white border border-amber-500/25 text-[11px] font-medium transition inline-flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              Return
+                            </button>
+                            <button
                               onClick={() => openVoidPurchaseModal(purchase)}
                               className="px-2.5 py-1.5 rounded bg-rose-500/10 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/20 text-[11px] font-medium transition inline-flex items-center gap-1"
                             >
@@ -877,300 +1812,223 @@ export const AdminPurchases: React.FC = () => {
         )}
       </div>
 
-      {/* Modal: New / Edit Purchase */}
-      {isModalOpen && canRecordPurchase && (
+      {/* Purchase Return Modal */}
+      {returningPurchase && canRecordPurchase && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4 overflow-y-auto">
-          <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-2xl w-full p-4 sm:p-6 shadow-2xl max-h-[95vh] overflow-y-auto my-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-xl w-full p-4 sm:p-6 shadow-2xl max-h-[92vh] overflow-y-auto my-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
-              <div className="flex items-center gap-2 min-w-0">
-                {isEditMode ? (
-                  <Pencil className="w-5 h-5 text-amber-400 shrink-0" />
-                ) : (
-                  <Truck className="w-5 h-5 text-blue-400 shrink-0" />
-                )}
+              <div className="flex items-center gap-2 text-amber-400 min-w-0">
+                <RotateCcw className="w-5 h-5 shrink-0" />
                 <h3 className="text-sm sm:text-base font-bold text-white truncate">
-                  {editingPurchase ? 'Edit Purchase' : 'Record Stock In'}
+                  Purchase Return — {returningPurchase.purchaseNumber || returningPurchase.supplierName}
                 </h3>
               </div>
               <button
-                onClick={closeModal}
+                type="button"
+                onClick={closeReturnPurchaseModal}
                 className="text-slate-400 hover:text-white p-1 shrink-0"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {formError && (
-              <div className="mb-4 p-3 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs">
-                {formError}
+            {/* Purchase Info Summary */}
+            <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl text-xs mb-4 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-bold text-white truncate">
+                  {returningPurchase.supplierName}
+                </div>
+                <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                  {formatDateTime(returningPurchase.createdAt)} ·{' '}
+                  <span className="text-blue-400">
+                    {returningPurchase.storeId
+                      ? `Store: ${
+                          returningPurchase.storeName ||
+                          (dbState.stores || []).find(s => s.id === returningPurchase.storeId)
+                            ?.name ||
+                          'Warehouse'
+                        }`
+                      : 'Shop Floor'}
+                  </span>
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="text-[10px] text-slate-400">Current Total</div>
+                <div className="font-mono font-bold text-white text-sm">
+                  {formatCurrency(returningPurchase.totalAmount, settings.currencySymbol)}
+                </div>
+              </div>
+            </div>
+
+            {returnError && (
+              <div className="mb-3 p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-medium">
+                {returnError}
               </div>
             )}
 
-            <form onSubmit={handleSavePurchase} className="space-y-4 text-xs">
-              {!isEditMode && (() => {
-                const activeShopStores = (dbState.stores || []).filter(
-                  st => st.shopId === purchaseShopId && st.status === 'ACTIVE'
-                );
-                return (
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block text-slate-300 font-medium mb-1">
-                        Target Shop / Unit *
-                      </label>
-                      <select
-                        value={purchaseShopId}
-                        onChange={e => {
-                          const nextShopId = e.target.value;
-                          setPurchaseShopId(nextShopId);
-                          const nextStores = (dbState.stores || []).filter(
-                            st => st.shopId === nextShopId && st.status === 'ACTIVE'
-                          );
-                          setPurchaseStoreId(nextStores[0]?.id || '');
-                        }}
-                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                      >
-                        {availableShops.map(s => (
-                          <option key={s.id} value={s.id}>
-                            {s.name} ({s.code || 'UNIT'})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
-                      <label className="block text-slate-300 font-medium">
-                        Destination *
-                      </label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setDestinationType('SHOP_FLOOR')}
-                          className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
-                            destinationType === 'SHOP_FLOOR'
-                              ? 'bg-blue-600/20 border-blue-500 text-blue-300'
-                              : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          Direct to Shop Floor
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setDestinationType('STORE');
-                            if (!purchaseStoreId && activeShopStores.length > 0) {
-                              setPurchaseStoreId(activeShopStores[0].id);
-                            }
-                          }}
-                          className={`px-3 py-2 rounded-lg border text-left font-semibold transition ${
-                            destinationType === 'STORE'
-                              ? 'bg-blue-600/20 border-blue-500 text-blue-300'
-                              : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          Send to Store (Warehouse)
-                        </button>
-                      </div>
-
-                      {destinationType === 'STORE' && (
-                        <div>
-                          <label className="block text-slate-400 text-[11px] mb-1">
-                            Select Store (Warehouse) *
-                          </label>
-                          {activeShopStores.length > 0 ? (
-                            <select
-                              value={purchaseStoreId}
-                              onChange={e => setPurchaseStoreId(e.target.value)}
-                              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                            >
-                              <option value="">Select destination store...</option>
-                              {activeShopStores.map(st => (
-                                <option key={st.id} value={st.id}>
-                                  {st.name}
-                                  {st.location ? ` — ${st.location}` : ''}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            <p className="text-[11px] text-amber-400 py-1">
-                              No active stores exist for this shop yet. Create one in Stores &amp; Transfers or choose Direct to Shop Floor.
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
-
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Supplier / Vendor (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={supplierName}
-                    onChange={e => setSupplierName(e.target.value)}
-                    placeholder="Leave blank for 'Walk-in Supplier'"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">
-                    Vendor Invoice # (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={invoiceNumber}
-                    onChange={e => setInvoiceNumber(e.target.value)}
-                    placeholder="e.g. INV-98442"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-
+            <form onSubmit={handleExecuteReturn} className="space-y-4 text-xs">
+              {/* Items to Return */}
               <div>
-                <div className="flex items-center justify-between mb-2">
-                  <label className="block text-slate-300 font-semibold uppercase tracking-wider text-[11px]">
-                    {isEditMode ? 'Correct Items' : 'Received Items'}
-                  </label>
-                  <button
-                    type="button"
-                    onClick={addItemRow}
-                    className="flex items-center gap-1 text-blue-400 hover:text-blue-300 font-semibold"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add Item</span>
-                  </button>
-                </div>
+                <label className="block text-slate-300 font-semibold uppercase tracking-wider text-[11px] mb-2">
+                  Enter Quantity to Return
+                </label>
 
-                {isEditMode && (
-                  <div className="mb-2 p-2 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[10px]">
-                    ⚠️ Changing quantities recalculates stock. Old quantities will be reversed and
-                    new ones applied.
-                  </div>
-                )}
+                <div className="space-y-2.5 max-h-60 overflow-y-auto pr-1">
+                  {(returningPurchase.items || []).map(item => {
+                    const rawVal = returnQuantities[item.id] ?? '';
+                    const parsedQty = Math.max(0, parseFloat(rawVal) || 0);
+                    const isOver = parsedQty > item.quantity;
+                    const clampedQty = Math.min(parsedQty, item.quantity);
+                    const remainingQty = Number((item.quantity - clampedQty).toFixed(4));
+                    const lineDeduction = clampedQty * item.unitCost;
 
-                <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
-                  {items.map((item, idx) => (
-                    <div
-                      key={idx}
-                      className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 space-y-2"
-                    >
-                      <ProductSearchSelect
-                        products={shopProducts.length > 0 ? shopProducts : visibleProducts}
-                        value={item.productId}
-                        onChange={productId => updateItemRow(idx, 'productId', productId)}
-                        currencySymbol={settings.currencySymbol}
-                        placeholder="Search name or SKU..."
-                      />
+                    return (
+                      <div
+                        key={item.id}
+                        className={`p-3 rounded-xl bg-slate-950 border transition space-y-2 ${
+                          isOver
+                            ? 'border-rose-500/60'
+                            : clampedQty > 0
+                            ? 'border-amber-500/50 bg-amber-500/5'
+                            : 'border-slate-800'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="font-semibold text-white text-xs truncate">
+                              {item.productName}
+                            </div>
+                            <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                              Purchased: <strong className="text-slate-200">{item.quantity}</strong>{' '}
+                              × {formatCurrency(item.unitCost, settings.currencySymbol)} ={' '}
+                              {formatCurrency(item.total, settings.currencySymbol)}
+                            </div>
+                          </div>
 
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1">
-                          <label className="block text-slate-500 text-[10px] mb-0.5">Qty</label>
-                          <input
-                            type="number"
-                            inputMode="decimal"
-                            min="0"
-                            value={item.quantity}
-                            onChange={e => updateItemRow(idx, 'quantity', e.target.value)}
-                            placeholder="0"
-                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-white font-mono text-xs text-center"
-                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setReturnQuantities(prev => ({
+                                ...prev,
+                                [item.id]: item.quantity.toString(),
+                              }))
+                            }
+                            className="px-2 py-1 rounded bg-slate-800 hover:bg-amber-600/30 text-amber-300 text-[10px] font-semibold shrink-0 transition"
+                          >
+                            Max ({item.quantity})
+                          </button>
                         </div>
 
-                        <div className="flex-1">
-                          <label className="block text-slate-500 text-[10px] mb-0.5">
-                            Unit Cost ({settings.currencySymbol})
-                          </label>
-                          <input
-                            type="number"
-                            inputMode="decimal"
-                            step="0.01"
-                            min="0"
-                            value={item.unitCost}
-                            onChange={e => updateItemRow(idx, 'unitCost', e.target.value)}
-                            placeholder="0"
-                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-white font-mono text-xs"
-                          />
-                        </div>
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-28 shrink-0">
+                            <label className="block text-[10px] text-slate-500 mb-0.5">
+                              Return Qty
+                            </label>
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              min="0"
+                              max={item.quantity}
+                              step="any"
+                              value={rawVal}
+                              onChange={e =>
+                                setReturnQuantities(prev => ({
+                                  ...prev,
+                                  [item.id]: e.target.value,
+                                }))
+                              }
+                              placeholder="0"
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-white font-mono text-xs text-center focus:outline-none focus:ring-1 focus:ring-amber-500"
+                            />
+                          </div>
 
-                        <div className="flex flex-col items-end justify-end pb-1 min-w-[70px]">
-                          <label className="text-slate-500 text-[10px] mb-0.5">Subtotal</label>
-                          <div className="font-mono font-bold text-white text-xs truncate">
-                            {formatCurrency(
-                              (parseFloat(item.quantity as string) || 0) *
-                                (parseFloat(item.unitCost as string) || 0),
-                              settings.currencySymbol
+                          <div className="flex-1 flex items-center justify-between bg-slate-900/70 border border-slate-800 rounded-lg px-2.5 py-2 mt-3.5">
+                            <span className="text-[11px] font-mono text-slate-300">
+                              {item.quantity} →{' '}
+                              <strong
+                                className={
+                                  clampedQty > 0 ? 'text-emerald-400' : 'text-slate-400'
+                                }
+                              >
+                                {remainingQty} left
+                              </strong>
+                            </span>
+                            {clampedQty > 0 && (
+                              <span className="text-[11px] font-mono font-bold text-rose-400">
+                                -{formatCurrency(lineDeduction, settings.currencySymbol)}
+                              </span>
                             )}
                           </div>
                         </div>
 
-                        {items.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => removeItemRow(idx)}
-                            className="mt-3 text-slate-500 hover:text-rose-400 p-1.5"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                        {isOver && (
+                          <p className="text-[10px] text-rose-400">
+                            Cannot return more than purchased quantity ({item.quantity}).
+                          </p>
                         )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 
-              <div className="space-y-3 pt-2">
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">Payment Status</label>
-                  <select
-                    value={paymentStatus}
-                    onChange={e => setPaymentStatus(e.target.value as any)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    <option value="PAID">Paid in Full</option>
-                    <option value="PARTIAL">Partially Paid</option>
-                    <option value="UNPAID">Pending / On Credit</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-medium mb-1">Notes</label>
-                  <input
-                    type="text"
-                    value={notes}
-                    onChange={e => setNotes(e.target.value)}
-                    placeholder="e.g. Delivered by freight truck"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400">Total Cost:</span>
-                  <span className="text-base font-bold font-mono text-white">
-                    {formatCurrency(calculatedTotal, settings.currencySymbol)}
+              {/* Live Deduction Summary */}
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-amber-200/90">Units to Return:</span>
+                  <span className="font-mono font-bold text-amber-300">
+                    -{returnPreview.totalReturnUnits}
                   </span>
                 </div>
-
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={closeModal}
-                    className="flex-1 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow transition"
-                  >
-                    {editingPurchase ? 'Update & Recalculate' : 'Record & Ingest'}
-                  </button>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-amber-200/90">Purchase Price Reduction:</span>
+                  <span className="font-mono font-bold text-rose-300">
+                    -{formatCurrency(returnPreview.totalReturnAmount, settings.currencySymbol)}
+                  </span>
                 </div>
+                <div className="flex items-center justify-between text-xs pt-1.5 border-t border-amber-500/20">
+                  <span className="text-slate-200 font-semibold">Updated Purchase Total:</span>
+                  <span className="font-mono font-bold text-white">
+                    {formatCurrency(returningPurchase.totalAmount, settings.currencySymbol)} →{' '}
+                    <span className="text-emerald-400">
+                      {formatCurrency(
+                        returnPreview.updatedPurchaseTotal,
+                        settings.currencySymbol
+                      )}
+                    </span>
+                  </span>
+                </div>
+              </div>
+
+              {/* Reason */}
+              <div className="space-y-1.5">
+                <label className="block text-slate-300 font-semibold">Return Reason *</label>
+                <textarea
+                  required
+                  rows={3}
+                  value={returnReason}
+                  onChange={e => setReturnReason(e.target.value)}
+                  placeholder="e.g. Damaged items on arrival, wrong item delivered, excess quantity..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={closeReturnPurchaseModal}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isReturning || returnPreview.totalReturnUnits <= 0}
+                  className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white text-xs font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition inline-flex items-center gap-1.5"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>{isReturning ? 'Processing...' : 'Return Now'}</span>
+                </button>
               </div>
             </form>
           </div>

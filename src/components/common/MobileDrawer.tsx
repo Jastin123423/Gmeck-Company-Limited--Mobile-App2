@@ -7,7 +7,6 @@ import {
   History,
   Users,
   TrendingDown,
-  Truck,
   BarChart3,
   Database,
   Settings,
@@ -26,8 +25,13 @@ import {
   Warehouse,
   ArrowRightLeft,
   ClipboardList,
+  Plus,
+  RotateCcw,
+  FolderPlus,
+  FolderTree,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { PurchaseIcon } from './PurchaseIcon';
 import { NotificationService } from '../../services/notificationService';
 import { DebtService } from '../../services/debtService';
 import {
@@ -44,7 +48,7 @@ interface MobileDrawerProps {
 }
 
 interface NavChildItem {
-  id: 'stores' | 'inventory' | 'transfer' | 'list';
+  id: string;
   label: string;
   icon: React.ElementType;
   iconColor: string;
@@ -73,6 +77,16 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
     setActiveTab,
     storesSubTab,
     openStoresSubTab,
+    inventoryFilter,
+    openInventoryFilter,
+    purchasesSubTab,
+    openPurchasesSubTab,
+    expensesSubTab,
+    openExpensesSubTab,
+    productsSubTab,
+    openProductsSubTab,
+    shopsSubTab,
+    openShopsSubTab,
     sellerColor,
     dbState,
     logout,
@@ -84,11 +98,28 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
     currentShop,
   } = useApp();
 
-  const [isStoresExpanded, setIsStoresExpanded] = useState<boolean>(activeTab === 'stores');
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
+    shops: activeTab === 'shops',
+    sell: activeTab === 'new_sale' || activeTab === 'sales' || activeTab === 'my_sales',
+    stores: activeTab === 'stores',
+    inventory: activeTab === 'inventory',
+    purchases: activeTab === 'purchases',
+    expenses: activeTab === 'expenses',
+    products: activeTab === 'products',
+  });
 
   useEffect(() => {
-    if (activeTab === 'stores') {
-      setIsStoresExpanded(true);
+    if (activeTab === 'new_sale' || activeTab === 'sales' || activeTab === 'my_sales') {
+      setExpandedGroups(prev => ({ ...prev, sell: true }));
+    } else if (
+      activeTab === 'shops' ||
+      activeTab === 'stores' ||
+      activeTab === 'inventory' ||
+      activeTab === 'purchases' ||
+      activeTab === 'expenses' ||
+      activeTab === 'products'
+    ) {
+      setExpandedGroups(prev => ({ ...prev, [activeTab]: true }));
     }
   }, [activeTab]);
 
@@ -129,6 +160,9 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
   const accessibleTransfersCount = (dbState.stockTransfers || []).filter(
     t => isPlatformAdm || managedShopIds.includes(t.shopId)
   ).length;
+  const accessibleReturnsCount = (dbState.purchaseReturns || []).filter(
+    r => !scopedShopIds || scopedShopIds.length === 0 || scopedShopIds.includes(r.shopId)
+  ).length;
 
   const sellerPermissions = getEffectiveSellerPermissions(currentUser);
 
@@ -154,37 +188,122 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       category: 'core',
     },
     {
-      id: 'new_sale',
-      label: 'Sales (POS)',
-      icon: ShoppingCart,
-      iconColor: 'text-emerald-400',
-      iconBg: 'bg-emerald-500/15',
+      id: 'shops',
+      label: 'Shops & Business Unit',
+      icon: Store,
+      iconColor: 'text-amber-400',
+      iconBg: 'bg-amber-500/15',
+      badge: (dbState.shops || []).length,
       category: 'core',
+      requiresPermission: 'canManageShops',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Shop',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'All Shops (List)',
+          icon: ClipboardList,
+          iconColor: 'text-amber-400',
+        },
+      ],
     },
     {
       id: 'products',
-      label: 'Products and Categories',
+      label: 'Products & Categories',
       icon: Package,
       iconColor: 'text-violet-400',
       iconBg: 'bg-violet-500/15',
       badge: lowStockCount > 0 ? lowStockCount : undefined,
       category: 'operations',
+      children: [
+        {
+          id: 'add_product',
+          label: 'Add Products',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        ...(hasAnyPermission(['canEditProducts', 'canDeleteProducts'])
+          ? [
+              {
+                id: 'add_category',
+                label: 'Add Category',
+                icon: FolderPlus,
+                iconColor: 'text-sky-400',
+              },
+            ]
+          : []),
+        {
+          id: 'product_list',
+          label: 'Product List',
+          icon: Package,
+          iconColor: 'text-violet-400',
+        },
+        ...(hasAnyPermission(['canEditProducts', 'canDeleteProducts'])
+          ? [
+              {
+                id: 'category_list',
+                label: 'Category List',
+                icon: FolderTree,
+                iconColor: 'text-amber-400',
+              },
+            ]
+          : []),
+      ],
+    },
+    {
+      id: 'sell',
+      label: 'Sell',
+      icon: ShoppingCart,
+      iconColor: 'text-emerald-400',
+      iconBg: 'bg-emerald-500/15',
+      category: 'core',
+      children: [
+        {
+          id: 'new_sale',
+          label: 'Add Sale (POS)',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: hasAnyPermission(['canEditSales', 'canDeleteSales']) ? 'sales' : 'my_sales',
+          label: 'All Sales Reports',
+          icon: History,
+          iconColor: 'text-indigo-400',
+        },
+      ],
     },
     {
       id: 'purchases',
       label: 'Purchases',
-      icon: Truck,
+      icon: PurchaseIcon,
       iconColor: 'text-orange-400',
       iconBg: 'bg-orange-500/15',
       category: 'operations',
-    },
-    {
-      id: 'my_sales',
-      label: 'My Sales History',
-      icon: History,
-      iconColor: 'text-indigo-400',
-      iconBg: 'bg-indigo-500/15',
-      category: 'operations',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Purchase',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'Purchase List',
+          icon: ClipboardList,
+          iconColor: 'text-orange-400',
+        },
+        {
+          id: 'returns',
+          label: 'Return List',
+          icon: RotateCcw,
+          iconColor: 'text-amber-400',
+          badge: accessibleReturnsCount || undefined,
+        },
+      ],
     },
     {
       id: 'debts',
@@ -221,15 +340,6 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
 
     // Permission-gated admin modules granted to seller
     {
-      id: 'sales',
-      label: 'Sales Reports',
-      icon: History,
-      iconColor: 'text-indigo-400',
-      iconBg: 'bg-indigo-500/15',
-      category: 'management',
-      requiresAnyPermission: ['canEditSales', 'canDeleteSales'],
-    },
-    {
       id: 'inventory',
       label: 'Stock & Inventory',
       icon: Boxes,
@@ -238,6 +348,26 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined,
       category: 'management',
       requiresPermission: 'canManageInventory',
+      children: [
+        {
+          id: 'ALL',
+          label: 'All Inventories',
+          icon: Boxes,
+          iconColor: 'text-teal-400',
+        },
+        {
+          id: 'SHOP',
+          label: 'Shop Inventory',
+          icon: Store,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'STORE',
+          label: 'Store Inventory',
+          icon: Warehouse,
+          iconColor: 'text-indigo-400',
+        },
+      ],
     },
     {
       id: 'expenses',
@@ -247,6 +377,24 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       iconBg: 'bg-rose-500/15',
       category: 'management',
       requiresAnyPermission: ['canViewExpenses', 'canRecordExpenses'],
+      children: [
+        ...(hasPermission('canRecordExpenses')
+          ? [
+              {
+                id: 'add',
+                label: 'Add Expense',
+                icon: Plus,
+                iconColor: 'text-emerald-400',
+              },
+            ]
+          : []),
+        {
+          id: 'list',
+          label: 'List',
+          icon: ClipboardList,
+          iconColor: 'text-rose-400',
+        },
+      ],
     },
     {
       id: 'reports',
@@ -257,16 +405,6 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       iconBg: 'bg-fuchsia-500/15',
       category: 'management',
       requiresPermission: 'canViewReports',
-    },
-    {
-      id: 'shops',
-      label: 'Shops and Business Unit',
-      icon: Store,
-      iconColor: 'text-amber-400',
-      iconBg: 'bg-amber-500/15',
-      badge: (dbState.shops || []).length,
-      category: 'management',
-      requiresPermission: 'canManageShops',
     },
     {
       id: 'sellers',
@@ -297,41 +435,87 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       category: 'core',
     },
     {
-      id: 'new_sale',
-      label: 'Sales (POS)',
-      icon: ShoppingCart,
-      iconColor: 'text-emerald-400',
-      iconBg: 'bg-emerald-500/15',
-      category: 'core',
-    },
-    {
       id: 'shops',
-      label: 'Shops and Business Unit',
+      label: 'Shops & Business Unit',
       icon: Store,
       iconColor: 'text-amber-400',
       iconBg: 'bg-amber-500/15',
       badge: managedShops.length,
       category: 'core',
-    },
-    {
-      id: 'sales',
-      label: 'Sales Reports',
-      icon: History,
-      iconColor: 'text-indigo-400',
-      iconBg: 'bg-indigo-500/15',
-      category: 'operations',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Shop',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'All Shops (List)',
+          icon: ClipboardList,
+          iconColor: 'text-amber-400',
+        },
+      ],
     },
     {
       id: 'products',
-      label: 'Products and Categories',
+      label: 'Products & Categories',
       icon: Package,
       iconColor: 'text-violet-400',
       iconBg: 'bg-violet-500/15',
       category: 'operations',
+      children: [
+        {
+          id: 'add_product',
+          label: 'Add Products',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'add_category',
+          label: 'Add Category',
+          icon: FolderPlus,
+          iconColor: 'text-sky-400',
+        },
+        {
+          id: 'product_list',
+          label: 'Product List',
+          icon: Package,
+          iconColor: 'text-violet-400',
+        },
+        {
+          id: 'category_list',
+          label: 'Category List',
+          icon: FolderTree,
+          iconColor: 'text-amber-400',
+        },
+      ],
+    },
+    {
+      id: 'sell',
+      label: 'Sell',
+      icon: ShoppingCart,
+      iconColor: 'text-emerald-400',
+      iconBg: 'bg-emerald-500/15',
+      category: 'core',
+      children: [
+        {
+          id: 'new_sale',
+          label: 'Add Sale (POS)',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'sales',
+          label: 'All Sales Reports',
+          icon: History,
+          iconColor: 'text-indigo-400',
+        },
+      ],
     },
     {
       id: 'stores',
-      label: 'Stores and Transfer',
+      label: 'Stores & Transfer',
       icon: Car,
       iconColor: 'text-cyan-400',
       iconBg: 'bg-cyan-500/15',
@@ -375,14 +559,55 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       iconBg: 'bg-teal-500/15',
       badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined,
       category: 'operations',
+      children: [
+        {
+          id: 'ALL',
+          label: 'All Inventories',
+          icon: Boxes,
+          iconColor: 'text-teal-400',
+        },
+        {
+          id: 'SHOP',
+          label: 'Shop Inventory',
+          icon: Store,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'STORE',
+          label: 'Store Inventory',
+          icon: Warehouse,
+          iconColor: 'text-indigo-400',
+        },
+      ],
     },
     {
       id: 'purchases',
       label: 'Purchases',
-      icon: Truck,
+      icon: PurchaseIcon,
       iconColor: 'text-orange-400',
       iconBg: 'bg-orange-500/15',
       category: 'operations',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Purchase',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'Purchase List',
+          icon: ClipboardList,
+          iconColor: 'text-orange-400',
+        },
+        {
+          id: 'returns',
+          label: 'Return List',
+          icon: RotateCcw,
+          iconColor: 'text-amber-400',
+          badge: accessibleReturnsCount || undefined,
+        },
+      ],
     },
     {
       id: 'expenses',
@@ -391,6 +616,20 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       iconColor: 'text-rose-400',
       iconBg: 'bg-rose-500/15',
       category: 'operations',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Expense',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'List',
+          icon: ClipboardList,
+          iconColor: 'text-rose-400',
+        },
+      ],
     },
     {
       id: 'debts',
@@ -463,8 +702,24 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
     onClose();
   };
 
-  const handleStoresChildClick = (childId: 'stores' | 'inventory' | 'transfer' | 'list') => {
-    openStoresSubTab(childId);
+  const handleGroupChildClick = (parentId: string, childId: string) => {
+    if (parentId === 'shops') {
+      openShopsSubTab(childId as 'add' | 'list');
+    } else if (parentId === 'sell') {
+      setActiveTab(childId);
+    } else if (parentId === 'stores') {
+      openStoresSubTab(childId as 'stores' | 'inventory' | 'transfer' | 'list');
+    } else if (parentId === 'inventory') {
+      openInventoryFilter(childId as 'ALL' | 'SHOP' | 'STORE');
+    } else if (parentId === 'purchases') {
+      openPurchasesSubTab(childId as 'add' | 'list' | 'returns');
+    } else if (parentId === 'expenses') {
+      openExpensesSubTab(childId as 'add' | 'list');
+    } else if (parentId === 'products') {
+      openProductsSubTab(
+        childId as 'product_list' | 'add_product' | 'category_list' | 'add_category'
+      );
+    }
     onClose();
   };
 
@@ -609,21 +864,88 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
         <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
           {items.map(item => {
             const Icon = item.icon;
-            const isActive = activeTab === item.id;
+            const isActive =
+              item.id === 'sell'
+                ? activeTab === 'new_sale' ||
+                  activeTab === 'sales' ||
+                  (!showAdminMenu && activeTab === 'my_sales')
+                : activeTab === item.id;
             const hasChildren = Boolean(item.children && item.children.length > 0);
 
             if (hasChildren && item.children) {
+              const isExpanded = Boolean(expandedGroups[item.id]);
+              const isShopsGroup = item.id === 'shops';
+              const isSellGroup = item.id === 'sell';
+              const isInventoryGroup = item.id === 'inventory';
+              const isPurchasesGroup = item.id === 'purchases';
+              const isExpensesGroup = item.id === 'expenses';
+              const isProductsGroup = item.id === 'products';
+              const activeParentClasses = isShopsGroup
+                ? 'bg-amber-600/20 text-white border border-amber-500/40 shadow-sm'
+                : isSellGroup
+                ? 'bg-emerald-600/20 text-white border border-emerald-500/40 shadow-sm'
+                : isProductsGroup
+                ? 'bg-violet-600/20 text-white border border-violet-500/40 shadow-sm'
+                : isExpensesGroup
+                ? 'bg-rose-600/20 text-white border border-rose-500/40 shadow-sm'
+                : isPurchasesGroup
+                ? 'bg-orange-600/20 text-white border border-orange-500/40 shadow-sm'
+                : isInventoryGroup
+                ? 'bg-teal-600/20 text-white border border-teal-500/40 shadow-sm'
+                : 'bg-cyan-600/20 text-white border border-cyan-500/40 shadow-sm';
+              const activeIconClasses = isShopsGroup
+                ? 'bg-amber-500/25 text-amber-300'
+                : isSellGroup
+                ? 'bg-emerald-500/25 text-emerald-300'
+                : isProductsGroup
+                ? 'bg-violet-500/25 text-violet-300'
+                : isExpensesGroup
+                ? 'bg-rose-500/25 text-rose-300'
+                : isPurchasesGroup
+                ? 'bg-orange-500/25 text-orange-300'
+                : isInventoryGroup
+                ? 'bg-teal-500/25 text-teal-300'
+                : 'bg-cyan-500/25 text-cyan-300';
+              const activeChevronColor = isShopsGroup
+                ? 'text-amber-400'
+                : isSellGroup
+                ? 'text-emerald-400'
+                : isProductsGroup
+                ? 'text-violet-400'
+                : isExpensesGroup
+                ? 'text-rose-400'
+                : isPurchasesGroup
+                ? 'text-orange-400'
+                : isInventoryGroup
+                ? 'text-teal-400'
+                : 'text-cyan-400';
+              const borderLineColor = isShopsGroup
+                ? 'border-amber-500/30'
+                : isSellGroup
+                ? 'border-emerald-500/30'
+                : isProductsGroup
+                ? 'border-violet-500/30'
+                : isExpensesGroup
+                ? 'border-rose-500/30'
+                : isPurchasesGroup
+                ? 'border-orange-500/30'
+                : isInventoryGroup
+                ? 'border-teal-500/30'
+                : 'border-cyan-500/30';
+
               return (
                 <div key={item.id} className="space-y-1">
                   <button
                     type="button"
                     id={`drawer-nav-${item.id}`}
-                    onClick={() => setIsStoresExpanded(prev => !prev)}
-                    aria-expanded={isStoresExpanded}
+                    onClick={() =>
+                      setExpandedGroups(prev => ({ ...prev, [item.id]: !prev[item.id] }))
+                    }
+                    aria-expanded={isExpanded}
                     className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left font-medium transition-all duration-200 ${
                       isActive
-                        ? 'bg-cyan-600/20 text-white border border-cyan-500/40 shadow-sm'
-                        : isStoresExpanded
+                        ? activeParentClasses
+                        : isExpanded
                         ? 'bg-slate-800/80 text-white'
                         : 'text-slate-200 hover:text-white hover:bg-slate-800/70'
                     }`}
@@ -632,7 +954,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                       <div
                         className={`p-2 rounded-lg shrink-0 transition-transform duration-200 ${
                           isActive
-                            ? 'bg-cyan-500/25 text-cyan-300'
+                            ? activeIconClasses
                             : `${item.iconBg} ${item.iconColor}`
                         }`}
                       >
@@ -647,13 +969,19 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
 
                     <div className="flex items-center gap-1.5 shrink-0">
                       {item.badge !== undefined && (
-                        <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                        <span
+                          className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                            item.badgeColor === 'blue'
+                              ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                              : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                          }`}
+                        >
                           {item.badge}
                         </span>
                       )}
                       <ChevronDown
                         className={`w-4 h-4 transition-transform duration-300 ease-out ${
-                          isStoresExpanded ? 'rotate-180 text-cyan-400' : 'text-slate-500'
+                          isExpanded ? `rotate-180 ${activeChevronColor}` : 'text-slate-500'
                         }`}
                       />
                     </div>
@@ -662,26 +990,38 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                   {/* Smooth Collapsible Dropdown */}
                   <div
                     className={`grid transition-all duration-300 ease-out ${
-                      isStoresExpanded
+                      isExpanded
                         ? 'grid-rows-[1fr] opacity-100 translate-y-0'
                         : 'grid-rows-[0fr] opacity-0 -translate-y-1 pointer-events-none'
                     }`}
                   >
                     <div className="overflow-hidden">
-                      <div className="ml-5 pl-3 py-1 space-y-1 border-l-2 border-cyan-500/30">
+                      <div className={`ml-5 pl-3 py-1 space-y-1 border-l-2 ${borderLineColor}`}>
                         {item.children.map(child => {
                           const ChildIcon = child.icon;
                           const isChildActive =
-                            activeTab === 'stores' &&
-                            (storesSubTab === child.id ||
-                              (child.id === 'list' && storesSubTab === 'transfer_view'));
+                            item.id === 'shops'
+                              ? activeTab === 'shops' && shopsSubTab === child.id
+                              : item.id === 'sell'
+                              ? activeTab === child.id
+                              : item.id === 'stores'
+                              ? activeTab === 'stores' &&
+                                (storesSubTab === child.id ||
+                                  (child.id === 'list' && storesSubTab === 'transfer_view'))
+                              : item.id === 'purchases'
+                              ? activeTab === 'purchases' && purchasesSubTab === child.id
+                              : item.id === 'expenses'
+                              ? activeTab === 'expenses' && expensesSubTab === child.id
+                              : item.id === 'products'
+                              ? activeTab === 'products' && productsSubTab === child.id
+                              : activeTab === 'inventory' && inventoryFilter === child.id;
 
                           return (
                             <button
                               key={child.id}
                               type="button"
-                              id={`drawer-nav-stores-${child.id}`}
-                              onClick={() => handleStoresChildClick(child.id)}
+                              id={`drawer-nav-${item.id}-${child.id}`}
+                              onClick={() => handleGroupChildClick(item.id, child.id)}
                               className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all duration-200 ${
                                 isChildActive
                                   ? 'bg-blue-600 text-white shadow-md font-semibold'

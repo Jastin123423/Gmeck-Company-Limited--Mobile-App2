@@ -7,7 +7,6 @@ import {
   History,
   Users,
   TrendingDown,
-  Truck,
   BarChart3,
   Database,
   Settings,
@@ -21,8 +20,13 @@ import {
   ArrowRightLeft,
   ClipboardList,
   ChevronDown,
+  Plus,
+  RotateCcw,
+  FolderPlus,
+  FolderTree,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { PurchaseIcon } from './PurchaseIcon';
 import { NotificationService } from '../../services/notificationService';
 import { DebtService } from '../../services/debtService';
 import {
@@ -34,7 +38,7 @@ import {
 } from '../../utils/permissions';
 
 interface NavChildItem {
-  id: 'stores' | 'inventory' | 'transfer' | 'list';
+  id: string;
   label: string;
   icon: React.ElementType;
   iconColor: string;
@@ -60,15 +64,42 @@ export const Sidebar: React.FC = () => {
     setActiveTab,
     storesSubTab,
     openStoresSubTab,
+    inventoryFilter,
+    openInventoryFilter,
+    purchasesSubTab,
+    openPurchasesSubTab,
+    expensesSubTab,
+    openExpensesSubTab,
+    productsSubTab,
+    openProductsSubTab,
+    shopsSubTab,
+    openShopsSubTab,
     sellerColor,
     dbState,
   } = useApp();
 
-  const [isStoresExpanded, setIsStoresExpanded] = useState<boolean>(activeTab === 'stores');
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
+    shops: activeTab === 'shops',
+    sell: activeTab === 'new_sale' || activeTab === 'sales' || activeTab === 'my_sales',
+    stores: activeTab === 'stores',
+    inventory: activeTab === 'inventory',
+    purchases: activeTab === 'purchases',
+    expenses: activeTab === 'expenses',
+    products: activeTab === 'products',
+  });
 
   useEffect(() => {
-    if (activeTab === 'stores') {
-      setIsStoresExpanded(true);
+    if (activeTab === 'new_sale' || activeTab === 'sales' || activeTab === 'my_sales') {
+      setExpandedGroups(prev => ({ ...prev, sell: true }));
+    } else if (
+      activeTab === 'shops' ||
+      activeTab === 'stores' ||
+      activeTab === 'inventory' ||
+      activeTab === 'purchases' ||
+      activeTab === 'expenses' ||
+      activeTab === 'products'
+    ) {
+      setExpandedGroups(prev => ({ ...prev, [activeTab]: true }));
     }
   }, [activeTab]);
 
@@ -122,19 +153,121 @@ export const Sidebar: React.FC = () => {
   const accessibleTransfersCount = (dbState.stockTransfers || []).filter(
     t => isPlatformAdm || managedShopIds.includes(t.shopId)
   ).length;
+  const accessibleReturnsCount = (dbState.purchaseReturns || []).filter(
+    r => !scopedShopIds || scopedShopIds.length === 0 || scopedShopIds.includes(r.shopId)
+  ).length;
 
   const sellerNav: NavItem[] = [
     { id: 'dashboard', label: 'Home', icon: Home, iconColor: 'text-sky-400' },
-    { id: 'new_sale', label: 'Sales (POS)', icon: ShoppingCart, iconColor: 'text-emerald-400' },
+    {
+      id: 'shops',
+      label: 'Shops & Business Unit',
+      icon: Store,
+      iconColor: 'text-amber-400',
+      requiresPermission: 'canManageShops',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Shop',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'All Shops (List)',
+          icon: ClipboardList,
+          iconColor: 'text-amber-400',
+        },
+      ],
+    },
     {
       id: 'products',
-      label: 'Products and Categories',
+      label: 'Products & Categories',
       icon: Package,
       iconColor: 'text-violet-400',
       badge: lowStockCount > 0 ? lowStockCount : undefined,
+      children: [
+        {
+          id: 'add_product',
+          label: 'Add Products',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        ...(hasAnyPermission(['canEditProducts', 'canDeleteProducts'])
+          ? [
+              {
+                id: 'add_category',
+                label: 'Add Category',
+                icon: FolderPlus,
+                iconColor: 'text-sky-400',
+              },
+            ]
+          : []),
+        {
+          id: 'product_list',
+          label: 'Product List',
+          icon: Package,
+          iconColor: 'text-violet-400',
+        },
+        ...(hasAnyPermission(['canEditProducts', 'canDeleteProducts'])
+          ? [
+              {
+                id: 'category_list',
+                label: 'Category List',
+                icon: FolderTree,
+                iconColor: 'text-amber-400',
+              },
+            ]
+          : []),
+      ],
     },
-    { id: 'purchases', label: 'Purchases', icon: Truck, iconColor: 'text-orange-400' },
-    { id: 'my_sales', label: 'My Sales', icon: History, iconColor: 'text-indigo-400' },
+    {
+      id: 'sell',
+      label: 'Sell',
+      icon: ShoppingCart,
+      iconColor: 'text-emerald-400',
+      children: [
+        {
+          id: 'new_sale',
+          label: 'Add Sale (POS)',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: hasAnyPermission(['canEditSales', 'canDeleteSales']) ? 'sales' : 'my_sales',
+          label: 'All Sales Reports',
+          icon: History,
+          iconColor: 'text-indigo-400',
+        },
+      ],
+    },
+    {
+      id: 'purchases',
+      label: 'Purchases',
+      icon: PurchaseIcon,
+      iconColor: 'text-orange-400',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Purchase',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'Purchase List',
+          icon: ClipboardList,
+          iconColor: 'text-orange-400',
+        },
+        {
+          id: 'returns',
+          label: 'Return List',
+          icon: RotateCcw,
+          iconColor: 'text-amber-400',
+          badge: accessibleReturnsCount || undefined,
+        },
+      ],
+    },
     {
       id: 'debts',
       label: 'Debt Management',
@@ -158,18 +291,31 @@ export const Sidebar: React.FC = () => {
 
     // Permission-gated items
     {
-      id: 'sales',
-      label: 'Sales Reports',
-      icon: History,
-      iconColor: 'text-indigo-400',
-      requiresAnyPermission: ['canEditSales', 'canDeleteSales'],
-    },
-    {
       id: 'inventory',
       label: 'Stock & Inventory',
       icon: Boxes,
       iconColor: 'text-teal-400',
       requiresPermission: 'canManageInventory',
+      children: [
+        {
+          id: 'ALL',
+          label: 'All Inventories',
+          icon: Boxes,
+          iconColor: 'text-teal-400',
+        },
+        {
+          id: 'SHOP',
+          label: 'Shop Inventory',
+          icon: Store,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'STORE',
+          label: 'Store Inventory',
+          icon: Warehouse,
+          iconColor: 'text-indigo-400',
+        },
+      ],
     },
     {
       id: 'expenses',
@@ -177,6 +323,24 @@ export const Sidebar: React.FC = () => {
       icon: TrendingDown,
       iconColor: 'text-rose-400',
       requiresAnyPermission: ['canViewExpenses', 'canRecordExpenses'],
+      children: [
+        ...(hasPermission('canRecordExpenses')
+          ? [
+              {
+                id: 'add',
+                label: 'Add Expense',
+                icon: Plus,
+                iconColor: 'text-emerald-400',
+              },
+            ]
+          : []),
+        {
+          id: 'list',
+          label: 'List',
+          icon: ClipboardList,
+          iconColor: 'text-rose-400',
+        },
+      ],
     },
     {
       id: 'reports',
@@ -184,13 +348,6 @@ export const Sidebar: React.FC = () => {
       icon: BarChart3,
       iconColor: 'text-fuchsia-400',
       requiresPermission: 'canViewReports',
-    },
-    {
-      id: 'shops',
-      label: 'Shops and Business Unit',
-      icon: Store,
-      iconColor: 'text-amber-400',
-      requiresPermission: 'canManageShops',
     },
     {
       id: 'sellers',
@@ -204,24 +361,82 @@ export const Sidebar: React.FC = () => {
 
   const adminNav: NavItem[] = [
     { id: 'dashboard', label: 'Home', icon: Home, iconColor: 'text-sky-400' },
-    { id: 'new_sale', label: 'Sales (POS)', icon: ShoppingCart, iconColor: 'text-emerald-400' },
     {
       id: 'shops',
-      label: 'Shops and Business Unit',
+      label: 'Shops & Business Unit',
       icon: Store,
       iconColor: 'text-amber-400',
       badge: managedShops.length,
+      children: [
+        {
+          id: 'add',
+          label: 'Add Shop',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'All Shops (List)',
+          icon: ClipboardList,
+          iconColor: 'text-amber-400',
+        },
+      ],
     },
-    { id: 'sales', label: 'Sales Reports', icon: History, iconColor: 'text-indigo-400' },
     {
       id: 'products',
-      label: 'Products and Categories',
+      label: 'Products & Categories',
       icon: Package,
       iconColor: 'text-violet-400',
+      children: [
+        {
+          id: 'add_product',
+          label: 'Add Products',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'add_category',
+          label: 'Add Category',
+          icon: FolderPlus,
+          iconColor: 'text-sky-400',
+        },
+        {
+          id: 'product_list',
+          label: 'Product List',
+          icon: Package,
+          iconColor: 'text-violet-400',
+        },
+        {
+          id: 'category_list',
+          label: 'Category List',
+          icon: FolderTree,
+          iconColor: 'text-amber-400',
+        },
+      ],
+    },
+    {
+      id: 'sell',
+      label: 'Sell',
+      icon: ShoppingCart,
+      iconColor: 'text-emerald-400',
+      children: [
+        {
+          id: 'new_sale',
+          label: 'Add Sale (POS)',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'sales',
+          label: 'All Sales Reports',
+          icon: History,
+          iconColor: 'text-indigo-400',
+        },
+      ],
     },
     {
       id: 'stores',
-      label: 'Stores and Transfer',
+      label: 'Stores & Transfer',
       icon: Car,
       iconColor: 'text-cyan-400',
       badge: accessibleStoresCount || undefined,
@@ -261,9 +476,74 @@ export const Sidebar: React.FC = () => {
       icon: Boxes,
       iconColor: 'text-teal-400',
       badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined,
+      children: [
+        {
+          id: 'ALL',
+          label: 'All Inventories',
+          icon: Boxes,
+          iconColor: 'text-teal-400',
+        },
+        {
+          id: 'SHOP',
+          label: 'Shop Inventory',
+          icon: Store,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'STORE',
+          label: 'Store Inventory',
+          icon: Warehouse,
+          iconColor: 'text-indigo-400',
+        },
+      ],
     },
-    { id: 'purchases', label: 'Purchases', icon: Truck, iconColor: 'text-orange-400' },
-    { id: 'expenses', label: 'Expenses', icon: TrendingDown, iconColor: 'text-rose-400' },
+    {
+      id: 'purchases',
+      label: 'Purchases',
+      icon: PurchaseIcon,
+      iconColor: 'text-orange-400',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Purchase',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'Purchase List',
+          icon: ClipboardList,
+          iconColor: 'text-orange-400',
+        },
+        {
+          id: 'returns',
+          label: 'Return List',
+          icon: RotateCcw,
+          iconColor: 'text-amber-400',
+          badge: accessibleReturnsCount || undefined,
+        },
+      ],
+    },
+    {
+      id: 'expenses',
+      label: 'Expenses',
+      icon: TrendingDown,
+      iconColor: 'text-rose-400',
+      children: [
+        {
+          id: 'add',
+          label: 'Add Expense',
+          icon: Plus,
+          iconColor: 'text-emerald-400',
+        },
+        {
+          id: 'list',
+          label: 'List',
+          icon: ClipboardList,
+          iconColor: 'text-rose-400',
+        },
+      ],
+    },
     {
       id: 'debts',
       label: 'Debt Management',
@@ -324,21 +604,88 @@ export const Sidebar: React.FC = () => {
         <nav className="space-y-1 px-2">
           {items.map(item => {
             const Icon = item.icon;
-            const isActive = activeTab === item.id;
+            const isActive =
+              item.id === 'sell'
+                ? activeTab === 'new_sale' ||
+                  activeTab === 'sales' ||
+                  (!showAdminMenu && activeTab === 'my_sales')
+                : activeTab === item.id;
             const hasChildren = Boolean(item.children && item.children.length > 0);
 
             if (hasChildren && item.children) {
+              const isExpanded = Boolean(expandedGroups[item.id]);
+              const isShopsGroup = item.id === 'shops';
+              const isSellGroup = item.id === 'sell';
+              const isInventoryGroup = item.id === 'inventory';
+              const isPurchasesGroup = item.id === 'purchases';
+              const isExpensesGroup = item.id === 'expenses';
+              const isProductsGroup = item.id === 'products';
+              const activeParentClasses = isShopsGroup
+                ? 'bg-amber-600/20 text-white border border-amber-500/35'
+                : isSellGroup
+                ? 'bg-emerald-600/20 text-white border border-emerald-500/35'
+                : isProductsGroup
+                ? 'bg-violet-600/20 text-white border border-violet-500/35'
+                : isExpensesGroup
+                ? 'bg-rose-600/20 text-white border border-rose-500/35'
+                : isPurchasesGroup
+                ? 'bg-orange-600/20 text-white border border-orange-500/35'
+                : isInventoryGroup
+                ? 'bg-teal-600/20 text-white border border-teal-500/35'
+                : 'bg-cyan-600/20 text-white border border-cyan-500/35';
+              const activeIconColor = isShopsGroup
+                ? 'text-amber-300'
+                : isSellGroup
+                ? 'text-emerald-300'
+                : isProductsGroup
+                ? 'text-violet-300'
+                : isExpensesGroup
+                ? 'text-rose-300'
+                : isPurchasesGroup
+                ? 'text-orange-300'
+                : isInventoryGroup
+                ? 'text-teal-300'
+                : 'text-cyan-300';
+              const activeChevronColor = isShopsGroup
+                ? 'text-amber-400'
+                : isSellGroup
+                ? 'text-emerald-400'
+                : isProductsGroup
+                ? 'text-violet-400'
+                : isExpensesGroup
+                ? 'text-rose-400'
+                : isPurchasesGroup
+                ? 'text-orange-400'
+                : isInventoryGroup
+                ? 'text-teal-400'
+                : 'text-cyan-400';
+              const borderLineColor = isShopsGroup
+                ? 'border-amber-500/30'
+                : isSellGroup
+                ? 'border-emerald-500/30'
+                : isProductsGroup
+                ? 'border-violet-500/30'
+                : isExpensesGroup
+                ? 'border-rose-500/30'
+                : isPurchasesGroup
+                ? 'border-orange-500/30'
+                : isInventoryGroup
+                ? 'border-teal-500/30'
+                : 'border-cyan-500/30';
+
               return (
                 <div key={item.id} className="space-y-1">
                   <button
                     type="button"
                     id={`nav-${item.id}`}
-                    onClick={() => setIsStoresExpanded(prev => !prev)}
-                    aria-expanded={isStoresExpanded}
+                    onClick={() =>
+                      setExpandedGroups(prev => ({ ...prev, [item.id]: !prev[item.id] }))
+                    }
+                    aria-expanded={isExpanded}
                     className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all duration-200 ${
                       isActive
-                        ? 'bg-cyan-600/20 text-white border border-cyan-500/35'
-                        : isStoresExpanded
+                        ? activeParentClasses
+                        : isExpanded
                         ? 'bg-slate-800/80 text-white'
                         : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
                     }`}
@@ -346,7 +693,7 @@ export const Sidebar: React.FC = () => {
                     <div className="flex items-center gap-3 min-w-0">
                       <Icon
                         className={`w-4 h-4 shrink-0 ${
-                          isActive ? 'text-cyan-300' : item.iconColor
+                          isActive ? activeIconColor : item.iconColor
                         }`}
                       />
                       <span className="truncate">{item.label}</span>
@@ -354,13 +701,19 @@ export const Sidebar: React.FC = () => {
 
                     <div className="flex items-center gap-1.5 shrink-0">
                       {item.badge !== undefined && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
+                            item.badgeColor === 'blue'
+                              ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                              : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                          }`}
+                        >
                           {item.badge}
                         </span>
                       )}
                       <ChevronDown
                         className={`w-3.5 h-3.5 transition-transform duration-300 ease-out ${
-                          isStoresExpanded ? 'rotate-180 text-cyan-400' : 'text-slate-500'
+                          isExpanded ? `rotate-180 ${activeChevronColor}` : 'text-slate-500'
                         }`}
                       />
                     </div>
@@ -369,26 +722,62 @@ export const Sidebar: React.FC = () => {
                   {/* Animated Collapsible Submenu */}
                   <div
                     className={`grid transition-all duration-300 ease-out ${
-                      isStoresExpanded
+                      isExpanded
                         ? 'grid-rows-[1fr] opacity-100 translate-y-0'
                         : 'grid-rows-[0fr] opacity-0 -translate-y-1 pointer-events-none'
                     }`}
                   >
                     <div className="overflow-hidden">
-                      <div className="ml-4 pl-2.5 py-0.5 space-y-0.5 border-l-2 border-cyan-500/30">
+                      <div className={`ml-4 pl-2.5 py-0.5 space-y-0.5 border-l-2 ${borderLineColor}`}>
                         {item.children.map(child => {
                           const ChildIcon = child.icon;
                           const isChildActive =
-                            activeTab === 'stores' &&
-                            (storesSubTab === child.id ||
-                              (child.id === 'list' && storesSubTab === 'transfer_view'));
+                            item.id === 'shops'
+                              ? activeTab === 'shops' && shopsSubTab === child.id
+                              : item.id === 'sell'
+                              ? activeTab === child.id
+                              : item.id === 'stores'
+                              ? activeTab === 'stores' &&
+                                (storesSubTab === child.id ||
+                                  (child.id === 'list' && storesSubTab === 'transfer_view'))
+                              : item.id === 'purchases'
+                              ? activeTab === 'purchases' && purchasesSubTab === child.id
+                              : item.id === 'expenses'
+                              ? activeTab === 'expenses' && expensesSubTab === child.id
+                              : item.id === 'products'
+                              ? activeTab === 'products' && productsSubTab === child.id
+                              : activeTab === 'inventory' && inventoryFilter === child.id;
 
                           return (
                             <button
                               key={child.id}
                               type="button"
-                              id={`nav-stores-${child.id}`}
-                              onClick={() => openStoresSubTab(child.id)}
+                              id={`nav-${item.id}-${child.id}`}
+                              onClick={() => {
+                                if (item.id === 'shops') {
+                                  openShopsSubTab(child.id as 'add' | 'list');
+                                } else if (item.id === 'sell') {
+                                  setActiveTab(child.id);
+                                } else if (item.id === 'stores') {
+                                  openStoresSubTab(
+                                    child.id as 'stores' | 'inventory' | 'transfer' | 'list'
+                                  );
+                                } else if (item.id === 'inventory') {
+                                  openInventoryFilter(child.id as 'ALL' | 'SHOP' | 'STORE');
+                                } else if (item.id === 'purchases') {
+                                  openPurchasesSubTab(child.id as 'add' | 'list' | 'returns');
+                                } else if (item.id === 'expenses') {
+                                  openExpensesSubTab(child.id as 'add' | 'list');
+                                } else if (item.id === 'products') {
+                                  openProductsSubTab(
+                                    child.id as
+                                      | 'product_list'
+                                      | 'add_product'
+                                      | 'category_list'
+                                      | 'add_category'
+                                  );
+                                }
+                              }}
                               className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-all duration-200 ${
                                 isChildActive
                                   ? 'bg-blue-600 text-white shadow-sm font-semibold'

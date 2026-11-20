@@ -72,14 +72,21 @@ const computeMovementDateRange = (
 };
 
 export const AdminInventory: React.FC = () => {
-  const { currentUser, dbState, addToast, selectedShopId } = useApp();
+  const {
+    currentUser,
+    dbState,
+    addToast,
+    selectedShopId,
+    inventoryFilter,
+    inventoryNavTick,
+  } = useApp();
   const [activeTab, setActiveTabState] = useState<'stock' | 'movements' | 'losses'>('stock');
   const [searchQuery, setSearchQuery] = useState('');
   const [movementTypeFilter, setMovementTypeFilter] = useState('ALL');
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
 
-  // Per-shop inventory filter: All (default), Shop, Store
+  // Per-shop inventory filter override (defaults to active menu inventoryFilter: ALL / SHOP / STORE)
   const [shopLocationFilters, setShopLocationFilters] = useState<
     Record<string, ShopLocationFilter>
   >({});
@@ -139,6 +146,13 @@ export const AdminInventory: React.FC = () => {
     selectedShopId,
   ]);
 
+  // Reset per-shop overrides and open stock view whenever user selects All / Shop / Store Products from menu
+  useEffect(() => {
+    setShopLocationFilters({});
+    setVisibleCounts({});
+    setActiveTabState('stock');
+  }, [inventoryFilter, inventoryNavTick]);
+
   if (!currentUser) return null;
   if (!hasAdminAccess(currentUser) && !currentUser.permissions?.canManageInventory) return null;
 
@@ -176,7 +190,7 @@ export const AdminInventory: React.FC = () => {
   };
 
   const getShopLocationFilter = (shopId: string): ShopLocationFilter =>
-    shopLocationFilters[shopId] ?? 'ALL';
+    shopLocationFilters[shopId] ?? inventoryFilter;
 
   const handleSetShopLocationFilter = (shopId: string, next: ShopLocationFilter) => {
     setShopLocationFilters(prev => ({
@@ -200,7 +214,7 @@ export const AdminInventory: React.FC = () => {
       const hasValidShop = !!p.shopId && visibleShopIdSet.has(p.shopId);
       const locFilter: ShopLocationFilter = hasValidShop
         ? getShopLocationFilter(p.shopId)
-        : 'ALL';
+        : inventoryFilter;
       activeScopeSet.add(locFilter);
 
       const shopQty = Math.max(0, Number(p.currentStock || 0));
@@ -550,8 +564,8 @@ export const AdminInventory: React.FC = () => {
     const isLow = mode !== 'STORE' && shopQty <= p.minStock;
     const isOut = displayQty <= 0;
 
-    const cardCost = displayQty * (p.purchasePrice || 0);
-    const cardRetail = displayQty * (p.sellingPrice || 0);
+    const unitBuyPrice = Number(p.purchasePrice || 0);
+    const unitSellingPrice = Number(p.sellingPrice || 0);
 
     const warehouseStoreEntries = p.storeStocks
       ? Object.entries(p.storeStocks).filter(([sid]) => !floorStoreIdSet.has(sid))
@@ -630,15 +644,15 @@ export const AdminInventory: React.FC = () => {
             )}
           </div>
           <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
-            <div className="text-[9px] text-slate-400">Cost</div>
+            <div className="text-[9px] text-slate-400">Buy Price</div>
             <div className="font-mono text-[11px] text-purple-300 font-medium truncate">
-              {formatCurrency(cardCost, settings.currencySymbol)}
+              {formatCurrency(unitBuyPrice, settings.currencySymbol)}
             </div>
           </div>
           <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
-            <div className="text-[9px] text-slate-400">Retail</div>
+            <div className="text-[9px] text-slate-400">Selling Price</div>
             <div className="font-mono text-[11px] text-emerald-400 font-bold truncate">
-              {formatCurrency(cardRetail, settings.currencySymbol)}
+              {formatCurrency(unitSellingPrice, settings.currencySymbol)}
             </div>
           </div>
         </div>
@@ -686,10 +700,14 @@ export const AdminInventory: React.FC = () => {
       <div className="flex flex-col gap-3 mb-5 pb-4 border-b border-slate-800">
         <div>
           <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
-            Inventory & Stock Control
+            {inventoryFilter === 'SHOP'
+              ? 'Shop Inventory'
+              : inventoryFilter === 'STORE'
+                ? 'Store Inventory'
+                : 'All Inventories'}
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Monitor real-time warehouse stock, track losses, and perform stock adjustments
+            Monitor real-time stock levels, buying &amp; selling prices, losses, and adjustments
           </p>
         </div>
 
@@ -759,7 +777,7 @@ export const AdminInventory: React.FC = () => {
 
         <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400 mb-1.5">
-            <span className="text-[10px] font-semibold uppercase tracking-wider">Cost Value</span>
+            <span className="text-[10px] font-semibold uppercase tracking-wider">Buy Price Total</span>
             <DollarSign className="w-3.5 h-3.5 text-purple-400" />
           </div>
           <div className="text-sm font-bold text-purple-300 font-mono truncate">
@@ -772,7 +790,7 @@ export const AdminInventory: React.FC = () => {
 
         <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400 mb-1.5">
-            <span className="text-[10px] font-semibold uppercase tracking-wider">Retail Value</span>
+            <span className="text-[10px] font-semibold uppercase tracking-wider">Selling Price Total</span>
             <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
           </div>
           <div className="text-sm font-bold text-emerald-400 font-mono truncate">
@@ -1073,7 +1091,7 @@ export const AdminInventory: React.FC = () => {
                           <div className="grid grid-cols-2 gap-2">
                             <div className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2">
                               <div className="text-[9px] text-slate-400 uppercase font-semibold">
-                                Total Cost
+                                Total Buy Price
                               </div>
                               <div className="text-xs font-bold font-mono tabular-nums text-purple-300 mt-0.5 truncate">
                                 {formatCurrency(totalShopCost, settings.currencySymbol)}
@@ -1081,7 +1099,7 @@ export const AdminInventory: React.FC = () => {
                             </div>
                             <div className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-right">
                               <div className="text-[9px] text-slate-400 uppercase font-semibold">
-                                Total Retail Value
+                                Total Selling Price
                               </div>
                               <div className="text-xs font-bold font-mono tabular-nums text-emerald-400 mt-0.5 truncate">
                                 {formatCurrency(totalShopRetail, settings.currencySymbol)}

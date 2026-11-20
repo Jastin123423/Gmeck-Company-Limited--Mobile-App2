@@ -5,6 +5,7 @@ import {
   Product,
   Sale,
   Purchase,
+  PurchaseReturn,
   Expense,
   InventoryMovement,
   BusinessSettings,
@@ -45,6 +46,7 @@ export interface DatabaseState {
   products: Product[];
   sales: Sale[];
   purchases: Purchase[];
+  purchaseReturns: PurchaseReturn[];
   expenses: Expense[];
   movements: InventoryMovement[];
   settings: BusinessSettings;
@@ -162,6 +164,7 @@ class LocalDatabase {
     let products = this.loadTable<Product[]>('products', INITIAL_PRODUCTS);
     let sales = this.loadTable<Sale[]>('sales', INITIAL_SALES);
     let purchases = this.loadTable<Purchase[]>('purchases', INITIAL_PURCHASES);
+    const purchaseReturns = this.loadTable<PurchaseReturn[]>('purchase_returns', []);
     let expenses = this.loadTable<Expense[]>('expenses', INITIAL_EXPENSES);
     let movements = this.loadTable<InventoryMovement[]>('movements', INITIAL_MOVEMENTS);
     let settings = this.loadTable<BusinessSettings>('settings', INITIAL_SETTINGS);
@@ -236,6 +239,7 @@ class LocalDatabase {
       products: products || [],
       sales: sales || [],
       purchases: purchases || [],
+      purchaseReturns: purchaseReturns || [],
       expenses: expenses || [],
       movements: movements || [],
       settings,
@@ -367,6 +371,18 @@ class LocalDatabase {
     if (!this.memoryCache) this.init();
     this.memoryCache!.purchases = purchases;
     this.saveTable('purchases', purchases);
+    this.notify();
+  }
+
+  // --- Purchase Returns ---
+  public getPurchaseReturns(): PurchaseReturn[] {
+    return this.getState().purchaseReturns || [];
+  }
+
+  public savePurchaseReturns(purchaseReturns: PurchaseReturn[]): void {
+    if (!this.memoryCache) this.init();
+    this.memoryCache!.purchaseReturns = purchaseReturns;
+    this.saveTable('purchase_returns', purchaseReturns);
     this.notify();
   }
 

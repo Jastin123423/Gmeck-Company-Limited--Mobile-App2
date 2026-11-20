@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Store,
   Plus,
@@ -19,6 +19,7 @@ import {
   UserCheck,
   UserX,
   Trash2,
+  ArrowLeft,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ShopService } from '../../services/shopService';
@@ -28,7 +29,17 @@ import { formatCurrency, formatDate } from '../../utils/formatters';
 import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 export const AdminShops: React.FC = () => {
-  const { currentUser, dbState, addToast, selectedShopId, setSelectedShopId, setActiveTab } = useApp();
+  const {
+    currentUser,
+    dbState,
+    addToast,
+    selectedShopId,
+    setSelectedShopId,
+    setActiveTab,
+    shopsSubTab,
+    setShopsSubTab,
+    shopsNavTick,
+  } = useApp();
   const settings = dbState.settings;
 
   const [search, setSearch] = useState('');
@@ -112,7 +123,32 @@ export const AdminShops: React.FC = () => {
     return metrics;
   }, [dbState.shops, dbState.products, dbState.users, dbState.sales]);
 
+  // Sync with collapsible Shops & Business Unit menu navigation
+  useEffect(() => {
+    if (shopsNavTick === 0) return;
+    setEditingShop(null);
+    setIsCreateModalOpen(false);
+    if (shopsSubTab === 'add') {
+      setFormData({
+        name: '',
+        code: '',
+        description: '',
+        address: '',
+        phone: '',
+        status: 'ACTIVE',
+      });
+    }
+  }, [shopsNavTick]);
+
+  useEffect(() => {
+    if (shopsSubTab === 'list') {
+      setEditingShop(null);
+      setIsCreateModalOpen(false);
+    }
+  }, [shopsSubTab]);
+
   const handleOpenCreate = () => {
+    setEditingShop(null);
     setFormData({
       name: '',
       code: '',
@@ -121,7 +157,7 @@ export const AdminShops: React.FC = () => {
       phone: '',
       status: 'ACTIVE',
     });
-    setIsCreateModalOpen(true);
+    setShopsSubTab('add');
   };
 
   const handleOpenEdit = (shop: Shop) => {
@@ -134,6 +170,7 @@ export const AdminShops: React.FC = () => {
       phone: shop.phone || '',
       status: shop.status,
     });
+    setShopsSubTab('add');
   };
 
   const handleSaveShop = (e: React.FormEvent) => {
@@ -161,6 +198,7 @@ export const AdminShops: React.FC = () => {
           description: `Business unit "${formData.name}" details updated successfully.`,
         });
         setEditingShop(null);
+        setShopsSubTab('list');
       } else {
         addToast({
           type: 'error',
@@ -188,6 +226,7 @@ export const AdminShops: React.FC = () => {
           description: `New business unit "${formData.name}" added to company.`,
         });
         setIsCreateModalOpen(false);
+        setShopsSubTab('list');
       } else {
         addToast({
           type: 'error',
@@ -296,6 +335,164 @@ export const AdminShops: React.FC = () => {
     );
   }, [dbState.users, shopAdminModalShop]);
 
+  if (shopsSubTab === 'add') {
+    return (
+      <div
+        id="admin-shops-add-page"
+        className="flex-1 p-3.5 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto pb-24 sm:pb-6"
+      >
+        <div className="max-w-2xl mx-auto space-y-4 sm:space-y-5">
+          {/* Header */}
+          <div className="flex items-center justify-between gap-3 bg-slate-900/90 p-3.5 sm:p-5 rounded-xl border border-slate-800">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingShop(null);
+                  setIsCreateModalOpen(false);
+                  setShopsSubTab('list');
+                }}
+                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition shrink-0"
+                title="Back to All Shops"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <Store className="w-5 h-5 text-amber-400 shrink-0" />
+                  <h2 className="text-base sm:text-xl font-bold text-white tracking-tight truncate">
+                    {editingShop ? `Edit Shop: ${editingShop.name}` : 'Add New Shop'}
+                  </h2>
+                </div>
+                <p className="text-[11px] sm:text-xs text-slate-400 mt-0.5">
+                  {editingShop
+                    ? 'Update business unit details, contact info, and status.'
+                    : `Create a new independent shop or business unit under ${settings.businessName}.`}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Full-page Add / Edit Shop Form */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
+            <form onSubmit={handleSaveShop} className="p-4 sm:p-6 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Shop Name <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Stationery, Hardware, Clothing"
+                    value={formData.name}
+                    onChange={e => setFormData({ ...formData, name: e.target.value })}
+                    className="w-full bg-slate-950 text-xs text-white px-3.5 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Code / Prefix
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. STAT, HDW"
+                    value={formData.code}
+                    onChange={e => setFormData({ ...formData, code: e.target.value.toUpperCase() })}
+                    className="w-full bg-slate-950 text-xs text-white px-3.5 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Description / Category Focus
+                </label>
+                <textarea
+                  rows={3}
+                  placeholder="e.g. Office supplies, books, printing services..."
+                  value={formData.description}
+                  onChange={e => setFormData({ ...formData, description: e.target.value })}
+                  className="w-full bg-slate-950 text-xs text-white px-3.5 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Address / Location
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Wing B, Ground Floor"
+                    value={formData.address}
+                    onChange={e => setFormData({ ...formData, address: e.target.value })}
+                    className="w-full bg-slate-950 text-xs text-white px-3.5 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Phone / Contact
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. +255 7XX XXX XXX"
+                    value={formData.phone}
+                    onChange={e => setFormData({ ...formData, phone: e.target.value })}
+                    className="w-full bg-slate-950 text-xs text-white px-3.5 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Operational Status
+                </label>
+                <select
+                  value={formData.status}
+                  onChange={e => setFormData({ ...formData, status: e.target.value as ShopStatus })}
+                  className="w-full bg-slate-950 text-xs text-white px-3.5 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="ACTIVE">ACTIVE (Open for POS sales & operations)</option>
+                  <option value="INACTIVE">INACTIVE (Temporarily closed, records preserved)</option>
+                </select>
+              </div>
+
+              <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 text-[11px] text-slate-400 flex items-start gap-2">
+                <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                <span>
+                  Creating or editing a shop immediately enables isolated product inventories, sales counters, and seller assignments.
+                </span>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingShop(null);
+                    setIsCreateModalOpen(false);
+                    setShopsSubTab('list');
+                  }}
+                  className="px-4 py-2.5 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-sm transition"
+                >
+                  {editingShop ? 'Save Changes' : 'Create Shop Unit'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       id="admin-shops-management"
@@ -307,7 +504,7 @@ export const AdminShops: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <Store className="w-5 h-5 sm:w-6 sm:h-6 text-amber-400" />
-              <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">Shops & Units</h2>
+              <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">All Shops (List)</h2>
             </div>
             <p className="text-xs text-slate-400 mt-1">
               {platformAdmin
