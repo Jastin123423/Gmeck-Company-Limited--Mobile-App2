@@ -125,12 +125,19 @@ export const decodeLocationKey = (
 };
 
 export const AdminStores: React.FC = () => {
-  const { currentUser, dbState, addToast, selectedShopId, refreshStoresFromCloud } = useApp();
+  const {
+    currentUser,
+    dbState,
+    addToast,
+    selectedShopId,
+    refreshStoresFromCloud,
+    storesSubTab: activeSubTab,
+    setStoresSubTab: setActiveSubTab,
+    storesNavTick,
+  } = useApp();
 
-  const [activeSubTab, setActiveSubTab] = useState<
-    'stores' | 'inventory' | 'transfer' | 'list' | 'transfer_view'
-  >('stores');
   const [isRefreshingStores, setIsRefreshingStores] = useState(false);
+  const lastHandledNavTickRef = useRef<number>(storesNavTick);
 
   // Create Store Modal / Form state
   const [isStoreModalOpen, setIsStoreModalOpen] = useState(false);
@@ -1245,6 +1252,17 @@ export const AdminStores: React.FC = () => {
     setActiveSubTab('transfer');
   };
 
+  // Sync sidebar / drawer Stores & Transfer dropdown clicks
+  useEffect(() => {
+    if (storesNavTick === lastHandledNavTickRef.current) return;
+    lastHandledNavTickRef.current = storesNavTick;
+    if (activeSubTab === 'transfer') {
+      openNewTransferForm();
+    } else if (activeSubTab === 'list') {
+      setListLocationFilter('ALL');
+    }
+  }, [storesNavTick, activeSubTab]);
+
   const openEditTransferForm = (transfer: StockTransfer & { isLegacy?: boolean }) => {
     if (transfer.isLegacy) {
       addToast({
@@ -2109,52 +2127,6 @@ export const AdminStores: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
-              <div className="flex bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs overflow-x-auto">
-                <button
-                  type="button"
-                  onClick={() => setActiveSubTab('stores')}
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
-                    activeSubTab === 'stores'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Warehouse className="w-3.5 h-3.5" />
-                  <span>Stores ({accessibleStores.length})</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveSubTab('inventory')}
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap ${
-                    activeSubTab === 'inventory'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Package className="w-3.5 h-3.5" />
-                  <span>Inventory</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => openNewTransferForm()}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap text-slate-300 hover:text-white hover:bg-blue-600/20"
-                >
-                  <ArrowRightLeft className="w-3.5 h-3.5 text-blue-400" />
-                  <span>Transfer Stock</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setListLocationFilter('ALL');
-                    setActiveSubTab('list');
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold transition whitespace-nowrap text-slate-300 hover:text-white hover:bg-emerald-600/20"
-                >
-                  <ClipboardList className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>List ({allTransfersConsolidated.length})</span>
-                </button>
-              </div>
-
               <button
                 type="button"
                 onClick={handleManualRefreshStores}
@@ -3144,40 +3116,56 @@ export const AdminStores: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Single-letter & multi-token responsive search bar */}
-                  <div className="relative">
-                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input
-                      ref={transferProductSearchRef}
-                      type="text"
-                      value={productSearch}
-                      disabled={!selectedSourceLocation}
-                      inputMode="search"
-                      autoComplete="off"
-                      onChange={e => {
-                        setProductSearch(e.target.value);
-                        setTransferVisibleLimit(STORE_PAGE_SIZE);
-                      }}
-                      onKeyDown={handleTransferSearchKeyDown}
-                      placeholder={
-                        selectedSourceLocation
-                          ? 'Search product name, SKU, or barcode — tap to add...'
-                          : 'Select Location Source above to search products...'
-                      }
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                    />
-                    {productSearch && (
+                  {/* Single-letter & multi-token responsive search bar + Clear All button */}
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1 min-w-0">
+                      <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        ref={transferProductSearchRef}
+                        type="text"
+                        value={productSearch}
+                        disabled={!selectedSourceLocation}
+                        inputMode="search"
+                        autoComplete="off"
+                        onChange={e => {
+                          setProductSearch(e.target.value);
+                          setTransferVisibleLimit(STORE_PAGE_SIZE);
+                        }}
+                        onKeyDown={handleTransferSearchKeyDown}
+                        placeholder={
+                          selectedSourceLocation
+                            ? 'Search product name, SKU, or barcode — tap to add...'
+                            : 'Select Location Source above to search products...'
+                        }
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                      />
+                      {productSearch && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProductSearch('');
+                            setTransferVisibleLimit(STORE_PAGE_SIZE);
+                            transferProductSearchRef.current?.focus();
+                          }}
+                          aria-label="Clear search"
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                    {selectedTransferEntries.length > 0 && (
                       <button
                         type="button"
                         onClick={() => {
-                          setProductSearch('');
-                          setTransferVisibleLimit(STORE_PAGE_SIZE);
-                          transferProductSearchRef.current?.focus();
+                          setSelectedTransferMap({});
+                          setSelectedPriceMap({});
+                          setSelectedQueueFilter('');
+                          setTransferError('');
                         }}
-                        aria-label="Clear search"
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                        className="shrink-0 px-3 py-2.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 active:bg-rose-500/30 border border-rose-500/30 text-rose-300 text-xs font-semibold whitespace-nowrap transition"
                       >
-                        <X className="w-4 h-4" />
+                        Clear All
                       </button>
                     )}
                   </div>
@@ -3188,15 +3176,7 @@ export const AdminStores: React.FC = () => {
                       Choose a <span className="text-slate-300 font-medium">Location Source</span>{' '}
                       first, then search and tap products to add them below.
                     </p>
-                  ) : !productSearch.trim() ? (
-                    <p className="text-[11px] text-slate-500 px-1">
-                      Type a product name or SKU from{' '}
-                      <span className="text-slate-300 font-medium">
-                        {selectedSourceLocation.name}
-                      </span>{' '}
-                      and tap any match to add it immediately — search clears automatically for the next product.
-                    </p>
-                  ) : (
+                  ) : productSearch.trim() ? (
                     <div className="bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
                       <div className="px-3 py-2 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-2 text-[11px]">
                         <span className="text-slate-400">
@@ -3322,7 +3302,7 @@ export const AdminStores: React.FC = () => {
                         </div>
                       )}
                     </div>
-                  )}
+                  ) : null}
                 </div>
 
                 {/* 4. Downward Selected Products List with Qty, Product Price, Subtotal & Live Total */}
@@ -3339,71 +3319,6 @@ export const AdminStores: React.FC = () => {
 
                   return (
                     <div className="mx-0 px-0 bg-slate-950/90 border-y border-blue-500/35 rounded-none overflow-hidden">
-                      <div className="px-2.5 sm:px-4 py-2.5 bg-blue-950/25 border-b border-blue-500/25 flex flex-wrap items-center justify-between gap-2">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-white">
-                              Selected Products ({transferSelectionSummary.selectedCount.toLocaleString()} / 1,000)
-                            </span>
-                            <span className="sm:hidden text-[10px] font-medium text-blue-300/80">
-                              ← Swipe →
-                            </span>
-                          </div>
-                          <div className="text-[11px] text-slate-400 font-mono tabular-nums">
-                            Total Units:{' '}
-                            <strong className="text-blue-300">
-                              {transferSelectionSummary.totalUnits.toLocaleString()}
-                            </strong>{' '}
-                            · Products Total:{' '}
-                            <strong className="text-emerald-400">
-                              {formatCurrency(
-                                transferSelectionSummary.totalAmount,
-                                settings.currencySymbol
-                              )}
-                            </strong>
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="number"
-                              min="1"
-                              value={bulkTransferQty}
-                              onChange={e => setBulkTransferQty(e.target.value)}
-                              placeholder="Qty"
-                              className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-[11px] font-mono text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                            />
-                            <button
-                              type="button"
-                              onClick={handleApplyBulkQtyToSelected}
-                              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold transition"
-                            >
-                              Apply All
-                            </button>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={handleFillMaxAllSelected}
-                            className="px-2.5 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 text-blue-300 text-[11px] font-semibold transition"
-                          >
-                            All Max
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedTransferMap({});
-                              setSelectedPriceMap({});
-                              setSelectedQueueFilter('');
-                              setTransferError('');
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-[11px] font-semibold transition"
-                          >
-                            Clear All
-                          </button>
-                        </div>
-                      </div>
-
                       {selectedTransferEntries.length > 10 && (
                         <div className="px-2.5 sm:px-4 py-2 border-b border-slate-800/70 bg-slate-950/60">
                           <input

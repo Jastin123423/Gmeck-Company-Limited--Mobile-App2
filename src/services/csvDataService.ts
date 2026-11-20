@@ -12,6 +12,7 @@ import {
 } from '../types';
 import { generateUUID } from '../utils/crypto';
 import type { ImportProgressCallback } from './excelImportService';
+import { hasAdminAccess } from '../utils/permissions';
 
 function yieldToMain(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
@@ -994,8 +995,8 @@ export class CsvDataService {
     currentUser: User,
     onProgress?: ImportProgressCallback
   ): Promise<{ success: boolean; importedCount: number; updatedCount: number; createdCount: number; error?: string }> {
-    if (currentUser.role !== 'ADMIN') {
-      return { success: false, importedCount: 0, updatedCount: 0, createdCount: 0, error: 'Permission Denied: Only Admin can import CSV data.' };
+    if (!hasAdminAccess(currentUser)) {
+      return { success: false, importedCount: 0, updatedCount: 0, createdCount: 0, error: 'Permission Denied: Only Admin or Shop Admin can import CSV data.' };
     }
 
     const { dataType, fileName, parsedRecords } = validationResult;

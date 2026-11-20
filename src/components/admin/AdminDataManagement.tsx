@@ -28,6 +28,7 @@ import { ExcelExportService } from '../../services/excelExportService';
 import { CsvDataType } from '../../types';
 import { formatDateTime } from '../../utils/formatters';
 import { saveTextFileCrossPlatform } from '../../utils/nativeDownload';
+import { getAdminManagedShops, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 type ExportFormat = 'xlsx' | 'csv';
 
@@ -69,10 +70,29 @@ export const AdminDataManagement: React.FC = () => {
   const csvFileInputRef = useRef<HTMLInputElement>(null);
   const excelInputRef = useRef<HTMLInputElement>(null);
 
-  if (!currentUser || currentUser.role !== 'ADMIN') return null;
+  const platformAdmin = isPlatformAdmin(currentUser);
+  const shopAdmin = isShopAdmin(currentUser);
 
-  const shops = dbState.shops || [];
+  if (!currentUser || (!platformAdmin && !shopAdmin)) return null;
+
+  const shops = platformAdmin
+    ? dbState.shops || []
+    : getAdminManagedShops(currentUser, dbState.shops || []);
   const importHistory = dbState.importHistory || [];
+
+  // Auto-default shop selection if a Shop Admin only manages a single shop
+  const effectiveExcelShopId =
+    excelShopId && shops.some(s => s.id === excelShopId)
+      ? excelShopId
+      : !platformAdmin && shops.length === 1
+      ? shops[0].id
+      : '';
+  const effectiveExportShopId =
+    selectedExportShopId && shops.some(s => s.id === selectedExportShopId)
+      ? selectedExportShopId
+      : !platformAdmin && shops.length === 1
+      ? shops[0].id
+      : '';
 
   // ==============================
   // EXCEL IMPORT HANDLERS
@@ -81,7 +101,7 @@ export const AdminDataManagement: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!excelShopId) {
+    if (!effectiveExcelShopId) {
       addToast({
         type: 'warning',
         title: 'Select Shop First',
@@ -141,8 +161,8 @@ export const AdminDataManagement: React.FC = () => {
   const handleCommitExcelImport = async () => {
     if (!excelParseResult || excelParseResult.rows.length === 0) return;
 
-    const selectedShop = shops.find(s => s.id === excelShopId);
-    if (!excelShopId || !selectedShop) {
+    const selectedShop = shops.find(s => s.id === effectiveExcelShopId);
+    if (!effectiveExcelShopId || !selectedShop) {
       addToast({
         type: 'warning',
         title: 'Select Shop First',
@@ -163,7 +183,7 @@ export const AdminDataManagement: React.FC = () => {
     try {
       const res = await ExcelImportService.commitImportAsync(
         excelParseResult.rows,
-        excelShopId,
+        effectiveExcelShopId,
         currentUser,
         undefined,
         progress => {
@@ -205,7 +225,7 @@ export const AdminDataManagement: React.FC = () => {
   const handleExportCsv = async () => {
     const { fileName, csvContent } = CsvDataService.exportDataToCsv(
       selectedExportType,
-      selectedExportShopId || 'ALL'
+      effectiveExportShopId || 'ALL'
     );
     const res = await saveTextFileCrossPlatform(csvContent, fileName, 'text/csv;charset=utf-8;');
     addToast(
@@ -224,7 +244,7 @@ export const AdminDataManagement: React.FC = () => {
   };
 
   const handleExportProductsExcel = () => {
-    if (!selectedExportShopId) {
+    if (!effectiveExportShopId) {
       addToast({
         type: 'warning',
         title: 'Select Shop First',
@@ -233,7 +253,7 @@ export const AdminDataManagement: React.FC = () => {
       return;
     }
 
-    const res = ExcelExportService.exportAllProducts(selectedExportShopId);
+    const res = ExcelExportService.exportAllProducts(effectiveExportShopId);
 
     if (res.success) {
       addToast({
@@ -445,73 +465,79 @@ export const AdminDataManagement: React.FC = () => {
       <div className="flex flex-col gap-3 pb-3.5 border-b border-slate-800">
         <div>
           <div className="flex items-center gap-2">
-            <Database className="w-5 h-5 text-blue-400" />
-            <h2 className="text-lg font-bold text-white tracking-tight">Data Management</h2>
+            <Database className="w-5 h-5 text-lime-400" />
+            <h2 className="text-lg font-bold text-white tracking-tight">Shop Import &amp; Export</h2>
           </div>
           <p className="text-[11px] text-slate-400 mt-0.5">
-            Import from Excel, export CSV datasets, and manage backups
+            {platformAdmin
+              ? 'Upload products from Excel, export CSV/Excel datasets, and manage backups'
+              : 'Upload products from Excel and export datasets for your managed shop'}
           </p>
         </div>
 
-        <button
-          onClick={handleExportBackup}
-          className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 text-xs font-semibold border border-slate-700 transition"
-        >
-          <Download className="w-4 h-4" />
-          <span>Export JSON Backup</span>
-        </button>
+        {platformAdmin && (
+          <button
+            onClick={handleExportBackup}
+            className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 text-xs font-semibold border border-slate-700 transition"
+          >
+            <Download className="w-4 h-4" />
+            <span>Export JSON Backup</span>
+          </button>
+        )}
       </div>
 
       {/* Main Navigation Tabs - Horizontal scroll */}
-      <div className="flex items-center gap-1 border-b border-slate-800 overflow-x-auto pb-px -mx-3.5 px-3.5">
-        <button
-          onClick={() => setActiveSubTab('csv')}
-          className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${
-            activeSubTab === 'csv'
-              ? 'border-blue-500 text-blue-400'
-              : 'border-transparent text-slate-400'
-          }`}
-        >
-          <FileSpreadsheet className="w-4 h-4" />
-          <span>Import / Export</span>
-        </button>
+      {platformAdmin && (
+        <div className="flex items-center gap-1 border-b border-slate-800 overflow-x-auto pb-px -mx-3.5 px-3.5">
+          <button
+            onClick={() => setActiveSubTab('csv')}
+            className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${
+              activeSubTab === 'csv'
+                ? 'border-blue-500 text-blue-400'
+                : 'border-transparent text-slate-400'
+            }`}
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>Import / Export</span>
+          </button>
 
-        <button
-          onClick={() => setActiveSubTab('backup')}
-          className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${
-            activeSubTab === 'backup'
-              ? 'border-blue-500 text-blue-400'
-              : 'border-transparent text-slate-400'
-          }`}
-        >
-          <Layers className="w-4 h-4" />
-          <span>JSON Backup</span>
-        </button>
+          <button
+            onClick={() => setActiveSubTab('backup')}
+            className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${
+              activeSubTab === 'backup'
+                ? 'border-blue-500 text-blue-400'
+                : 'border-transparent text-slate-400'
+            }`}
+          >
+            <Layers className="w-4 h-4" />
+            <span>JSON Backup</span>
+          </button>
 
-        <button
-          onClick={() => setActiveSubTab('quickbooks')}
-          className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${
-            activeSubTab === 'quickbooks'
-              ? 'border-blue-500 text-blue-400'
-              : 'border-transparent text-slate-400'
-          }`}
-        >
-          <Code className="w-4 h-4" />
-          <span>QuickBooks</span>
-        </button>
+          <button
+            onClick={() => setActiveSubTab('quickbooks')}
+            className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${
+              activeSubTab === 'quickbooks'
+                ? 'border-blue-500 text-blue-400'
+                : 'border-transparent text-slate-400'
+            }`}
+          >
+            <Code className="w-4 h-4" />
+            <span>QuickBooks</span>
+          </button>
 
-        <button
-          onClick={() => setActiveSubTab('sync')}
-          className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${
-            activeSubTab === 'sync'
-              ? 'border-blue-500 text-blue-400'
-              : 'border-transparent text-slate-400'
-          }`}
-        >
-          <Cloud className="w-4 h-4" />
-          <span>Sync ({queueStats.pending})</span>
-        </button>
-      </div>
+          <button
+            onClick={() => setActiveSubTab('sync')}
+            className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${
+              activeSubTab === 'sync'
+                ? 'border-blue-500 text-blue-400'
+                : 'border-transparent text-slate-400'
+            }`}
+          >
+            <Cloud className="w-4 h-4" />
+            <span>Sync ({queueStats.pending})</span>
+          </button>
+        </div>
+      )}
 
       {/* SUB-TAB 1: CSV / EXCEL DATA MANAGEMENT */}
       {activeSubTab === 'csv' && (
@@ -580,7 +606,7 @@ export const AdminDataManagement: React.FC = () => {
                       Target Shop <span className="text-rose-400">*</span>
                     </label>
                     <select
-                      value={excelShopId}
+                      value={effectiveExcelShopId}
                       disabled={isParsingExcel || isCommitting}
                       onChange={e => {
                         setExcelShopId(e.target.value);
@@ -608,11 +634,11 @@ export const AdminDataManagement: React.FC = () => {
                       ref={excelInputRef}
                       type="file"
                       accept=".xlsx,.xls,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-                      disabled={!excelShopId || isParsingExcel || isCommitting}
+                      disabled={!effectiveExcelShopId || isParsingExcel || isCommitting}
                       onChange={handleExcelFileSelected}
                       className="w-full bg-slate-950 text-xs text-slate-300 file:mr-2 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-500 cursor-pointer p-1.5 rounded-xl border border-slate-800 disabled:opacity-40"
                     />
-                    {!excelShopId && (
+                    {!effectiveExcelShopId && (
                       <p className="text-[10px] text-amber-400 mt-1">
                         ⚠ Select a shop above to enable upload
                       </p>
@@ -646,9 +672,9 @@ export const AdminDataManagement: React.FC = () => {
                         {excelFile?.name || 'Spreadsheet'} • {excelParseResult.sheetName || 'Sheet1'}
                       </p>
                     </div>
-                    {excelShopId && (
+                    {effectiveExcelShopId && (
                       <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold">
-                        Shop: {shops.find(s => s.id === excelShopId)?.name}
+                        Shop: {shops.find(s => s.id === effectiveExcelShopId)?.name}
                       </span>
                     )}
                   </div>
@@ -720,7 +746,7 @@ export const AdminDataManagement: React.FC = () => {
                     </div>
                   )}
 
-                  {excelParseResult.rows.length > 0 && excelShopId && (
+                  {excelParseResult.rows.length > 0 && effectiveExcelShopId && (
                     <button
                       type="button"
                       onClick={handleCommitExcelImport}
@@ -732,7 +758,7 @@ export const AdminDataManagement: React.FC = () => {
                         {isCommitting
                           ? `Importing (${Math.round(excelProgress?.percent ?? 0)}%)...`
                           : `Confirm & Import (${excelParseResult.rows.length.toLocaleString()} products) to ${
-                              shops.find(s => s.id === excelShopId)?.name || 'Shop'
+                              shops.find(s => s.id === effectiveExcelShopId)?.name || 'Shop'
                             }`}
                       </span>
                     </button>
@@ -778,8 +804,8 @@ export const AdminDataManagement: React.FC = () => {
                     <option value="SALES">🛒 Sales</option>
                     <option value="PURCHASES">🚚 Purchases</option>
                     <option value="EXPENSES">📉 Expenses</option>
-                    <option value="SELLERS">👥 Sellers</option>
-                    <option value="SHOPS">🏪 Shops</option>
+                    {platformAdmin && <option value="SELLERS">👥 Sellers</option>}
+                    {platformAdmin && <option value="SHOPS">🏪 Shops</option>}
                   </select>
                 </div>
 
@@ -788,7 +814,7 @@ export const AdminDataManagement: React.FC = () => {
                     Target Shop <span className="text-rose-400">*</span>
                   </label>
                   <select
-                    value={selectedExportShopId}
+                    value={effectiveExportShopId}
                     onChange={e => setSelectedExportShopId(e.target.value)}
                     className="w-full bg-slate-950 text-xs text-white px-3 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
                   >
@@ -805,7 +831,7 @@ export const AdminDataManagement: React.FC = () => {
               {exportFormat === 'xlsx' && selectedExportType === 'PRODUCTS' ? (
                 <button
                   onClick={handleExportProductsExcel}
-                  disabled={!selectedExportShopId}
+                  disabled={!effectiveExportShopId}
                   className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold py-3 rounded-xl shadow-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Download className="w-4 h-4" />
@@ -814,7 +840,7 @@ export const AdminDataManagement: React.FC = () => {
               ) : (
                 <button
                   onClick={handleExportCsv}
-                  disabled={!selectedExportShopId}
+                  disabled={!effectiveExportShopId}
                   className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold py-3 rounded-xl shadow-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Download className="w-4 h-4" />

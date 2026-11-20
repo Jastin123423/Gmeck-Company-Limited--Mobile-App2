@@ -8,11 +8,17 @@ import { getColorOption } from '../utils/colors';
 import { generateUUID } from '../utils/crypto';
 import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
+export type StoresSubTab = 'stores' | 'inventory' | 'transfer' | 'list' | 'transfer_view';
+
 interface AppContextType {
   currentUser: User | null;
   dbState: DatabaseState;
   activeTab: string;
   setActiveTab: (tab: string) => void;
+  storesSubTab: StoresSubTab;
+  setStoresSubTab: (tab: StoresSubTab) => void;
+  storesNavTick: number;
+  openStoresSubTab: (tab: 'stores' | 'inventory' | 'transfer' | 'list') => void;
   login: (user: User) => void;
   logout: () => void;
   refreshUser: () => void;
@@ -55,6 +61,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
   const [dbState, setDbState] = useState<DatabaseState>(() => db.getState());
   const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [storesSubTab, setStoresSubTab] = useState<StoresSubTab>('stores');
+  const [storesNavTick, setStoresNavTick] = useState<number>(0);
+
+  const openStoresSubTab = (tab: 'stores' | 'inventory' | 'transfer' | 'list') => {
+    setActiveTab('stores');
+    setStoresSubTab(tab);
+    setStoresNavTick(t => t + 1);
+  };
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [activeReceipt, setActiveReceipt] = useState<Sale | null>(null);
   const [syncStatus, setSyncStatus] = useState(SyncService.getSyncStatus());
@@ -549,6 +563,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         dbState,
         activeTab,
         setActiveTab,
+        storesSubTab,
+        setStoresSubTab,
+        storesNavTick,
+        openStoresSubTab,
         login,
         logout,
         refreshUser,

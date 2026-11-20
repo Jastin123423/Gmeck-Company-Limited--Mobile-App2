@@ -102,6 +102,8 @@ const MainLayout: React.FC = () => {
           return <SellerDashboard />;
         case 'stores':
           return shopAdmin ? <AdminStores /> : <SellerDashboard />;
+        case 'data_management':
+          return shopAdmin ? <AdminDataManagement /> : <SellerDashboard />;
         case 'sellers':
           // Only if seller has canManageSellers permission
           if (permissions.canManageSellers) {
