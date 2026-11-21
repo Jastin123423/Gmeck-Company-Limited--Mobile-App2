@@ -21,6 +21,7 @@ import {
   TrendingUp,
   Mic,
   Square,
+  Calendar,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { SalesService } from '../../services/salesService';
@@ -48,6 +49,28 @@ const minQtyForUnit = (unit?: string): number => (isDecimalUnit(unit) ? 0.01 : 1
 const stepSizeForUnit = (unit?: string): number => (isDecimalUnit(unit) ? 0.25 : 1);
 const round3 = (n: number): number => Number(n.toFixed(3));
 
+const getLocalTodayYMD = (): string => {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+const formatSaleDateChip = (ymd: string): string => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return ymd;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+};
+
+const formatSaleDateFull = (ymd: string): string => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return ymd;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
 interface CartItem {
   product: Product;
   quantity: number | string;
@@ -72,6 +95,28 @@ export const NewSalePOS: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
+
+  // Sale Date — always defaults to Today; seller can switch to a previous date to record missed sales
+  const todayYMD = getLocalTodayYMD();
+  const [saleDate, setSaleDate] = useState<string>(() => getLocalTodayYMD());
+  const isBackdatedSale = Boolean(saleDate && saleDate < todayYMD);
+
+  const handleSaleDateChange = (raw: string) => {
+    if (!raw || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      setSaleDate(todayYMD);
+      return;
+    }
+    if (raw > todayYMD) {
+      addToast({
+        type: 'warning',
+        title: 'Future Date Not Allowed',
+        description: 'You can only select today or a previous date.',
+      });
+      setSaleDate(todayYMD);
+      return;
+    }
+    setSaleDate(raw);
+  };
 
   // Voice sale state
   const [isRecording, setIsRecording] = useState(false);
@@ -736,6 +781,7 @@ export const NewSalePOS: React.FC = () => {
         assistantName: settings.enableSalesAssistant
           ? assistantName.trim() || undefined
           : undefined,
+        saleDate: saleDate || todayYMD,
       },
       currentUser
     );
@@ -745,7 +791,9 @@ export const NewSalePOS: React.FC = () => {
     if (result.success && result.sale) {
       addToast({
         type: 'success',
-        title: 'Sale Completed Successfully',
+        title: isBackdatedSale
+          ? `Sale Recorded (${formatSaleDateFull(saleDate)})`
+          : 'Sale Completed Successfully',
         description: `Receipt #${result.sale.receiptNumber} generated. Inventory updated.`,
       });
       showReceipt(result.sale);
@@ -799,33 +847,87 @@ export const NewSalePOS: React.FC = () => {
       </div>
 
       {/* Quick-Add Product Search Bar Above Cart */}
-      <div className="px-3 py-2.5 bg-slate-950/90 border-b border-slate-800/90 shrink-0">
-        <div className="relative flex items-center">
-          <Search className="w-4 h-4 text-blue-400 absolute left-3 pointer-events-none" />
-          <input
-            ref={cartSearchInputRef}
-            id="pos-cart-quick-search"
-            type="text"
-            value={cartSearchQuery}
-            onChange={e => setCartSearchQuery(e.target.value)}
-            onKeyDown={handleCartSearchKeyDown}
-            placeholder="Tafuta kuongeza bidhaa nyingine (jina, SKU)..."
-            className="w-full bg-slate-900 border border-slate-700/90 hover:border-slate-600 focus:border-blue-500 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 transition shadow-inner"
-          />
-          {cartSearchQuery && (
+      <div className="px-3 py-2.5 bg-slate-950/90 border-b border-slate-800/90 shrink-0 space-y-2">
+        <div className="flex items-center gap-1.5">
+          <div className="relative flex items-center flex-1 min-w-0">
+            <Search className="w-4 h-4 text-blue-400 absolute left-3 pointer-events-none" />
+            <input
+              ref={cartSearchInputRef}
+              id="pos-cart-quick-search"
+              type="text"
+              value={cartSearchQuery}
+              onChange={e => setCartSearchQuery(e.target.value)}
+              onKeyDown={handleCartSearchKeyDown}
+              placeholder="Tafuta kuongeza bidhaa nyingine (jina, SKU)..."
+              className="w-full bg-slate-900 border border-slate-700/90 hover:border-slate-600 focus:border-blue-500 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 transition shadow-inner"
+            />
+            {cartSearchQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  setCartSearchQuery('');
+                  cartSearchInputRef.current?.focus();
+                }}
+                aria-label="Clear product search"
+                className="absolute right-2.5 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Calendar Date Picker on Cart Search Bar */}
+          <label
+            title={
+              isBackdatedSale
+                ? `Recording sale for ${formatSaleDateFull(saleDate)} (tap to change)`
+                : 'Sale Date: Today (tap to record a previous date)'
+            }
+            className={`relative shrink-0 inline-flex items-center gap-1.5 px-2.5 py-2.5 rounded-xl border text-[11px] font-semibold cursor-pointer select-none transition active:scale-95 ${
+              isBackdatedSale
+                ? 'bg-amber-500/20 border-amber-500/50 text-amber-300 ring-1 ring-amber-500/30'
+                : 'bg-slate-900 hover:bg-slate-800 border-slate-700/90 text-slate-300'
+            }`}
+          >
+            <Calendar className={`w-4 h-4 shrink-0 ${isBackdatedSale ? 'text-amber-300' : 'text-blue-400'}`} />
+            <span className="whitespace-nowrap">
+              {isBackdatedSale ? formatSaleDateChip(saleDate) : 'Today'}
+            </span>
+            <input
+              type="date"
+              value={saleDate}
+              max={todayYMD}
+              onClick={e => {
+                try {
+                  (e.currentTarget as HTMLInputElement & { showPicker?: () => void }).showPicker?.();
+                } catch {
+                  // Ignore browsers that open picker natively or disallow programmatic showPicker
+                }
+              }}
+              onChange={e => handleSaleDateChange(e.target.value)}
+              aria-label="Select sale date"
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+            />
+          </label>
+        </div>
+
+        {isBackdatedSale && (
+          <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/35 text-amber-200 text-[11px]">
+            <span className="flex items-center gap-1.5 min-w-0 truncate">
+              <Calendar className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="truncate">
+                Previous date: <strong className="text-amber-100">{formatSaleDateFull(saleDate)}</strong>
+              </span>
+            </span>
             <button
               type="button"
-              onClick={() => {
-                setCartSearchQuery('');
-                cartSearchInputRef.current?.focus();
-              }}
-              aria-label="Clear product search"
-              className="absolute right-2.5 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              onClick={() => setSaleDate(todayYMD)}
+              className="shrink-0 px-2 py-0.5 rounded-md bg-amber-500/25 hover:bg-amber-500/40 text-amber-100 font-semibold text-[10px] transition"
             >
-              <X className="w-3.5 h-3.5" />
+              Today
             </button>
-          )}
-        </div>
+          </div>
+        )}
         {isSearchingInCart && (
           <div className="flex items-center justify-between mt-1.5 px-0.5 text-[10px] text-slate-400">
             <span className="flex items-center gap-1">
@@ -1223,14 +1325,20 @@ export const NewSalePOS: React.FC = () => {
           disabled={cart.length === 0 || isProcessing}
           className={`w-full py-3 rounded-xl font-bold text-sm shadow-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 ${
             isCheckoutReady
-              ? 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white shadow-blue-600/25'
+              ? isBackdatedSale
+                ? 'bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white shadow-amber-600/25'
+                : 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white shadow-blue-600/25'
               : assistantNameError && isAssistantMissing
                 ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/25'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
           }`}
         >
           <CheckCircle className="w-5 h-5" />
-          <span>Kamilisha Mauzo ({formatCurrency(totalAmount, settings.currencySymbol)})</span>
+          <span>
+            {isBackdatedSale
+              ? `Kamilisha Mauzo (${formatSaleDateChip(saleDate)} • ${formatCurrency(totalAmount, settings.currencySymbol)})`
+              : `Kamilisha Mauzo (${formatCurrency(totalAmount, settings.currencySymbol)})`}
+          </span>
         </button>
       </div>
         );
@@ -1245,7 +1353,7 @@ export const NewSalePOS: React.FC = () => {
       <div className="flex-1 flex flex-col border-r border-slate-800 overflow-hidden">
         <div className="p-2.5 sm:p-3.5 bg-slate-900 border-b border-slate-800 space-y-2">
           <div className="flex items-center gap-2">
-            <div className="relative flex-1">
+            <div className="relative flex-1 min-w-0">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
                 id="pos-search-input"
@@ -1256,6 +1364,46 @@ export const NewSalePOS: React.FC = () => {
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
               />
             </div>
+
+            {/* Sale Date Calendar Picker (Defaults to Today; allows switching to a previous date) */}
+            <label
+              id="pos-sale-date-picker"
+              title={
+                isBackdatedSale
+                  ? `Sale date: ${formatSaleDateFull(saleDate)} (tap to change)`
+                  : 'Sale date: Today (tap to add previous-date sales)'
+              }
+              className={`relative shrink-0 inline-flex items-center gap-1.5 px-2.5 py-2 rounded-xl border text-xs font-semibold cursor-pointer select-none transition active:scale-95 ${
+                isBackdatedSale
+                  ? 'bg-amber-500/20 border-amber-500/50 text-amber-300 ring-1 ring-amber-500/30 shadow-sm shadow-amber-500/20'
+                  : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200'
+              }`}
+            >
+              <Calendar className={`w-4 h-4 shrink-0 ${isBackdatedSale ? 'text-amber-300' : 'text-blue-400'}`} />
+              <span className="hidden sm:inline whitespace-nowrap">
+                {isBackdatedSale ? formatSaleDateChip(saleDate) : 'Today'}
+              </span>
+              {isBackdatedSale && (
+                <span className="sm:hidden text-[11px] whitespace-nowrap">
+                  {formatSaleDateChip(saleDate)}
+                </span>
+              )}
+              <input
+                type="date"
+                value={saleDate}
+                max={todayYMD}
+                onClick={e => {
+                  try {
+                    (e.currentTarget as HTMLInputElement & { showPicker?: () => void }).showPicker?.();
+                  } catch {
+                    // Ignore browsers that open picker natively or disallow programmatic showPicker
+                  }
+                }}
+                onChange={e => handleSaleDateChange(e.target.value)}
+                aria-label="Sale date"
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              />
+            </label>
 
             {/* Voice Sale mic button */}
             <button
@@ -1299,6 +1447,26 @@ export const NewSalePOS: React.FC = () => {
               />
             </form>
           </div>
+
+          {/* Backdated Sale Notice Banner */}
+          {isBackdatedSale && (
+            <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-amber-500/15 border border-amber-500/35 text-amber-200 text-xs animate-in fade-in">
+              <div className="flex items-center gap-2 min-w-0">
+                <Calendar className="w-4 h-4 text-amber-400 shrink-0" />
+                <span className="truncate">
+                  Recording sales for previous date:{' '}
+                  <strong className="text-amber-100">{formatSaleDateFull(saleDate)}</strong>
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSaleDate(todayYMD)}
+                className="shrink-0 px-2.5 py-1 rounded-lg bg-amber-500/25 hover:bg-amber-500/40 text-amber-100 text-[11px] font-semibold transition"
+              >
+                Back to Today
+              </button>
+            </div>
+          )}
 
           {showMobileBarcode && (
             <form onSubmit={handleBarcodeSubmit} className="lg:hidden flex items-center gap-2 animate-in fade-in">

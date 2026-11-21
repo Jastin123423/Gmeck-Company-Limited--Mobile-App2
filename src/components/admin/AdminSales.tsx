@@ -47,6 +47,7 @@ const SALES_PAGE_SIZE = 15;
 export const AdminSales: React.FC = () => {
   const { currentUser, showReceipt, dbState, addToast } = useApp();
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchCurrentPeriodOnly, setSearchCurrentPeriodOnly] = useState(false);
   const [sellerFilter, setSellerFilter] = useState('ALL');
   const [paymentFilter, setPaymentFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('ALL');
@@ -153,7 +154,7 @@ export const AdminSales: React.FC = () => {
   // Reset per-group pagination when filters change
   useEffect(() => {
     setGroupVisibleCounts({});
-  }, [searchQuery, sellerFilter, paymentFilter, statusFilter, shopFilter, datePreset, startDate, endDate]);
+  }, [searchQuery, searchCurrentPeriodOnly, sellerFilter, paymentFilter, statusFilter, shopFilter, datePreset, startDate, endDate]);
 
   // Reset Edit List pagination when its filters change
   useEffect(() => {
@@ -267,6 +268,7 @@ export const AdminSales: React.FC = () => {
   const activePresetRange = datePreset === 'CUSTOM' ? null : computePresetRange(datePreset);
   const effectiveStartDate = datePreset === 'CUSTOM' ? startDate : activePresetRange?.start || startDate;
   const effectiveEndDate = datePreset === 'CUSTOM' ? endDate : activePresetRange?.end || endDate;
+  const isSearchingAllDates = searchQuery.trim().length > 0 && !searchCurrentPeriodOnly;
 
   const sales = SalesService.getSales(
     {
@@ -275,8 +277,8 @@ export const AdminSales: React.FC = () => {
       paymentMethod: paymentFilter === 'ALL' ? undefined : (paymentFilter as any),
       status: statusFilter === 'ALL' ? undefined : (statusFilter as any),
       shopId: shopFilter === 'ALL' ? undefined : shopFilter,
-      startDate: effectiveStartDate || undefined,
-      endDate: effectiveEndDate || undefined,
+      startDate: isSearchingAllDates ? undefined : effectiveStartDate || undefined,
+      endDate: isSearchingAllDates ? undefined : effectiveEndDate || undefined,
     },
     currentUser
   );
@@ -615,12 +617,12 @@ export const AdminSales: React.FC = () => {
     setIsPrinting(true);
     const ok = await downloadSalesReportPdf(sales, settings, {
       shopLabel: selectedShopName,
-      startDate: effectiveStartDate || undefined,
-      endDate: effectiveEndDate || undefined,
-      periodKey: activePeriodMeta.periodKey,
-      periodTitle: activePeriodMeta.periodTitle,
-      periodLabel: activePeriodMeta.periodLabel,
-      dateRangeText: activePeriodMeta.dateRangeText,
+      startDate: isSearchingAllDates ? undefined : effectiveStartDate || undefined,
+      endDate: isSearchingAllDates ? undefined : effectiveEndDate || undefined,
+      periodKey: isSearchingAllDates ? 'search' : activePeriodMeta.periodKey,
+      periodTitle: isSearchingAllDates ? 'Sales Search Report' : activePeriodMeta.periodTitle,
+      periodLabel: isSearchingAllDates ? 'All Dates (Search)' : activePeriodMeta.periodLabel,
+      dateRangeText: isSearchingAllDates ? 'All Dates' : activePeriodMeta.dateRangeText,
       sellerLabel: selectedSellerLabel,
       paymentLabel: selectedPaymentLabel,
       statusLabel: selectedStatusLabel,
@@ -631,8 +633,8 @@ export const AdminSales: React.FC = () => {
     if (ok) {
       addToast({
         type: 'success',
-        title: `${activePeriodMeta.periodTitle} Downloaded`,
-        description: `Saved ${sales.length} transaction(s) for ${activePeriodMeta.periodLabel} (${activePeriodMeta.dateRangeText}).`,
+        title: `${isSearchingAllDates ? 'Sales Search Report' : activePeriodMeta.periodTitle} Downloaded`,
+        description: `Saved ${sales.length} transaction(s) for ${isSearchingAllDates ? 'All Dates (Search)' : `${activePeriodMeta.periodLabel} (${activePeriodMeta.dateRangeText})`}.`,
       });
     } else {
       addToast({
@@ -1288,7 +1290,9 @@ export const AdminSales: React.FC = () => {
           >
             <Printer className="w-3.5 h-3.5" />
             <span>
-              {isPrinting ? 'Generating...' : `Download PDF (${activePeriodMeta.shortLabel})`}
+              {isPrinting
+                ? 'Generating...'
+                : `Download PDF (${isSearchingAllDates ? 'Search' : activePeriodMeta.shortLabel})`}
             </span>
           </button>
           <button
@@ -1395,15 +1399,56 @@ export const AdminSales: React.FC = () => {
 
       {/* Filter Toolbar */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 mb-4 space-y-2.5 text-xs">
-        <div className="relative">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search receipt, seller, items..."
-            className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
+        <div className="space-y-1.5">
+          <div className="relative">
+            <Search className="w-4 h-4 text-blue-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search any sale: receipt #, product, SKU, seller, shop, amount, payment, date..."
+              className="w-full bg-slate-950 border border-slate-700/90 hover:border-slate-600 focus:border-blue-500 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 transition"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                aria-label="Clear search"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {searchQuery.trim() && (
+            <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/25 text-[11px]">
+              <span className="text-blue-200 truncate">
+                {isSearchingAllDates ? (
+                  <>
+                    Searching <strong className="text-white">all dates</strong> •{' '}
+                    <strong className="text-blue-300">{sales.length}</strong>{' '}
+                    {sales.length === 1 ? 'sale' : 'sales'} found
+                  </>
+                ) : (
+                  <>
+                    Searching <strong className="text-white">{activePeriodMeta.shortLabel}</strong> only •{' '}
+                    <strong className="text-blue-300">{sales.length}</strong>{' '}
+                    {sales.length === 1 ? 'sale' : 'sales'} found
+                  </>
+                )}
+              </span>
+              <button
+                type="button"
+                onClick={() => setSearchCurrentPeriodOnly(prev => !prev)}
+                className="shrink-0 px-2 py-0.5 rounded-md bg-blue-600/25 hover:bg-blue-600/40 text-blue-200 font-semibold text-[10px] transition"
+              >
+                {isSearchingAllDates
+                  ? `Limit to ${activePeriodMeta.shortLabel}`
+                  : 'Search All Dates'}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Date Preset Pills */}
@@ -1515,6 +1560,7 @@ export const AdminSales: React.FC = () => {
           <button
             onClick={() => {
               setSearchQuery('');
+              setSearchCurrentPeriodOnly(false);
               setSellerFilter('ALL');
               setPaymentFilter('ALL');
               setStatusFilter('ALL');

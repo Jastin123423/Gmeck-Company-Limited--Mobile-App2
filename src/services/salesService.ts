@@ -26,6 +26,7 @@ export class SalesService {
       amountReceived: number;
       notes?: string;
       assistantName?: string;
+      saleDate?: string; // Optional YYYY-MM-DD local date (defaults to today; allows previous dates)
     },
     currentUser: User
   ): { success: boolean; sale?: Sale; error?: string } {
@@ -127,6 +128,39 @@ export class SalesService {
       item.saleId = saleId;
     });
 
+    const now = new Date();
+    const todayLocalYMD = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    let saleCreatedAt = now.toISOString();
+    let isBackdated = false;
+    let backdatedLabel = '';
+
+    if (params.saleDate && /^\d{4}-\d{2}-\d{2}$/.test(params.saleDate.trim())) {
+      const requestedYMD = params.saleDate.trim();
+      if (requestedYMD > todayLocalYMD) {
+        return {
+          success: false,
+          error: 'Sale date cannot be in the future. Please select today or a previous date.',
+        };
+      }
+      if (requestedYMD < todayLocalYMD) {
+        const [y, m, d] = requestedYMD.split('-').map(Number);
+        const backdated = new Date(
+          y,
+          m - 1,
+          d,
+          now.getHours(),
+          now.getMinutes(),
+          now.getSeconds(),
+          now.getMilliseconds()
+        );
+        if (!Number.isNaN(backdated.getTime())) {
+          saleCreatedAt = backdated.toISOString();
+          isBackdated = true;
+          backdatedLabel = requestedYMD;
+        }
+      }
+    }
+
     const newSale: Sale = {
       id: saleId,
       receiptNumber,
@@ -146,7 +180,7 @@ export class SalesService {
       change: Number(change.toFixed(2)),
       status: 'COMPLETED',
       notes: params.notes?.trim(),
-      createdAt: new Date().toISOString(),
+      createdAt: saleCreatedAt,
       items: saleItems,
     };
 
@@ -160,7 +194,7 @@ export class SalesService {
         return {
           ...synced,
           currentStock: nextFloorQty,
-          updatedAt: new Date().toISOString(),
+          updatedAt: now.toISOString(),
         };
       }
       return prod;
@@ -179,11 +213,13 @@ export class SalesService {
         changeQty: -item.quantity,
         newQty: prod.currentStock - item.quantity,
         type: 'SALE' as const,
-        reason: `Sale ${receiptNumber} (${currentUser.name}) [${shop.name}]`,
+        reason: isBackdated
+          ? `Sale ${receiptNumber} (${currentUser.name}) [${shop.name}] - Backdated ${backdatedLabel}`
+          : `Sale ${receiptNumber} (${currentUser.name}) [${shop.name}]`,
         referenceId: saleId,
         userId: currentUser.id,
         userName: currentUser.name,
-        createdAt: new Date().toISOString(),
+        createdAt: saleCreatedAt,
       };
     });
     db.saveMovements([...newMovements, ...db.getMovements()]);
@@ -197,7 +233,7 @@ export class SalesService {
       entityId: saleId,
       payload: newSale,
       status: 'PENDING',
-      createdAt: new Date().toISOString(),
+      createdAt: now.toISOString(),
     });
 
     db.addAuditLog({
@@ -205,10 +241,10 @@ export class SalesService {
       userId: currentUser.id,
       userName: currentUser.name,
       action: 'CREATE_SALE',
-      details: `Completed sale ${receiptNumber} in [${shop.name}] for ${settings.currencySymbol}${finalTotal.toFixed(2)} (${params.paymentMethod})`,
+      details: `Completed sale ${receiptNumber} in [${shop.name}] for ${settings.currencySymbol}${finalTotal.toFixed(2)} (${params.paymentMethod})${isBackdated ? ` [Backdated to ${backdatedLabel}]` : ''}`,
       entityType: 'SALE',
       entityId: saleId,
-      timestamp: new Date().toISOString(),
+      timestamp: now.toISOString(),
     });
 
     saleItems.forEach(item => {
@@ -717,17 +753,93 @@ export class SalesService {
       sales = sales.filter(s => s.paymentMethod === options.paymentMethod);
     }
 
-    if (options.search) {
-      const q = options.search.toLowerCase().trim();
-      sales = sales.filter(
-        s =>
-          s.receiptNumber.toLowerCase().includes(q) ||
-          s.sellerName.toLowerCase().includes(q) ||
-          (s.shopName && s.shopName.toLowerCase().includes(q)) ||
-          s.items.some(
-            i => i.productName.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q)
-          )
-      );
+    const rawSearch = (options.search || '').trim();
+    const normalizedSearch = rawSearch.toLowerCase();
+    const cleanedReceiptQuery = normalizedSearch.replace(/^#/, '').replace(/[\s-]+/g, '');
+
+    if (rawSearch) {
+      const productsById = new Map((db.getProducts() || []).map(p => [p.id, p]));
+      const shopsById = new Map((db.getShops() || []).map(sh => [sh.id, sh]));
+
+      const tokens = normalizedSearch
+        .split(/\s+/)
+        .map(t => t.replace(/^#/, '').replace(/,/g, '').trim())
+        .filter(Boolean);
+
+      const paymentAliases: Record<string, string> = {
+        MOBILE_MONEY: 'mobile money mpesa m-pesa tigopesa tigo pesa airtel halopesa',
+        CASH: 'cash pesa taslimu',
+        CARD: 'card visa mastercard pos',
+        BANK: 'bank transfer crdb nmb',
+        OTHER: 'other',
+      };
+
+      const buildSaleHaystack = (s: Sale): string => {
+        const shopObj = shopsById.get(s.shopId);
+        const createdDate = new Date(s.createdAt);
+        let dateTokens = s.createdAt || '';
+        if (!Number.isNaN(createdDate.getTime())) {
+          const y = createdDate.getFullYear();
+          const m = String(createdDate.getMonth() + 1).padStart(2, '0');
+          const d = String(createdDate.getDate()).padStart(2, '0');
+          const shortMonth = createdDate.toLocaleDateString('en-US', { month: 'short' });
+          const longMonth = createdDate.toLocaleDateString('en-US', { month: 'long' });
+          dateTokens = `${y}-${m}-${d} ${d}/${m}/${y} ${d}-${m}-${y} ${d} ${shortMonth} ${y} ${shortMonth} ${d} ${longMonth} ${createdDate.toLocaleDateString()} ${createdDate.toLocaleTimeString()}`;
+        }
+
+        const receiptRaw = s.receiptNumber || '';
+        const receiptCompact = receiptRaw.replace(/[\s-]+/g, '');
+        const totalNum = Number(s.total || 0);
+        const subtotalNum = Number(s.subtotal || 0);
+        const receivedNum = Number(s.amountReceived || 0);
+        const statusExtra = s.status === 'VOIDED' ? 'voided cancelled canceled' : 'completed paid';
+
+        const itemParts = (s.items || []).map(i => {
+          const prod = productsById.get(i.productId);
+          return [
+            i.productName || '',
+            i.sku || '',
+            prod?.barcode || '',
+            (prod as any)?.variation || '',
+            (prod as any)?.brand || '',
+            String(i.quantity ?? ''),
+            String(i.unitPrice ?? ''),
+            String(i.total ?? ''),
+          ].join(' ');
+        });
+
+        return [
+          receiptRaw,
+          receiptCompact,
+          s.sellerName || '',
+          s.assistantName || '',
+          s.shopName || '',
+          shopObj?.name || '',
+          shopObj?.code || '',
+          s.paymentMethod || '',
+          (s.paymentMethod || '').replace(/_/g, ' '),
+          paymentAliases[s.paymentMethod] || '',
+          s.status || '',
+          statusExtra,
+          s.notes || '',
+          s.voidReason || '',
+          s.voidedBy || '',
+          String(totalNum),
+          String(Math.round(totalNum)),
+          String(subtotalNum),
+          String(receivedNum),
+          dateTokens,
+          ...itemParts,
+        ]
+          .join(' ')
+          .toLowerCase()
+          .replace(/,/g, '');
+      };
+
+      sales = sales.filter(s => {
+        const hay = buildSaleHaystack(s);
+        return tokens.every(tok => hay.includes(tok));
+      });
     }
 
     if (options.startDate) {
@@ -750,7 +862,16 @@ export class SalesService {
       }
     }
 
-    return sales;
+    return [...sales].sort((a, b) => {
+      if (cleanedReceiptQuery) {
+        const aRec = (a.receiptNumber || '').toLowerCase().replace(/[\s-]+/g, '');
+        const bRec = (b.receiptNumber || '').toLowerCase().replace(/[\s-]+/g, '');
+        const aExact = aRec === cleanedReceiptQuery ? 0 : aRec.includes(cleanedReceiptQuery) ? 1 : 2;
+        const bExact = bRec === cleanedReceiptQuery ? 0 : bRec.includes(cleanedReceiptQuery) ? 1 : 2;
+        if (aExact !== bExact) return aExact - bExact;
+      }
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
   }
 
   public static getSaleByReceipt(receiptNumber: string, currentUser: User): Sale | undefined {
