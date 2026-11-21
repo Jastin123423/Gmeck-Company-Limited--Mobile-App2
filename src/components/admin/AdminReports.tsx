@@ -72,23 +72,32 @@ interface DeviationRow {
 
 type DeviationDirection = 'ALL' | 'ABOVE' | 'BELOW' | 'BELOW_COST';
 
+function toLocalYMD(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function computeRange(period: ReportPeriod, customFrom: string, customTo: string) {
   const now = new Date();
+  now.setHours(0, 0, 0, 0);
   if (period === 'today') {
-    const d = now.toISOString().slice(0, 10);
+    const d = toLocalYMD(now);
     return { from: d, to: d };
   }
   if (period === 'week') {
-    const past = new Date(now.getTime() - 7 * 86400000);
-    return { from: past.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) };
+    const past = new Date(now);
+    past.setDate(past.getDate() - 6);
+    return { from: toLocalYMD(past), to: toLocalYMD(now) };
   }
   if (period === 'month') {
     const past = new Date(now.getFullYear(), now.getMonth(), 1);
-    return { from: past.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) };
+    return { from: toLocalYMD(past), to: toLocalYMD(now) };
   }
   if (period === 'year') {
     const startOfYear = new Date(now.getFullYear(), 0, 1);
-    return { from: startOfYear.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) };
+    return { from: toLocalYMD(startOfYear), to: toLocalYMD(now) };
   }
   return { from: customFrom || undefined, to: customTo || undefined };
 }
@@ -742,16 +751,26 @@ export const AdminReports: React.FC = () => {
   // ─────────────────────────────────────────────────────────────
   const handlePrintReport = async () => {
     setIsPrinting(true);
+    const periodLabelMap: Record<ReportPeriod, { key: string; label: string }> = {
+      today: { key: 'day', label: 'Day (Today)' },
+      week: { key: 'week', label: 'Week (Last 7 Days)' },
+      month: { key: 'month', label: 'Month (This Month)' },
+      year: { key: 'year', label: 'Year (This Year)' },
+      custom: { key: 'custom', label: 'Custom Range' },
+    };
+    const pMeta = periodLabelMap[incomePeriod];
     const ok = await downloadFinancialReportPdf(incomeSummary, settings, {
       shopLabel: selectedShopName,
       from: incomeRange.from || undefined,
       to: incomeRange.to || undefined,
+      periodKey: pMeta.key,
+      periodLabel: pMeta.label,
     });
     if (ok) {
       addToast({
         type: 'success',
-        title: 'Financial PDF Downloaded',
-        description: `Saved financial report for ${selectedShopName} to Downloads.`,
+        title: `Financial PDF Downloaded (${pMeta.label})`,
+        description: `Saved ${pMeta.label} financial report for ${selectedShopName} to Downloads.`,
       });
     } else {
       addToast({

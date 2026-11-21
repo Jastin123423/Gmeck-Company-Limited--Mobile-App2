@@ -279,6 +279,15 @@ export const NewSalePOS: React.FC = () => {
       const existing = prev.find(item => item.product.id === product.id);
       const step = stepSizeForUnit(product.unit);
 
+      window.setTimeout(() => {
+        if (cartListRef.current) {
+          cartListRef.current.scrollTo({
+            top: 0,
+            behavior: 'smooth',
+          });
+        }
+      }, 60);
+
       if (existing) {
         const currentQty = qtyNum(existing.quantity);
         const nextQty = round3(currentQty + step);
@@ -290,32 +299,20 @@ export const NewSalePOS: React.FC = () => {
           });
           return prev;
         }
-        return prev.map(item =>
-          item.product.id === product.id
-            ? { ...item, quantity: nextQty }
-            : item
-        );
+        const updatedItem = { ...existing, quantity: nextQty };
+        return [updatedItem, ...prev.filter(item => item.product.id !== product.id)];
       }
 
       const initialQty = isDecimalUnit(product.unit) ? 0.25 : 1;
 
-      window.setTimeout(() => {
-        if (cartListRef.current) {
-          cartListRef.current.scrollTo({
-            top: cartListRef.current.scrollHeight,
-            behavior: 'smooth',
-          });
-        }
-      }, 60);
-
       return [
-        ...prev,
         {
           product,
           quantity: initialQty,
           unitPrice: product.sellingPrice,
           discount: 0,
         },
+        ...prev,
       ];
     });
   };
@@ -358,13 +355,15 @@ export const NewSalePOS: React.FC = () => {
         if (existingIdx >= 0) {
           const merged = round3(qtyNum(next[existingIdx].quantity) + safeQty);
           const capped = Math.min(merged, product.currentStock);
-          next[existingIdx] = {
+          const updatedItem = {
             ...next[existingIdx],
             quantity: capped,
             unitPrice: it.unitPrice ?? next[existingIdx].unitPrice,
           };
+          next.splice(existingIdx, 1);
+          next.unshift(updatedItem);
         } else {
-          next.push({
+          next.unshift({
             product,
             quantity: round3(safeQty),
             unitPrice: it.unitPrice ?? product.sellingPrice,
@@ -375,6 +374,15 @@ export const NewSalePOS: React.FC = () => {
 
       return next;
     });
+
+    window.setTimeout(() => {
+      if (cartListRef.current) {
+        cartListRef.current.scrollTo({
+          top: 0,
+          behavior: 'smooth',
+        });
+      }
+    }, 60);
 
     if (warnings.length) {
       setVoiceWarning(warnings.join(' • '));

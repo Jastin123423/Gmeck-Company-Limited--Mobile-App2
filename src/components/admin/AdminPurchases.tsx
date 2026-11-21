@@ -314,6 +314,9 @@ export const AdminPurchases: React.FC = () => {
   const [notes, setNotes] = useState('');
   const [items, setItems] = useState<PurchaseItemInput[]>([]);
   const [formError, setFormError] = useState('');
+  const [purchaseProductSearch, setPurchaseProductSearch] = useState('');
+  const [purchaseSearchLimit, setPurchaseSearchLimit] = useState(PAGE_SIZE);
+  const purchaseProductSearchRef = useRef<HTMLInputElement>(null);
 
   if (!currentUser) return null;
 
@@ -339,6 +342,29 @@ export const AdminPurchases: React.FC = () => {
   const shopProducts = visibleProducts.filter(
     p => !purchaseShopId || purchaseShopId === 'ALL' || p.shopId === purchaseShopId
   );
+
+  const purchaseProductPool = shopProducts.length > 0 ? shopProducts : visibleProducts;
+
+  const purchaseSearchResults = useMemo(() => {
+    const raw = purchaseProductSearch.trim().toLowerCase();
+    if (!raw) return [];
+    const tokens = raw.split(/\s+/).filter(Boolean);
+    const matches = purchaseProductPool.filter(p => {
+      const hay = `${p.name || ''} ${p.sku || ''} ${(p as any).barcode || ''} ${(p as any).variation || ''}`.toLowerCase();
+      return tokens.every(tok => hay.includes(tok));
+    });
+    return matches.sort((a, b) => {
+      const aName = (a.name || '').toLowerCase();
+      const bName = (b.name || '').toLowerCase();
+      const aExact = aName === raw || (a.sku || '').toLowerCase() === raw ? 0 : 1;
+      const bExact = bName === raw || (b.sku || '').toLowerCase() === raw ? 0 : 1;
+      if (aExact !== bExact) return aExact - bExact;
+      const aStarts = aName.startsWith(raw) ? 0 : 1;
+      const bStarts = bName.startsWith(raw) ? 0 : 1;
+      if (aStarts !== bStarts) return aStarts - bStarts;
+      return aName.localeCompare(bName);
+    });
+  }, [purchaseProductPool, purchaseProductSearch]);
 
   // ✅ Filter (search) → sort newest first → memo
   const purchases = useMemo(() => {
@@ -477,16 +503,9 @@ export const AdminPurchases: React.FC = () => {
     setIsEditMode(false);
     setEditingPurchase(null);
 
-    const prodList = visibleProducts.filter(p => p.shopId === targetShop);
-    const initialProd = prodList[0] || visibleProducts[0];
-
-    setItems([
-      {
-        productId: initialProd?.id || '',
-        quantity: '',
-        unitCost: initialProd?.purchasePrice ? initialProd.purchasePrice.toString() : '',
-      },
-    ]);
+    setItems([]);
+    setPurchaseProductSearch('');
+    setPurchaseSearchLimit(PAGE_SIZE);
     setFormError('');
   };
 
@@ -537,21 +556,61 @@ export const AdminPurchases: React.FC = () => {
       }))
     );
 
+    setPurchaseProductSearch('');
+    setPurchaseSearchLimit(PAGE_SIZE);
     setFormError('');
     setPurchasesSubTab('add');
   };
 
-  const addItemRow = () => {
-    const prodList = visibleProducts.filter(p => !purchaseShopId || p.shopId === purchaseShopId);
-    const prod = prodList[0] || visibleProducts[0];
-    setItems(prev => [
-      ...prev,
-      {
-        productId: prod?.id || '',
-        quantity: '',
-        unitCost: prod?.purchasePrice ? prod.purchasePrice.toString() : '',
-      },
-    ]);
+  const handleSelectPurchaseProduct = (product: (typeof visibleProducts)[number]) => {
+    setFormError('');
+    setItems(prev => {
+      const existingIdx = prev.findIndex(i => i.productId === product.id);
+      if (existingIdx >= 0) {
+        const existing = prev[existingIdx];
+        const currentQty = parseFloat(String(existing.quantity)) || 0;
+        const nextQty = currentQty > 0 ? currentQty + 1 : 1;
+        const updatedItem: PurchaseItemInput = {
+          ...existing,
+          quantity: String(Number(nextQty.toFixed(3))),
+        };
+        return [updatedItem, ...prev.filter((_, idx) => idx !== existingIdx)];
+      }
+      return [
+        {
+          productId: product.id,
+          quantity: '1',
+          unitCost:
+            product.purchasePrice !== undefined && product.purchasePrice !== null && product.purchasePrice > 0
+              ? product.purchasePrice.toString()
+              : '',
+        },
+        ...prev,
+      ];
+    });
+    setPurchaseProductSearch('');
+    setPurchaseSearchLimit(PAGE_SIZE);
+    window.setTimeout(() => {
+      purchaseProductSearchRef.current?.focus();
+    }, 30);
+  };
+
+  const handlePurchaseSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && purchaseProductSearch.trim()) {
+      e.preventDefault();
+      const q = purchaseProductSearch.trim().toLowerCase();
+      const exact = purchaseSearchResults.find(
+        p =>
+          (p.sku || '').toLowerCase() === q ||
+          ((p as any).barcode || '').toLowerCase() === q ||
+          (p.name || '').toLowerCase() === q
+      );
+      if (exact) {
+        handleSelectPurchaseProduct(exact);
+      } else if (purchaseSearchResults.length === 1) {
+        handleSelectPurchaseProduct(purchaseSearchResults[0]);
+      }
+    }
   };
 
   const removeItemRow = (idx: number) => {
@@ -903,6 +962,8 @@ export const AdminPurchases: React.FC = () => {
                     onChange={e => {
                       const nextShopId = e.target.value;
                       setPurchaseShopId(nextShopId);
+                      setPurchaseProductSearch('');
+                      setPurchaseSearchLimit(PAGE_SIZE);
                       const nextStores = (dbState.stores || []).filter(
                         st => st.shopId === nextShopId && st.status === 'ACTIVE'
                       );
@@ -1011,103 +1072,281 @@ export const AdminPurchases: React.FC = () => {
               </div>
             </div>
 
-            {/* Line Items */}
-            <div>
-              <div className="flex items-center justify-between mb-2.5">
-                <label className="block text-slate-300 font-bold uppercase tracking-wider text-[11px]">
-                  {isEditMode ? 'Correct Items' : 'Received Items'} ({items.length})
-                </label>
-                <button
-                  type="button"
-                  onClick={addItemRow}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600/15 hover:bg-blue-600/25 border border-blue-500/30 text-blue-400 hover:text-blue-300 font-semibold transition"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add Item</span>
-                </button>
-              </div>
-
+            {/* Line Items — Quick Search Bar (Tap a Product to Arrange on List, No Add Item Button) */}
+            <div className="space-y-3">
               {isEditMode && (
-                <div className="mb-3 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[11px]">
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[11px]">
                   Changing quantities recalculates stock automatically. Old quantities will be
                   reversed and new ones applied.
                 </div>
               )}
 
-              <div className="space-y-3">
-                {items.map((item, idx) => (
-                  <div
-                    key={idx}
-                    className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5"
+              {/* Search Bar + Clear All */}
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1 min-w-0">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    ref={purchaseProductSearchRef}
+                    type="text"
+                    value={purchaseProductSearch}
+                    inputMode="search"
+                    autoComplete="off"
+                    onChange={e => {
+                      setPurchaseProductSearch(e.target.value);
+                      setPurchaseSearchLimit(PAGE_SIZE);
+                    }}
+                    onKeyDown={handlePurchaseSearchKeyDown}
+                    placeholder="Search product name, SKU, or barcode — tap to add..."
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition"
+                  />
+                  {purchaseProductSearch && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPurchaseProductSearch('');
+                        setPurchaseSearchLimit(PAGE_SIZE);
+                        purchaseProductSearchRef.current?.focus();
+                      }}
+                      aria-label="Clear search"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                {items.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setItems([]);
+                      setFormError('');
+                    }}
+                    className="shrink-0 px-3 py-2.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 active:bg-rose-500/30 border border-rose-500/30 text-rose-300 text-xs font-semibold whitespace-nowrap transition"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                        Item #{idx + 1}
-                      </span>
-                      {items.length > 1 && (
+                    Clear All
+                  </button>
+                )}
+              </div>
+
+              {/* Matching Results Dropdown — shown strictly when user types in search */}
+              {purchaseProductSearch.trim() && (
+                <div className="bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+                  <div className="px-3 py-2 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-2 text-[11px]">
+                    <span className="text-slate-400">
+                      <strong className="text-white">
+                        {purchaseSearchResults.length.toLocaleString()}
+                      </strong>{' '}
+                      match{purchaseSearchResults.length === 1 ? '' : 'es'} for &ldquo;
+                      {purchaseProductSearch.trim()}&rdquo; — tap a product to add
+                    </span>
+                  </div>
+
+                  {purchaseSearchResults.length === 0 ? (
+                    <div className="py-7 px-4 text-center">
+                      <Package className="w-8 h-8 mx-auto text-slate-600 mb-1.5" />
+                      <p className="text-xs font-medium text-slate-400">
+                        No products match &ldquo;{purchaseProductSearch.trim()}&rdquo;
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Try a shorter search or verify the product SKU.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/70 overscroll-contain">
+                      {purchaseSearchResults.slice(0, purchaseSearchLimit).map(p => {
+                        const existingItem = items.find(i => i.productId === p.id);
+                        const isAdded = Boolean(existingItem);
+
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => handleSelectPurchaseProduct(p)}
+                            className={`w-full text-left px-3 py-3 flex items-center justify-between gap-3 transition active:bg-slate-800/80 ${
+                              isAdded
+                                ? 'bg-blue-950/25 hover:bg-blue-950/40'
+                                : 'hover:bg-slate-900/80'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-xs sm:text-sm font-medium text-white truncate">
+                                  {p.name}
+                                </span>
+                                {(p as any).variation && (
+                                  <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[10px]">
+                                    {(p as any).variation}
+                                  </span>
+                                )}
+                                {isAdded && (
+                                  <span className="px-1.5 py-0.5 rounded bg-blue-500/20 border border-blue-500/30 text-blue-300 text-[10px] font-semibold">
+                                    In List ({existingItem?.quantity || 0})
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center flex-wrap gap-x-2.5 gap-y-0.5 mt-1 text-[11px] text-slate-400 font-mono">
+                                <span>{p.sku}</span>
+                                <span className="text-blue-400">
+                                  Shop: {(p.currentStock ?? 0).toLocaleString()} {p.unit}
+                                </span>
+                                {(p.storeStock ?? 0) > 0 && (
+                                  <span className="text-violet-400">
+                                    Store: {(p.storeStock ?? 0).toLocaleString()} {p.unit}
+                                  </span>
+                                )}
+                                <span className="text-emerald-400/90">
+                                  Buy: {formatCurrency(Number(p.purchasePrice || 0), settings.currencySymbol)}
+                                </span>
+                              </div>
+                            </div>
+
+                            <span
+                              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold shrink-0 transition ${
+                                isAdded
+                                  ? 'bg-blue-600/25 text-blue-200 border border-blue-500/40'
+                                  : 'bg-blue-600 text-white shadow-sm'
+                              }`}
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>{isAdded ? '+1' : 'Add'}</span>
+                            </span>
+                          </button>
+                        );
+                      })}
+
+                      {purchaseSearchResults.length > purchaseSearchLimit && (
                         <button
                           type="button"
-                          onClick={() => removeItemRow(idx)}
-                          className="text-slate-500 hover:text-rose-400 inline-flex items-center gap-1 text-[11px] font-medium transition"
+                          onClick={() => setPurchaseSearchLimit(prev => prev + PAGE_SIZE)}
+                          className="w-full py-2.5 text-center text-xs font-semibold text-blue-400 hover:bg-slate-900 transition"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Remove</span>
+                          Show More ({purchaseSearchResults.length - purchaseSearchLimit} remaining)
                         </button>
                       )}
                     </div>
+                  )}
+                </div>
+              )}
 
-                    <ProductSearchSelect
-                      products={shopProducts.length > 0 ? shopProducts : visibleProducts}
-                      value={item.productId}
-                      onChange={productId => updateItemRow(idx, 'productId', productId)}
-                      currencySymbol={settings.currencySymbol}
-                      placeholder="Search name or SKU..."
-                    />
+              {/* Selected Purchase Products List */}
+              {items.length === 0 ? (
+                <div className="p-6 rounded-xl bg-slate-950/60 border border-dashed border-slate-800 text-center">
+                  <Package className="w-7 h-7 mx-auto text-slate-600 mb-1.5" />
+                  <p className="text-xs font-medium text-slate-400">No products added yet</p>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Search above and tap a product to add it to this purchase.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between px-0.5">
+                    <span className="text-slate-400 font-bold uppercase tracking-wider text-[11px]">
+                      {isEditMode ? 'Purchase Items' : 'Selected Products'} ({items.length})
+                    </span>
+                  </div>
 
-                    <div className="grid grid-cols-3 gap-2.5 items-end">
-                      <div>
-                        <label className="block text-slate-400 text-[10px] mb-1">Quantity</label>
-                        <input
-                          type="number"
-                          inputMode="decimal"
-                          min="0"
-                          value={item.quantity}
-                          onChange={e => updateItemRow(idx, 'quantity', e.target.value)}
-                          placeholder="0"
-                          className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs text-center focus:outline-none focus:ring-1 focus:ring-blue-500"
-                        />
-                      </div>
+                  {items.map((item, idx) => {
+                    const matchedProduct = visibleProducts.find(p => p.id === item.productId);
+                    const qtyVal = parseFloat(item.quantity as string) || 0;
+                    const costVal = parseFloat(item.unitCost as string) || 0;
+                    const lineTotal = qtyVal * costVal;
 
-                      <div>
-                        <label className="block text-slate-400 text-[10px] mb-1">
-                          Buy Price ({settings.currencySymbol})
-                        </label>
-                        <input
-                          type="number"
-                          inputMode="decimal"
-                          step="0.01"
-                          min="0"
-                          value={item.unitCost}
-                          onChange={e => updateItemRow(idx, 'unitCost', e.target.value)}
-                          placeholder="0"
-                          className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                        />
-                      </div>
+                    return (
+                      <div
+                        key={item.productId || idx}
+                        className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">
+                                #{idx + 1}
+                              </span>
+                              <span className="text-xs sm:text-sm font-semibold text-white truncate">
+                                {matchedProduct?.name || 'Unknown Product'}
+                              </span>
+                              {(matchedProduct as any)?.variation && (
+                                <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 text-[10px]">
+                                  {(matchedProduct as any).variation}
+                                </span>
+                              )}
+                            </div>
+                            {matchedProduct && (
+                              <div className="flex items-center flex-wrap gap-x-2.5 gap-y-0.5 mt-1 text-[10px] text-slate-400 font-mono">
+                                <span>{matchedProduct.sku}</span>
+                                <span className="text-blue-400">
+                                  Shop: {(matchedProduct.currentStock ?? 0).toLocaleString()}{' '}
+                                  {matchedProduct.unit}
+                                </span>
+                                {(matchedProduct.storeStock ?? 0) > 0 && (
+                                  <span className="text-violet-400">
+                                    Store: {(matchedProduct.storeStock ?? 0).toLocaleString()}{' '}
+                                    {matchedProduct.unit}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </div>
 
-                      <div className="text-right pb-1.5">
-                        <label className="block text-slate-500 text-[10px] mb-1">Subtotal</label>
-                        <div className="font-mono font-bold text-emerald-400 text-xs sm:text-sm truncate">
-                          {formatCurrency(
-                            (parseFloat(item.quantity as string) || 0) *
-                              (parseFloat(item.unitCost as string) || 0),
-                            settings.currencySymbol
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => removeItemRow(idx)}
+                            className="shrink-0 p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition"
+                            title="Remove product"
+                            aria-label="Remove product"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2.5 items-end pt-1 border-t border-slate-900">
+                          <div>
+                            <label className="block text-slate-400 text-[10px] mb-1">
+                              Quantity{matchedProduct?.unit ? ` (${matchedProduct.unit})` : ''}
+                            </label>
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              min="0"
+                              step="any"
+                              value={item.quantity}
+                              onChange={e => updateItemRow(idx, 'quantity', e.target.value)}
+                              onFocus={e => e.target.select()}
+                              placeholder="0"
+                              className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs text-center focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-slate-400 text-[10px] mb-1">
+                              Buy Price ({settings.currencySymbol})
+                            </label>
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              step="0.01"
+                              min="0"
+                              value={item.unitCost}
+                              onChange={e => updateItemRow(idx, 'unitCost', e.target.value)}
+                              onFocus={e => e.target.select()}
+                              placeholder="0"
+                              className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            />
+                          </div>
+
+                          <div className="text-right pb-1.5">
+                            <label className="block text-slate-500 text-[10px] mb-1">Subtotal</label>
+                            <div className="font-mono font-bold text-emerald-400 text-xs sm:text-sm truncate">
+                              {formatCurrency(lineTotal, settings.currencySymbol)}
+                            </div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2">

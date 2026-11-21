@@ -100,17 +100,14 @@ export class ReportService {
       filteredSales = filteredSales.filter(s => s.sellerId === currentUser.id);
     }
 
-    // Filter by date range if specified
-    if (dateRange.from) {
-      const fromTime = new Date(dateRange.from).getTime();
-      filteredSales = filteredSales.filter(s => new Date(s.createdAt).getTime() >= fromTime);
-      filteredExpenses = filteredExpenses.filter(e => new Date(e.date).getTime() >= fromTime);
-    }
-
-    if (dateRange.to) {
-      const toTime = new Date(dateRange.to).getTime() + 86400000;
-      filteredSales = filteredSales.filter(s => new Date(s.createdAt).getTime() <= toTime);
-      filteredExpenses = filteredExpenses.filter(e => new Date(e.date).getTime() <= toTime);
+    // Filter by date range if specified (strict local day boundaries)
+    if (dateRange.from || dateRange.to) {
+      filteredSales = filteredSales.filter(s =>
+        this.isDateInLocalRange(s.createdAt, dateRange.from, dateRange.to)
+      );
+      filteredExpenses = filteredExpenses.filter(e =>
+        this.isDateInLocalRange(e.date || e.createdAt, dateRange.from, dateRange.to)
+      );
     }
 
     const totalGrossSales = filteredSales.reduce((sum, s) => sum + (s.total || 0), 0);

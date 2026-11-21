@@ -731,13 +731,23 @@ export class SalesService {
     }
 
     if (options.startDate) {
-      const start = new Date(options.startDate).getTime();
-      sales = sales.filter(s => new Date(s.createdAt).getTime() >= start);
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(options.startDate.trim());
+      const start = m
+        ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 0, 0, 0, 0).getTime()
+        : new Date(options.startDate).getTime();
+      if (!Number.isNaN(start)) {
+        sales = sales.filter(s => new Date(s.createdAt).getTime() >= start);
+      }
     }
 
     if (options.endDate) {
-      const end = new Date(options.endDate).getTime() + 86400000;
-      sales = sales.filter(s => new Date(s.createdAt).getTime() <= end);
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(options.endDate.trim());
+      const end = m
+        ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 23, 59, 59, 999).getTime()
+        : new Date(options.endDate).getTime() + 86399999;
+      if (!Number.isNaN(end)) {
+        sales = sales.filter(s => new Date(s.createdAt).getTime() <= end);
+      }
     }
 
     return sales;

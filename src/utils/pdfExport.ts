@@ -53,6 +53,18 @@ export function pdfSafe(value: unknown): string {
     .trim();
 }
 
+function pdfSafeMultiline(lines: unknown[]): string {
+  return lines
+    .map(line => pdfSafe(line))
+    .filter(Boolean)
+    .join('\n');
+}
+
+function formatQtyCompact(qty: number): string {
+  if (!Number.isFinite(qty)) return '0';
+  return Number.isInteger(qty) ? String(qty) : Number(qty.toFixed(3)).toString();
+}
+
 function sanitizeFilename(name: string): string {
   const cleaned = pdfSafe(name)
     .toLowerCase()
@@ -203,40 +215,184 @@ function applyPageFooters(doc: jsPDF, leftText: string) {
 // =====================================================================
 // 1. SALES REPORT PDF (AdminSales.tsx)
 // =====================================================================
+export interface SalesReportPdfMeta {
+  shopLabel: string;
+  startDate?: string;
+  endDate?: string;
+  periodKey?: 'day' | 'week' | 'month' | 'year' | 'custom' | string;
+  periodTitle?: string;
+  periodLabel?: string;
+  dateRangeText?: string;
+  sellerLabel?: string;
+  paymentLabel?: string;
+  statusLabel?: string;
+  searchQuery?: string;
+  totalRevenue: number;
+  totalProfit: number;
+}
+
+function resolveSalesPeriodMeta(meta: SalesReportPdfMeta) {
+  const key = (meta.periodKey || '').toLowerCase();
+  const defaultTitle =
+    key === 'day' || key === 'today'
+      ? 'Daily Sales Report'
+      : key === 'week'
+        ? 'Weekly Sales Report'
+        : key === 'month'
+          ? 'Monthly Sales Report'
+          : key === 'year'
+            ? 'Yearly Sales Report'
+            : key === 'custom'
+              ? 'Custom Period Sales Report'
+              : 'Sales & Transactions Report';
+
+  const defaultLabel =
+    key === 'day' || key === 'today'
+      ? 'Day (Today)'
+      : key === 'week'
+        ? 'Week (Last 7 Days)'
+        : key === 'month'
+          ? 'Month (This Month)'
+          : key === 'year'
+            ? 'Year (This Year)'
+            : key === 'custom'
+              ? 'Custom Range'
+              : 'Selected Period';
+
+  const rangeText =
+    meta.dateRangeText ||
+    (meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate} to ${meta.endDate}`
+      : `${meta.startDate || 'Beginning'} to ${meta.endDate || 'Present'}`);
+
+  return {
+    key: key || 'report',
+    title: meta.periodTitle || defaultTitle,
+    label: meta.periodLabel || defaultLabel,
+    rangeText,
+  };
+}
+
 export function buildSalesReportPdfDoc(
   sales: Sale[],
   settings: BusinessSettings,
-  meta: {
-    shopLabel: string;
-    startDate?: string;
-    endDate?: string;
-    totalRevenue: number;
-    totalProfit: number;
-  }
+  meta: SalesReportPdfMeta
 ): jsPDF {
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Sales Control';
+  const period = resolveSalesPeriodMeta(meta);
+
+  const completedSales = sales.filter(s => s.status === 'COMPLETED');
+  const voidedCount = sales.length - completedSales.length;
+
+  // Aggregate product performance strictly from completed sales in the selected period
+  const productAggMap = new Map<
+    string,
+    {
+      name: string;
+      sku: string;
+      orders: number;
+      qtySold: number;
+      revenue: number;
+      cost: number;
+      profit: number;
+    }
+  >();
+
+  let totalUnitsSold = 0;
+
+  for (const sale of completedSales) {
+    const seenInSale = new Set<string>();
+    for (const item of sale.items || []) {
+      const qty = Number(item.quantity) || 0;
+      const unitPrice = Number(item.unitPrice) || 0;
+      const purchasePrice = Number(item.purchasePrice) || 0;
+      const lineTotal =
+        item.total !== undefined && item.total !== null
+          ? Number(item.total)
+          : Math.max(0, qty * unitPrice - (Number(item.discount) || 0));
+      const lineCost = qty * purchasePrice;
+      const lineProfit = lineTotal - lineCost;
+
+      totalUnitsSold += qty;
+
+      const prodKey = item.productId || `${item.productName}::${item.sku || ''}`;
+      const existing = productAggMap.get(prodKey);
+      if (existing) {
+        existing.qtySold += qty;
+        existing.revenue += lineTotal;
+        existing.cost += lineCost;
+        existing.profit += lineProfit;
+        if (!seenInSale.has(prodKey)) {
+          existing.orders += 1;
+          seenInSale.add(prodKey);
+        }
+      } else {
+        productAggMap.set(prodKey, {
+          name: item.productName || 'Unnamed Product',
+          sku: item.sku || '-',
+          orders: 1,
+          qtySold: qty,
+          revenue: lineTotal,
+          cost: lineCost,
+          profit: lineProfit,
+        });
+        seenInSale.add(prodKey);
+      }
+    }
+  }
+
+  const aggregatedProducts = Array.from(productAggMap.values()).sort(
+    (a, b) => b.revenue - a.revenue || b.qtySold - a.qtySold
+  );
+
+  const marginPct =
+    meta.totalRevenue > 0
+      ? `${((meta.totalProfit / meta.totalRevenue) * 100).toFixed(1)}% margin`
+      : '0.0% margin';
+
+  const activeFiltersList: string[] = [];
+  if (meta.sellerLabel && meta.sellerLabel !== 'All Sellers') {
+    activeFiltersList.push(`Seller: ${meta.sellerLabel}`);
+  }
+  if (meta.paymentLabel && meta.paymentLabel !== 'All Payment Methods') {
+    activeFiltersList.push(`Pay: ${meta.paymentLabel}`);
+  }
+  if (meta.statusLabel && meta.statusLabel !== 'All Statuses') {
+    activeFiltersList.push(`Status: ${meta.statusLabel}`);
+  }
+  if (meta.searchQuery?.trim()) {
+    activeFiltersList.push(`Search: "${meta.searchQuery.trim()}"`);
+  }
+  const filtersSummary =
+    activeFiltersList.length > 0 ? activeFiltersList.join(' | ') : 'All Sellers, Payments & Statuses';
 
   let y = drawBanner(
     doc,
-    'Sales & Transactions Report',
+    period.title,
     `${biz}${settings?.tagline ? ` | ${settings.tagline}` : ''}`,
     [
+      `Period: ${period.label} (${period.rangeText})`,
       `Generated: ${new Date().toLocaleString()}`,
-      settings?.phone ? `Phone: ${settings.phone}` : '',
-      settings?.address || '',
+      settings?.phone ? `Phone: ${settings.phone}` : settings?.address || '',
     ].filter(Boolean),
     COLORS.blueDark
   );
 
   y = drawMetaStrip(doc, y, [
-    { label: 'Scope', value: meta.shopLabel },
+    { label: 'Scope / Shop', value: meta.shopLabel },
+    { label: 'Selected Period', value: `${period.label} - ${period.rangeText}` },
+    { label: 'Active Filters', value: filtersSummary },
     {
-      label: 'Period',
-      value: `${meta.startDate || 'Beginning'} to ${meta.endDate || 'Present'}`,
+      label: 'Records',
+      value:
+        voidedCount > 0
+          ? `${completedSales.length} completed, ${voidedCount} voided`
+          : `${completedSales.length} completed sale(s)`,
     },
-    { label: 'Transactions', value: `${sales.length} record(s)` },
   ]);
 
   y = drawKpiRow(doc, y, [
@@ -246,56 +402,137 @@ export function buildSalesReportPdfDoc(
       color: COLORS.blue,
     },
     {
-      label: 'Gross Profit',
+      label: `Gross Profit (${marginPct})`,
       value: formatCurrency(meta.totalProfit, symbol),
       color: COLORS.emerald,
     },
     {
+      label: 'Products Sold',
+      value: `${formatQtyCompact(totalUnitsSold)} units (${aggregatedProducts.length} items)`,
+      color: COLORS.violet,
+    },
+    {
       label: 'Transactions',
-      value: String(sales.length),
+      value: `${sales.length} total`,
       color: COLORS.navy,
     },
   ]);
 
-  const rows =
+  // Section 1 Heading: Transactions Detail
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(...COLORS.slate900);
+  doc.text(
+    pdfSafe(`1. Sales Transactions (${period.label} | ${period.rangeText})`),
+    12,
+    y + 2.5
+  );
+  y += 5;
+
+  const txRows =
     sales.length === 0
-      ? [['-', '-', '-', '-', 'No sales found for selected filter', '-', '-', '-', '-']]
-      : sales.map(sale => [
-          pdfSafe(sale.receiptNumber),
-          pdfSafe(formatDateTime(sale.createdAt)),
-          pdfSafe(sale.shopName || 'N/A'),
-          pdfSafe(sale.sellerName),
-          pdfSafe(
-            (sale.items || []).map(i => `${i.quantity}x ${i.productName}`).join(', ')
-          ),
-          pdfSafe(sale.paymentMethod),
-          pdfSafe(sale.status),
-          pdfSafe(formatCurrency(sale.total, symbol)),
-          pdfSafe(
-            sale.status === 'COMPLETED'
-              ? formatCurrency(sale.grossProfit, symbol)
-              : formatCurrency(0, symbol)
-          ),
-        ]);
+      ? [
+          [
+            '-',
+            '-',
+            `No sales transactions found for ${period.label} (${period.rangeText})`,
+            '-',
+            '-',
+            '-',
+            '-',
+          ],
+        ]
+      : sales.map(sale => {
+          const items = sale.items || [];
+          const productLines =
+            items.length === 0
+              ? ['-']
+              : items.map((item, idx) => {
+                  const qtyStr = formatQtyCompact(Number(item.quantity) || 0);
+                  const unitStr = formatCurrency(Number(item.unitPrice) || 0, symbol);
+                  const lineTotal =
+                    item.total !== undefined && item.total !== null
+                      ? Number(item.total)
+                      : Math.max(0, (Number(item.quantity) || 0) * (Number(item.unitPrice) || 0) - (Number(item.discount) || 0));
+                  const lineTotalStr = formatCurrency(lineTotal, symbol);
+                  const prefix = items.length > 1 ? `${idx + 1}. ` : '';
+                  return `${prefix}${item.productName}   |   ${qtyStr} x ${unitStr}  =  ${lineTotalStr}`;
+                });
+
+          const receiptAndDate = pdfSafeMultiline([
+            `#${sale.receiptNumber}`,
+            formatDateTime(sale.createdAt),
+          ]);
+
+          const shopAndSeller = pdfSafeMultiline([
+            sale.shopName || 'N/A',
+            `Seller: ${sale.sellerName || 'N/A'}`,
+            sale.assistantName ? `Asst: ${sale.assistantName}` : '',
+          ]);
+
+          return [
+            receiptAndDate,
+            shopAndSeller,
+            pdfSafeMultiline(productLines),
+            pdfSafe((sale.paymentMethod || '').replace(/_/g, ' ')),
+            pdfSafe(sale.status),
+            pdfSafe(formatCurrency(sale.total, symbol)),
+            pdfSafe(
+              sale.status === 'COMPLETED'
+                ? formatCurrency(sale.grossProfit, symbol)
+                : formatCurrency(0, symbol)
+            ),
+          ];
+        });
 
   autoTable(doc, {
     startY: y,
     margin: { left: 12, right: 12, bottom: 15 },
+    rowPageBreak: 'avoid',
     head: [
-      ['Receipt #', 'Date & Time', 'Shop', 'Seller', 'Products Sold', 'Payment', 'Status', 'Total', 'Profit'],
+      [
+        'Receipt & Date',
+        'Shop & Seller',
+        'Products Sold (Item | Qty x Price = Subtotal)',
+        'Payment',
+        'Status',
+        'Total',
+        'Profit',
+      ],
     ],
-    body: rows,
-    styles: { fontSize: 7.5, cellPadding: 2, textColor: COLORS.slate900, overflow: 'linebreak' },
-    headStyles: { fillColor: COLORS.navy, textColor: COLORS.white, fontStyle: 'bold' },
+    body: txRows,
+    styles: {
+      fontSize: 7.5,
+      cellPadding: { top: 2.8, right: 2.5, bottom: 2.8, left: 2.5 },
+      textColor: COLORS.slate900,
+      overflow: 'linebreak',
+      valign: 'top',
+      lineColor: COLORS.slate200,
+      lineWidth: 0.2,
+    },
+    headStyles: {
+      fillColor: COLORS.navy,
+      textColor: COLORS.white,
+      fontStyle: 'bold',
+      fontSize: 7.5,
+      valign: 'middle',
+      cellPadding: { top: 3, right: 2.5, bottom: 3, left: 2.5 },
+    },
     alternateRowStyles: { fillColor: COLORS.slate50 },
     columnStyles: {
-      4: { cellWidth: 68 },
-      6: { halign: 'center' },
-      7: { halign: 'right', fontStyle: 'bold' },
-      8: { halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+      0: { cellWidth: 38 },
+      1: { cellWidth: 38 },
+      2: { cellWidth: 102, fontSize: 7.3 },
+      3: { cellWidth: 22, halign: 'center' },
+      4: { cellWidth: 21, halign: 'center' },
+      5: { cellWidth: 26, halign: 'right', fontStyle: 'bold' },
+      6: { cellWidth: 26, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
     },
     didParseCell: data => {
-      if (data.section === 'body' && data.column.index === 6) {
+      if (data.section === 'body' && data.column.index === 0) {
+        data.cell.styles.fontStyle = 'bold';
+      }
+      if (data.section === 'body' && data.column.index === 4) {
         const val = String(data.cell.raw || '');
         if (val === 'VOIDED') {
           data.cell.styles.textColor = COLORS.rose;
@@ -308,24 +545,123 @@ export function buildSalesReportPdfDoc(
     },
   });
 
-  applyPageFooters(doc, `${biz} - Sales Report (${meta.shopLabel})`);
+  // Section 2: Professionally Organized Products Sold Breakdown for the Selected Period
+  if (aggregatedProducts.length > 0) {
+    let nextY = getLastTableY(doc, y + 30) + 9;
+    const pageH = doc.internal.pageSize.getHeight();
+    if (nextY > pageH - 38) {
+      doc.addPage();
+      nextY = 16;
+    }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...COLORS.slate900);
+    doc.text(
+      pdfSafe(
+        `2. Products Sold Breakdown - ${period.label} (${aggregatedProducts.length} product(s) | ${formatQtyCompact(totalUnitsSold)} total units)`
+      ),
+      12,
+      nextY
+    );
+
+    const productSummaryRows = aggregatedProducts.map((p, idx) => {
+      const avgUnitPrice = p.qtySold > 0 ? p.revenue / p.qtySold : 0;
+      const itemMargin = p.revenue > 0 ? `${((p.profit / p.revenue) * 100).toFixed(1)}%` : '0.0%';
+      return [
+        String(idx + 1),
+        pdfSafe(p.name),
+        pdfSafe(p.sku),
+        String(p.orders),
+        formatQtyCompact(p.qtySold),
+        pdfSafe(formatCurrency(avgUnitPrice, symbol)),
+        pdfSafe(formatCurrency(p.revenue, symbol)),
+        pdfSafe(`${formatCurrency(p.profit, symbol)} (${itemMargin})`),
+      ];
+    });
+
+    const totalProductRev = aggregatedProducts.reduce((s, p) => s + p.revenue, 0);
+    const totalProductProfit = aggregatedProducts.reduce((s, p) => s + p.profit, 0);
+
+    autoTable(doc, {
+      startY: nextY + 3.5,
+      margin: { left: 12, right: 12, bottom: 15 },
+      rowPageBreak: 'avoid',
+      head: [
+        ['#', 'Product Name', 'SKU', 'Sales', 'Qty Sold', 'Avg Price', 'Total Revenue', 'Gross Profit'],
+      ],
+      body: productSummaryRows,
+      foot: [
+        [
+          '',
+          `PERIOD TOTAL (${aggregatedProducts.length} PRODUCTS)`,
+          '',
+          String(completedSales.length),
+          formatQtyCompact(totalUnitsSold),
+          '',
+          pdfSafe(formatCurrency(totalProductRev, symbol)),
+          pdfSafe(formatCurrency(totalProductProfit, symbol)),
+        ],
+      ],
+      styles: {
+        fontSize: 7.8,
+        cellPadding: { top: 2.6, right: 2.5, bottom: 2.6, left: 2.5 },
+        textColor: COLORS.slate900,
+        overflow: 'linebreak',
+        valign: 'middle',
+        lineColor: COLORS.slate200,
+        lineWidth: 0.2,
+      },
+      headStyles: {
+        fillColor: COLORS.blueDark,
+        textColor: COLORS.white,
+        fontStyle: 'bold',
+        fontSize: 7.8,
+      },
+      footStyles: {
+        fillColor: COLORS.slate100,
+        textColor: COLORS.slate900,
+        fontStyle: 'bold',
+        fontSize: 8,
+      },
+      alternateRowStyles: { fillColor: COLORS.slate50 },
+      columnStyles: {
+        0: { cellWidth: 11, halign: 'center', textColor: COLORS.slate500 },
+        1: { cellWidth: 80, fontStyle: 'bold' },
+        2: { cellWidth: 32, textColor: COLORS.slate700 },
+        3: { cellWidth: 18, halign: 'right' },
+        4: { cellWidth: 24, halign: 'right', fontStyle: 'bold', textColor: COLORS.blueDark },
+        5: { cellWidth: 32, halign: 'right' },
+        6: { cellWidth: 36, halign: 'right', fontStyle: 'bold' },
+        7: { cellWidth: 40, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+      },
+    });
+  }
+
+  applyPageFooters(
+    doc,
+    `${biz} - ${period.title} (${meta.shopLabel} | ${period.rangeText})`
+  );
   return doc;
 }
 
 export async function downloadSalesReportPdf(
   sales: Sale[],
   settings: BusinessSettings,
-  meta: {
-    shopLabel: string;
-    startDate?: string;
-    endDate?: string;
-    totalRevenue: number;
-    totalProfit: number;
-  }
+  meta: SalesReportPdfMeta
 ): Promise<boolean> {
   const doc = buildSalesReportPdfDoc(sales, settings, meta);
-  const stamp = new Date().toISOString().slice(0, 10);
-  return triggerPdfDownload(doc, `sales_report_${meta.shopLabel}_${stamp}.pdf`);
+  const period = resolveSalesPeriodMeta(meta);
+  const dateTag =
+    meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate}_to_${meta.endDate}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfDownload(
+    doc,
+    `sales_report_${period.key}_${meta.shopLabel}_${dateTag}.pdf`
+  );
 }
 
 // =====================================================================
@@ -870,19 +1206,27 @@ export async function downloadLossReportPdf(
 export async function downloadFinancialReportPdf(
   incomeSummary: any,
   settings: BusinessSettings,
-  meta: { shopLabel: string; from?: string; to?: string }
+  meta: { shopLabel: string; from?: string; to?: string; periodKey?: string; periodLabel?: string }
 ): Promise<boolean> {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Financial Report';
   const s = incomeSummary || {};
+  const periodLabel = meta.periodLabel || 'Selected Period';
+  const periodKey = meta.periodKey || 'period';
+  const rangeStr =
+    meta.from && meta.to
+      ? meta.from === meta.to
+        ? meta.from
+        : `${meta.from} to ${meta.to}`
+      : `${meta.from || 'Beginning'} to ${meta.to || 'Present'}`;
 
   let y = drawBanner(
     doc,
-    'Financial Performance Report',
+    `Financial Report (${periodLabel})`,
     `${biz} | ${meta.shopLabel}`,
     [
-      `Period: ${meta.from || 'Beginning'} to ${meta.to || 'Present'}`,
+      `Period: ${periodLabel} (${rangeStr})`,
       `Generated: ${new Date().toLocaleString()}`,
     ],
     COLORS.blueDark
@@ -917,7 +1261,7 @@ export async function downloadFinancialReportPdf(
         pdfSafe(formatCurrency(s.netProfit || 0, symbol)),
       ],
     ],
-    styles: { fontSize: 8.5, cellPadding: 2.4 },
+    styles: { fontSize: 8.5, cellPadding: 2.6, lineColor: COLORS.slate200, lineWidth: 0.2 },
     headStyles: { fillColor: COLORS.navy, textColor: COLORS.white, fontStyle: 'bold' },
     columnStyles: { 1: { halign: 'right', fontStyle: 'bold' } },
   });
@@ -931,11 +1275,11 @@ export async function downloadFinancialReportPdf(
   ]);
   if (shopRows.length > 0) {
     autoTable(doc, {
-      startY: getLastTableY(doc, y + 40) + 6,
+      startY: getLastTableY(doc, y + 40) + 7,
       margin: { left: 12, right: 12, bottom: 15 },
       head: [['Shop Performance', 'Sales', 'Revenue', 'Gross Profit']],
       body: shopRows,
-      styles: { fontSize: 8, cellPadding: 2.2 },
+      styles: { fontSize: 8, cellPadding: 2.5, lineColor: COLORS.slate200, lineWidth: 0.2 },
       headStyles: { fillColor: COLORS.blueDark, textColor: COLORS.white, fontStyle: 'bold' },
       alternateRowStyles: { fillColor: COLORS.slate50 },
       columnStyles: {
@@ -946,27 +1290,45 @@ export async function downloadFinancialReportPdf(
     });
   }
 
-  // Product Profitability
-  const prodRows = (s.topProducts || []).map((p: any) => [
-    pdfSafe(p.name),
-    pdfSafe(p.sku),
-    String(p.unitsSold || 0),
-    pdfSafe(formatCurrency(p.revenue || 0, symbol)),
-    pdfSafe(formatCurrency(p.profit || 0, symbol)),
-  ]);
+  // Product Profitability (Organized & Spacious)
+  const prodRows = (s.topProducts || []).map((p: any, idx: number) => {
+    const rev = Number(p.revenue || 0);
+    const prof = Number(p.profit || 0);
+    const margin = rev > 0 ? `${((prof / rev) * 100).toFixed(1)}%` : '0.0%';
+    return [
+      String(idx + 1),
+      pdfSafe(p.name),
+      pdfSafe(p.sku || '-'),
+      formatQtyCompact(Number(p.unitsSold || 0)),
+      pdfSafe(formatCurrency(rev, symbol)),
+      pdfSafe(formatCurrency(prof, symbol)),
+      margin,
+    ];
+  });
   if (prodRows.length > 0) {
     autoTable(doc, {
-      startY: getLastTableY(doc, y + 70) + 6,
+      startY: getLastTableY(doc, y + 70) + 7,
       margin: { left: 12, right: 12, bottom: 15 },
-      head: [['Top Products', 'SKU', 'Units', 'Revenue', 'Profit']],
+      rowPageBreak: 'avoid',
+      head: [['#', 'Product Name', 'SKU', 'Qty Sold', 'Revenue', 'Profit', 'Margin']],
       body: prodRows,
-      styles: { fontSize: 8, cellPadding: 2.2 },
+      styles: {
+        fontSize: 7.8,
+        cellPadding: { top: 2.6, right: 2.4, bottom: 2.6, left: 2.4 },
+        overflow: 'linebreak',
+        lineColor: COLORS.slate200,
+        lineWidth: 0.2,
+      },
       headStyles: { fillColor: COLORS.navy, textColor: COLORS.white, fontStyle: 'bold' },
       alternateRowStyles: { fillColor: COLORS.slate50 },
       columnStyles: {
-        2: { halign: 'right' },
-        3: { halign: 'right', fontStyle: 'bold' },
-        4: { halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+        0: { cellWidth: 10, halign: 'center', textColor: COLORS.slate500 },
+        1: { cellWidth: 58, fontStyle: 'bold' },
+        2: { cellWidth: 26, textColor: COLORS.slate700 },
+        3: { cellWidth: 18, halign: 'right', fontStyle: 'bold', textColor: COLORS.blueDark },
+        4: { cellWidth: 28, halign: 'right', fontStyle: 'bold' },
+        5: { cellWidth: 28, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+        6: { cellWidth: 18, halign: 'right', textColor: COLORS.slate700 },
       },
     });
   }
@@ -980,11 +1342,11 @@ export async function downloadFinancialReportPdf(
   ]);
   if (sellerRows.length > 0) {
     autoTable(doc, {
-      startY: getLastTableY(doc, y + 100) + 6,
+      startY: getLastTableY(doc, y + 100) + 7,
       margin: { left: 12, right: 12, bottom: 15 },
       head: [['Seller Performance', 'Orders', 'Revenue', 'Profit']],
       body: sellerRows,
-      styles: { fontSize: 8, cellPadding: 2.2 },
+      styles: { fontSize: 8, cellPadding: 2.5, lineColor: COLORS.slate200, lineWidth: 0.2 },
       headStyles: { fillColor: COLORS.violet, textColor: COLORS.white, fontStyle: 'bold' },
       alternateRowStyles: { fillColor: COLORS.slate50 },
       columnStyles: {
@@ -995,9 +1357,14 @@ export async function downloadFinancialReportPdf(
     });
   }
 
-  applyPageFooters(doc, `${biz} - Financial Report (${meta.shopLabel})`);
-  const stamp = new Date().toISOString().slice(0, 10);
-  return triggerPdfDownload(doc, `financial_report_${meta.shopLabel}_${stamp}.pdf`);
+  applyPageFooters(doc, `${biz} - Financial Report (${periodLabel} | ${meta.shopLabel})`);
+  const dateTag =
+    meta.from && meta.to
+      ? meta.from === meta.to
+        ? meta.from
+        : `${meta.from}_to_${meta.to}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfDownload(doc, `financial_report_${periodKey}_${meta.shopLabel}_${dateTag}.pdf`);
 }
 
 // =====================================================================

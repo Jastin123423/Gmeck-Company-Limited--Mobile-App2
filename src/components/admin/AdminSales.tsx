@@ -52,37 +52,6 @@ export const AdminSales: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [shopFilter, setShopFilter] = useState('ALL');
   const [datePreset, setDatePreset] = useState<DatePreset>('TODAY');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
-  const [isPrinting, setIsPrinting] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-
-  // Per-group pagination (default 15 per group, expand +15)
-  const [groupVisibleCounts, setGroupVisibleCounts] = useState<Record<string, number>>({});
-
-  // Full-page Edit List (Approved & Rejected edits)
-  const [showEditListPage, setShowEditListPage] = useState(false);
-  const [editListSearch, setEditListSearch] = useState('');
-  const [editListStatus, setEditListStatus] = useState<'ALL' | 'APPROVED' | 'REJECTED'>('ALL');
-  const [editListShopFilter, setEditListShopFilter] = useState('ALL');
-  const [editListPreset, setEditListPreset] = useState<EditListPreset>('ALL');
-  const [editListStartDate, setEditListStartDate] = useState('');
-  const [editListEndDate, setEditListEndDate] = useState('');
-  const [editListVisibleCount, setEditListVisibleCount] = useState(SALES_PAGE_SIZE);
-
-  // Void Dialog
-  const [voidingSale, setVoidingSale] = useState<Sale | null>(null);
-  const [voidReason, setVoidReason] = useState('');
-  const [isVoiding, setIsVoiding] = useState(false);
-
-  // Edit Dialog
-  const [editingSale, setEditingSale] = useState<Sale | null>(null);
-  const [editItems, setEditItems] = useState<CartItemInput[]>([]);
-  const [editReason, setEditReason] = useState('');
-  const [isEditing, setIsEditing] = useState(false);
-
-  // Pending edit requests toggle
-  const [showEditRequests, setShowEditRequests] = useState(false);
 
   // ---------- Date helpers ----------
   const toYMD = (d: Date): string => {
@@ -120,6 +89,39 @@ export const AdminSales: React.FC = () => {
 
     return null; // CUSTOM
   };
+
+  const initialTodayRange = computePresetRange('TODAY')!;
+  const [startDate, setStartDate] = useState<string>(() => initialTodayRange.start);
+  const [endDate, setEndDate] = useState<string>(() => initialTodayRange.end);
+  const [isPrinting, setIsPrinting] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Per-group pagination (default 15 per group, expand +15)
+  const [groupVisibleCounts, setGroupVisibleCounts] = useState<Record<string, number>>({});
+
+  // Full-page Edit List (Approved & Rejected edits)
+  const [showEditListPage, setShowEditListPage] = useState(false);
+  const [editListSearch, setEditListSearch] = useState('');
+  const [editListStatus, setEditListStatus] = useState<'ALL' | 'APPROVED' | 'REJECTED'>('ALL');
+  const [editListShopFilter, setEditListShopFilter] = useState('ALL');
+  const [editListPreset, setEditListPreset] = useState<EditListPreset>('ALL');
+  const [editListStartDate, setEditListStartDate] = useState('');
+  const [editListEndDate, setEditListEndDate] = useState('');
+  const [editListVisibleCount, setEditListVisibleCount] = useState(SALES_PAGE_SIZE);
+
+  // Void Dialog
+  const [voidingSale, setVoidingSale] = useState<Sale | null>(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [isVoiding, setIsVoiding] = useState(false);
+
+  // Edit Dialog
+  const [editingSale, setEditingSale] = useState<Sale | null>(null);
+  const [editItems, setEditItems] = useState<CartItemInput[]>([]);
+  const [editReason, setEditReason] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
+
+  // Pending edit requests toggle
+  const [showEditRequests, setShowEditRequests] = useState(false);
 
   // Apply preset → compute start/end (except CUSTOM)
   useEffect(() => {
@@ -261,6 +263,11 @@ export const AdminSales: React.FC = () => {
 
   const salesById = new Map<string, Sale>((dbState.sales || []).map(s => [s.id, s]));
 
+  // Always derive the active date range deterministically from the selected preset
+  const activePresetRange = datePreset === 'CUSTOM' ? null : computePresetRange(datePreset);
+  const effectiveStartDate = datePreset === 'CUSTOM' ? startDate : activePresetRange?.start || startDate;
+  const effectiveEndDate = datePreset === 'CUSTOM' ? endDate : activePresetRange?.end || endDate;
+
   const sales = SalesService.getSales(
     {
       search: searchQuery,
@@ -268,8 +275,8 @@ export const AdminSales: React.FC = () => {
       paymentMethod: paymentFilter === 'ALL' ? undefined : (paymentFilter as any),
       status: statusFilter === 'ALL' ? undefined : (statusFilter as any),
       shopId: shopFilter === 'ALL' ? undefined : shopFilter,
-      startDate: startDate || undefined,
-      endDate: endDate || undefined,
+      startDate: effectiveStartDate || undefined,
+      endDate: effectiveEndDate || undefined,
     },
     currentUser
   );
@@ -524,20 +531,108 @@ export const AdminSales: React.FC = () => {
     }
   };
 
+  const formatHumanDate = (ymd?: string) => {
+    if (!ymd) return '';
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd.trim());
+    if (!m) return ymd;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
+  const activePeriodMeta = (() => {
+    const startLabel = formatHumanDate(effectiveStartDate);
+    const endLabel = formatHumanDate(effectiveEndDate);
+    const dateRangeText =
+      startLabel && endLabel
+        ? startLabel === endLabel
+          ? startLabel
+          : `${startLabel} to ${endLabel}`
+        : startLabel || endLabel || 'All Dates';
+
+    switch (datePreset) {
+      case 'TODAY':
+        return {
+          periodKey: 'day' as const,
+          shortLabel: 'Day',
+          periodTitle: 'Daily Sales Report',
+          periodLabel: 'Day (Today)',
+          dateRangeText,
+        };
+      case 'WEEK':
+        return {
+          periodKey: 'week' as const,
+          shortLabel: 'Week',
+          periodTitle: 'Weekly Sales Report',
+          periodLabel: 'Week (Last 7 Days)',
+          dateRangeText,
+        };
+      case 'MONTH':
+        return {
+          periodKey: 'month' as const,
+          shortLabel: 'Month',
+          periodTitle: 'Monthly Sales Report',
+          periodLabel: 'Month (This Month)',
+          dateRangeText,
+        };
+      case 'YEAR':
+        return {
+          periodKey: 'year' as const,
+          shortLabel: 'Year',
+          periodTitle: 'Yearly Sales Report',
+          periodLabel: 'Year (This Year)',
+          dateRangeText,
+        };
+      case 'CUSTOM':
+      default:
+        return {
+          periodKey: 'custom' as const,
+          shortLabel: 'Custom',
+          periodTitle: 'Custom Period Sales Report',
+          periodLabel: 'Custom Range',
+          dateRangeText,
+        };
+    }
+  })();
+
+  const selectedSellerLabel =
+    sellerFilter === 'ALL'
+      ? 'All Sellers'
+      : sellers.find(s => s.id === sellerFilter)?.name || 'Selected Seller';
+
+  const selectedPaymentLabel =
+    paymentFilter === 'ALL'
+      ? 'All Payment Methods'
+      : paymentFilter === 'MOBILE_MONEY'
+        ? 'Mobile Money'
+        : paymentFilter.charAt(0) + paymentFilter.slice(1).toLowerCase();
+
+  const selectedStatusLabel =
+    statusFilter === 'ALL'
+      ? 'All Statuses'
+      : statusFilter.charAt(0) + statusFilter.slice(1).toLowerCase();
+
   const handlePrint = async () => {
     setIsPrinting(true);
     const ok = await downloadSalesReportPdf(sales, settings, {
       shopLabel: selectedShopName,
-      startDate: startDate || undefined,
-      endDate: endDate || undefined,
+      startDate: effectiveStartDate || undefined,
+      endDate: effectiveEndDate || undefined,
+      periodKey: activePeriodMeta.periodKey,
+      periodTitle: activePeriodMeta.periodTitle,
+      periodLabel: activePeriodMeta.periodLabel,
+      dateRangeText: activePeriodMeta.dateRangeText,
+      sellerLabel: selectedSellerLabel,
+      paymentLabel: selectedPaymentLabel,
+      statusLabel: selectedStatusLabel,
+      searchQuery: searchQuery.trim() || undefined,
       totalRevenue: totalVolume,
       totalProfit,
     });
     if (ok) {
       addToast({
         type: 'success',
-        title: 'Sales PDF Downloaded',
-        description: `Saved ${sales.length} transaction(s) for ${selectedShopName} to Downloads.`,
+        title: `${activePeriodMeta.periodTitle} Downloaded`,
+        description: `Saved ${sales.length} transaction(s) for ${activePeriodMeta.periodLabel} (${activePeriodMeta.dateRangeText}).`,
       });
     } else {
       addToast({
@@ -550,7 +645,8 @@ export const AdminSales: React.FC = () => {
   };
 
   const handleExportCSV = async () => {
-    let csv = `Sales Report - ${selectedShopName}\n`;
+    let csv = `${activePeriodMeta.periodTitle} - ${selectedShopName}\n`;
+    csv += `Period: ${activePeriodMeta.periodLabel} (${activePeriodMeta.dateRangeText})\n`;
     csv += `Generated: ${new Date().toLocaleString()}\n\n`;
     csv += `Receipt #,Date,Shop,Seller,Products,Payment,Status,Total,Profit\n`;
 
@@ -561,9 +657,15 @@ export const AdminSales: React.FC = () => {
       csv += `"${sale.receiptNumber}","${formatDateTime(sale.createdAt)}","${sale.shopName || ''}","${sale.sellerName}","${products}","${sale.paymentMethod}","${sale.status}",${sale.total},${sale.status === 'COMPLETED' ? sale.grossProfit : 0}\n`;
     });
 
-    const fileName = `sales_report_${selectedShopName
+    const dateTag =
+      effectiveStartDate && effectiveEndDate
+        ? effectiveStartDate === effectiveEndDate
+          ? effectiveStartDate
+          : `${effectiveStartDate}_to_${effectiveEndDate}`
+        : new Date().toISOString().slice(0, 10);
+    const fileName = `sales_report_${activePeriodMeta.periodKey}_${selectedShopName
       .toLowerCase()
-      .replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`;
+      .replace(/\s+/g, '_')}_${dateTag}.csv`;
     const res = await saveTextFileCrossPlatform(csv, fileName, 'text/csv;charset=utf-8');
     if (res.ok) {
       addToast({
@@ -593,7 +695,7 @@ export const AdminSales: React.FC = () => {
   const presets: { id: DatePreset; label: string; activeClass: string; idleClass: string }[] = [
     {
       id: 'TODAY',
-      label: 'Today',
+      label: 'Day',
       activeClass: 'bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-500/30',
       idleClass: 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20',
     },
@@ -1185,7 +1287,9 @@ export const AdminSales: React.FC = () => {
             className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold shadow transition disabled:opacity-50"
           >
             <Printer className="w-3.5 h-3.5" />
-            <span>{isPrinting ? 'Generating...' : 'Download PDF'}</span>
+            <span>
+              {isPrinting ? 'Generating...' : `Download PDF (${activePeriodMeta.shortLabel})`}
+            </span>
           </button>
           <button
             onClick={handleExportCSV}
@@ -1514,12 +1618,28 @@ export const AdminSales: React.FC = () => {
                           </span>
                         </div>
 
-                        <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
-                          <p className="text-[10px] text-slate-500 truncate">
-                            {(sale.items || [])
-                              .map(i => `${i.quantity}x ${i.productName}`)
-                              .join(', ')}
-                          </p>
+                        <div className="bg-slate-950/70 rounded-xl border border-slate-800/90 overflow-hidden">
+                          <div className="px-2.5 py-1.5 bg-slate-900/80 border-b border-slate-800/80 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                            <span>Products ({(sale.items || []).length})</span>
+                            <span>Qty × Price</span>
+                          </div>
+                          <div className="divide-y divide-slate-800/60">
+                            {(sale.items || []).map((item, idx) => (
+                              <div
+                                key={idx}
+                                className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px]"
+                              >
+                                <span className="text-slate-200 font-medium leading-snug break-words min-w-0 flex-1">
+                                  {item.productName}
+                                </span>
+                                <span className="shrink-0 font-mono text-[10px] text-slate-400 tabular-nums">
+                                  <span className="text-blue-400 font-bold">{item.quantity}</span>
+                                  {' × '}
+                                  {formatCurrency(item.unitPrice, settings.currencySymbol)}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
 
                         <div className="flex items-center gap-2 pt-1.5 border-t border-slate-800/60">
@@ -1599,20 +1719,23 @@ export const AdminSales: React.FC = () => {
                             <td className="py-3 px-4 text-slate-300 font-medium">
                               {sale.sellerName}
                             </td>
-                            <td className="py-3 px-4 max-w-xs">
-                              <div className="flex flex-wrap gap-1">
+                            <td className="py-3 px-4 min-w-[230px] max-w-sm align-top">
+                              <div className="rounded-lg bg-slate-950/60 border border-slate-800/80 divide-y divide-slate-800/60 overflow-hidden">
                                 {(sale.items || []).map((item, idx) => (
-                                  <span
+                                  <div
                                     key={idx}
-                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700/60 text-[11px] text-slate-200"
+                                    className="px-2.5 py-1.5 flex items-center justify-between gap-3 text-[11px]"
                                   >
-                                    <span className="font-bold text-blue-400">
-                                      {item.quantity}x
-                                    </span>
-                                    <span className="truncate max-w-[120px]">
+                                    <span className="text-slate-200 font-medium leading-snug break-words min-w-0 flex-1">
                                       {item.productName}
                                     </span>
-                                  </span>
+                                    <span className="shrink-0 font-mono text-[10px] text-slate-400 tabular-nums whitespace-nowrap">
+                                      <span className="font-bold text-blue-400">
+                                        {item.quantity}x
+                                      </span>{' '}
+                                      {formatCurrency(item.unitPrice, settings.currencySymbol)}
+                                    </span>
+                                  </div>
                                 ))}
                               </div>
                             </td>

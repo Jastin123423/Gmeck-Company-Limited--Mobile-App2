@@ -19,18 +19,6 @@ export const SellerSales: React.FC = () => {
   const { currentUser, showReceipt, dbState, addToast } = useApp();
   const [searchQuery, setSearchQuery] = useState('');
   const [datePreset, setDatePreset] = useState<DatePreset>('TODAY');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
-  const [paymentFilter, setPaymentFilter] = useState('ALL');
-
-  // Edit Request Modal
-  const [editingSale, setEditingSale] = useState<Sale | null>(null);
-  const [editItems, setEditItems] = useState<CartItemInput[]>([]);
-  const [editReason, setEditReason] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Track locally submitted edit requests
-  const [submittedSaleIds, setSubmittedSaleIds] = useState<Set<string>>(new Set());
 
   // ---------- Date helpers ----------
   const toYMD = (d: Date): string => {
@@ -60,6 +48,20 @@ export const SellerSales: React.FC = () => {
     }
     return null; // CUSTOM
   };
+
+  const initialTodayRange = computePresetRange('TODAY')!;
+  const [startDate, setStartDate] = useState(() => initialTodayRange.start);
+  const [endDate, setEndDate] = useState(() => initialTodayRange.end);
+  const [paymentFilter, setPaymentFilter] = useState('ALL');
+
+  // Edit Request Modal
+  const [editingSale, setEditingSale] = useState<Sale | null>(null);
+  const [editItems, setEditItems] = useState<CartItemInput[]>([]);
+  const [editReason, setEditReason] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Track locally submitted edit requests
+  const [submittedSaleIds, setSubmittedSaleIds] = useState<Set<string>>(new Set());
 
   // Apply preset → auto-compute start/end
   useEffect(() => {
@@ -190,7 +192,7 @@ export const SellerSales: React.FC = () => {
   const presets: { id: DatePreset; label: string; activeClass: string; idleClass: string }[] = [
     {
       id: 'TODAY',
-      label: 'Today',
+      label: 'Day',
       activeClass: 'bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-500/30',
       idleClass: 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20',
     },
@@ -380,12 +382,24 @@ export const SellerSales: React.FC = () => {
                       </span>
                     </div>
 
-                    <div className="text-[11px] text-slate-400">
-                      <div>{formatDateTime(sale.createdAt)}</div>
-                      <div className="text-slate-300 truncate mt-0.5 font-medium">
-                        {(sale.items || [])
-                          .map(i => `${i.quantity}x ${i.productName}`)
-                          .join(', ')}
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] text-slate-400">{formatDateTime(sale.createdAt)}</div>
+                      <div className="bg-slate-950/70 rounded-xl border border-slate-800/90 divide-y divide-slate-800/60 overflow-hidden">
+                        {(sale.items || []).map((item, idx) => (
+                          <div
+                            key={idx}
+                            className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px]"
+                          >
+                            <span className="text-slate-200 font-medium leading-snug break-words min-w-0 flex-1">
+                              {item.productName}
+                            </span>
+                            <span className="shrink-0 font-mono text-[10px] text-slate-400 tabular-nums">
+                              <span className="text-blue-400 font-bold">{item.quantity}</span>
+                              {' × '}
+                              {formatCurrency(item.unitPrice, settings.currencySymbol)}
+                            </span>
+                          </div>
+                        ))}
                       </div>
                     </div>
 
@@ -457,20 +471,23 @@ export const SellerSales: React.FC = () => {
                         <td className="py-3.5 px-4 text-slate-400">
                           {formatDateTime(sale.createdAt)}
                         </td>
-                        <td className="py-3.5 px-4 max-w-xs">
-                          <div className="flex flex-wrap gap-1">
+                        <td className="py-3.5 px-4 min-w-[220px] max-w-sm align-top">
+                          <div className="rounded-lg bg-slate-950/60 border border-slate-800/80 divide-y divide-slate-800/60 overflow-hidden">
                             {(sale.items || []).map((item, idx) => (
-                              <span
+                              <div
                                 key={idx}
-                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700/60 text-[11px] text-slate-200"
+                                className="px-2.5 py-1.5 flex items-center justify-between gap-3 text-[11px]"
                               >
-                                <span className="font-bold text-blue-400">
-                                  {item.quantity}x
-                                </span>
-                                <span className="truncate max-w-[100px]">
+                                <span className="text-slate-200 font-medium leading-snug break-words min-w-0 flex-1">
                                   {item.productName}
                                 </span>
-                              </span>
+                                <span className="shrink-0 font-mono text-[10px] text-slate-400 tabular-nums whitespace-nowrap">
+                                  <span className="font-bold text-blue-400">
+                                    {item.quantity}x
+                                  </span>{' '}
+                                  {formatCurrency(item.unitPrice, settings.currencySymbol)}
+                                </span>
+                              </div>
                             ))}
                           </div>
                         </td>
