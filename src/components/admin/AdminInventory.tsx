@@ -17,14 +17,21 @@ import {
   Layers,
   ArrowLeft,
   Warehouse,
+  FileText,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { InventoryService } from '../../services/inventoryService';
+import { ExcelExportService } from '../../services/excelExportService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { printMovementsReportPdf } from '../../utils/movementsPrint';
 import {
+  downloadInventoryReportPdf,
   downloadLossReportPdf,
   downloadLowStockReportPdf,
+  InventoryExportMeta,
+  InventoryExportRow,
+  InventoryExportScope,
 } from '../../utils/pdfExport';
 import { Product } from '../../types';
 import { ProductThumbnail } from '../common/ProductThumbnail';
@@ -78,6 +85,7 @@ export const AdminInventory: React.FC = () => {
     addToast,
     selectedShopId,
     inventoryFilter,
+    setInventoryFilter,
     inventoryNavTick,
   } = useApp();
   const [activeTab, setActiveTabState] = useState<'stock' | 'movements' | 'losses'>('stock');
@@ -85,6 +93,7 @@ export const AdminInventory: React.FC = () => {
   const [movementTypeFilter, setMovementTypeFilter] = useState('ALL');
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
+  const [exportingKey, setExportingKey] = useState<string | null>(null);
 
   // Per-shop inventory filter override (defaults to active menu inventoryFilter: ALL / SHOP / STORE)
   const [shopLocationFilters, setShopLocationFilters] = useState<
@@ -203,6 +212,12 @@ export const AdminInventory: React.FC = () => {
     }));
   };
 
+  const handleSetGlobalInventoryScope = (next: ShopLocationFilter) => {
+    setInventoryFilter(next);
+    setShopLocationFilters({});
+    setVisibleCounts({});
+  };
+
   // Location-aware valuation for top KPI cards (updates dynamically when switching All / Shop / Store)
   const scopedValuationProducts = visibleProducts.filter(
     p => selectedShopId === 'ALL' || p.shopId === selectedShopId
@@ -274,7 +289,7 @@ export const AdminInventory: React.FC = () => {
       ? Array.from(activeScopeSet)[0]
       : activeScopeSet.size > 1
         ? 'MIXED'
-        : 'ALL';
+        : inventoryFilter;
 
   const valuationScopeLabel =
     activeValuationScope === 'SHOP'
@@ -460,6 +475,229 @@ export const AdminInventory: React.FC = () => {
       setQuantityInput('0');
     } else {
       setModalError(res.error || 'Failed to adjust stock.');
+    }
+  };
+
+  // ==============================
+  // DOWNLOAD INVENTORY PDF & EXCEL (Respects All / Shop / Store selection)
+  // ==============================
+  const buildWarehouseBreakdown = (p: Product): string => {
+    const allStores = dbState.stores || [];
+    const shopStores = allStores.filter(st => st.shopId === p.shopId && !st.isShopFloor);
+    const parts: string[] = [];
+
+    if (p.storeStocks && Object.keys(p.storeStocks).length > 0) {
+      Object.entries(p.storeStocks).forEach(([sid, qty]) => {
+        if (floorStoreIdSet.has(sid)) return;
+        const n = Math.max(0, Number(qty || 0));
+        if (n <= 0) return;
+        const st = allStores.find(s => s.id === sid);
+        parts.push(`${st?.name || 'Store'}: ${n}`);
+      });
+    }
+
+    if (parts.length === 0) {
+      const fallbackQty = getProductStoreQty(p);
+      if (fallbackQty > 0) {
+        const matchedStore =
+          (p.storeId ? shopStores.find(s => s.id === p.storeId) : undefined) || shopStores[0];
+        parts.push(`${matchedStore?.name || 'Main Store'}: ${fallbackQty}`);
+      }
+    }
+
+    return parts.join(', ');
+  };
+
+  const buildInventoryExportPayload = (
+    targetShopId?: string
+  ): { rows: InventoryExportRow[]; meta: InventoryExportMeta } => {
+    const rows: InventoryExportRow[] = [];
+    const scopesUsed = new Set<ShopLocationFilter>();
+
+    const appendProductRow = (p: Product, shopName: string, mode: ShopLocationFilter) => {
+      const shopQty = Math.max(0, Number(p.currentStock || 0));
+      const storeQty = getProductStoreQty(p);
+
+      if (mode === 'SHOP' && !(shopQty > 0 || (showLowStockOnly && storeQty === 0))) {
+        return;
+      }
+      if (mode === 'STORE' && !(storeQty > 0)) {
+        return;
+      }
+
+      const activeQty =
+        mode === 'SHOP' ? shopQty : mode === 'STORE' ? storeQty : shopQty + storeQty;
+      const buyPrice = Number(p.purchasePrice || 0);
+      const sellPrice = Number(p.sellingPrice || 0);
+      const buyValue = Number((activeQty * buyPrice).toFixed(2));
+      const sellValue = Number((activeQty * sellPrice).toFixed(2));
+      const potentialProfit = Number((sellValue - buyValue).toFixed(2));
+
+      let status: InventoryExportRow['status'] = 'IN STOCK';
+      if (p.status !== 'ACTIVE') {
+        status = 'INACTIVE';
+      } else if (activeQty <= 0) {
+        status = 'OUT OF STOCK';
+      } else if (activeQty <= Number(p.minStock || 0)) {
+        status = 'LOW STOCK';
+      }
+
+      scopesUsed.add(mode);
+      rows.push({
+        shopName,
+        productName: p.name || 'Unnamed Product',
+        variation: p.variation || '',
+        sku: p.sku || '',
+        unit: p.unit || 'pcs',
+        shopQty,
+        storeQty,
+        totalQty: shopQty + storeQty,
+        activeQty,
+        rowScope: mode,
+        minStock: Number(p.minStock || 0),
+        purchasePrice: buyPrice,
+        sellingPrice: sellPrice,
+        buyValue,
+        sellValue,
+        potentialProfit,
+        storeBreakdown: buildWarehouseBreakdown(p),
+        status,
+      });
+    };
+
+    if (targetShopId) {
+      const targetGroup = groupedByShop.find(g => g.shop.id === targetShopId);
+      const shopObj = targetGroup?.shop || shops.find(s => s.id === targetShopId);
+      const mode = getShopLocationFilter(targetShopId);
+      scopesUsed.add(mode);
+
+      if (targetGroup) {
+        targetGroup.products.forEach(p => appendProductRow(p, targetGroup.shop.name, mode));
+      }
+
+      return {
+        rows,
+        meta: {
+          scope: mode,
+          shopLabel: shopObj?.name || 'Shop',
+          searchQuery,
+          lowStockOnly: showLowStockOnly,
+        },
+      };
+    }
+
+    // Global export across all currently visible shops (respecting selectedShopId + per-shop All/Shop/Store)
+    groupedByShop.forEach(({ shop, products: shopProducts }) => {
+      const mode = getShopLocationFilter(shop.id);
+      scopesUsed.add(mode);
+      shopProducts.forEach(p => appendProductRow(p, shop.name, mode));
+    });
+
+    if (productsWithNoShop.length > 0) {
+      scopesUsed.add(inventoryFilter);
+      productsWithNoShop.forEach(p => appendProductRow(p, 'Unassigned', inventoryFilter));
+    }
+
+    const resolvedScope: InventoryExportScope =
+      scopesUsed.size === 1
+        ? Array.from(scopesUsed)[0]
+        : scopesUsed.size > 1
+          ? 'MIXED'
+          : activeValuationScope;
+
+    const selectedShopObj =
+      selectedShopId !== 'ALL' ? shops.find(s => s.id === selectedShopId) : undefined;
+    const shopLabel = selectedShopObj
+      ? selectedShopObj.name
+      : shopAdmin && !platformAdmin
+        ? shops.length === 1
+          ? shops[0].name
+          : 'Managed Shops'
+        : 'All Shops';
+
+    return {
+      rows,
+      meta: {
+        scope: resolvedScope,
+        shopLabel,
+        searchQuery,
+        lowStockOnly: showLowStockOnly,
+      },
+    };
+  };
+
+  const getScopeShortText = (scope: InventoryExportScope): string => {
+    if (scope === 'SHOP') return 'Shop';
+    if (scope === 'STORE') return 'Store';
+    if (scope === 'MIXED') return 'Filtered';
+    return 'All';
+  };
+
+  const handleDownloadInventoryPdf = async (targetShopId?: string) => {
+    const key = `pdf:${targetShopId || 'ALL'}`;
+    if (exportingKey) return;
+    setExportingKey(key);
+    try {
+      const { rows, meta } = buildInventoryExportPayload(targetShopId);
+      if (rows.length === 0) {
+        addToast({
+          type: 'warning',
+          title: 'Nothing to Export',
+          description: `No ${getScopeShortText(meta.scope).toLowerCase()} inventory items match your current selection.`,
+        });
+        return;
+      }
+
+      const ok = await downloadInventoryReportPdf(rows, settings, meta);
+      if (ok) {
+        addToast({
+          type: 'success',
+          title: `${getScopeShortText(meta.scope)} Inventory PDF Downloaded`,
+          description: `Exported ${rows.length} product(s) for ${meta.shopLabel} (${getScopeShortText(meta.scope)}).`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'PDF Export Failed',
+          description: 'Could not save inventory PDF report on this device.',
+        });
+      }
+    } finally {
+      setExportingKey(null);
+    }
+  };
+
+  const handleDownloadInventoryExcel = async (targetShopId?: string) => {
+    const key = `excel:${targetShopId || 'ALL'}`;
+    if (exportingKey) return;
+    setExportingKey(key);
+    try {
+      const { rows, meta } = buildInventoryExportPayload(targetShopId);
+      if (rows.length === 0) {
+        addToast({
+          type: 'warning',
+          title: 'Nothing to Export',
+          description: `No ${getScopeShortText(meta.scope).toLowerCase()} inventory items match your current selection.`,
+        });
+        return;
+      }
+
+      const res = await ExcelExportService.exportInventoryReport(rows, settings, meta);
+      if (res.success) {
+        addToast({
+          type: 'success',
+          title: `${getScopeShortText(meta.scope)} Inventory Excel Downloaded`,
+          description: `Saved ${res.fileName} with ${res.rowCount || rows.length} product(s).`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Excel Export Failed',
+          description: res.error || 'Could not save inventory Excel file on this device.',
+        });
+      }
+    } finally {
+      setExportingKey(null);
     }
   };
 
@@ -698,20 +936,96 @@ export const AdminInventory: React.FC = () => {
     >
       {/* Header */}
       <div className="flex flex-col gap-3 mb-5 pb-4 border-b border-slate-800">
-        <div>
-          <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
-            {inventoryFilter === 'SHOP'
-              ? 'Shop Inventory'
-              : inventoryFilter === 'STORE'
-                ? 'Store Inventory'
-                : 'All Inventories'}
-          </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Monitor real-time stock levels, buying &amp; selling prices, losses, and adjustments
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+          <div>
+            <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+              {activeValuationScope === 'SHOP'
+                ? 'Shop Inventory'
+                : activeValuationScope === 'STORE'
+                  ? 'Store Inventory'
+                  : 'All Inventories'}
+            </h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Monitor real-time stock levels, buying &amp; selling prices, losses, and adjustments
+            </p>
+          </div>
+
+          {/* Global Scope Selector: All / Shop / Store */}
+          <div className="grid grid-cols-3 gap-1 bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs font-semibold shrink-0">
+            <button
+              type="button"
+              onClick={() => handleSetGlobalInventoryScope('ALL')}
+              className={`px-3 py-1.5 rounded-lg transition ${
+                activeValuationScope === 'ALL'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSetGlobalInventoryScope('SHOP')}
+              className={`flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg transition ${
+                activeValuationScope === 'SHOP'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Store className="w-3.5 h-3.5" />
+              <span>Shop</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSetGlobalInventoryScope('STORE')}
+              className={`flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg transition ${
+                activeValuationScope === 'STORE'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Warehouse className="w-3.5 h-3.5" />
+              <span>Store</span>
+            </button>
+          </div>
         </div>
 
-        <div className="flex flex-col gap-2">
+        {/* Download Inventory Reports (PDF & Excel) respecting All / Shop / Store */}
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            disabled={exportingKey !== null}
+            onClick={() => handleDownloadInventoryPdf()}
+            className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 active:bg-rose-700 disabled:opacity-60 text-white font-semibold text-xs shadow-lg transition"
+          >
+            {exportingKey === 'pdf:ALL' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <FileText className="w-4 h-4 shrink-0" />
+            )}
+            <span className="truncate">
+              Download PDF ({getScopeShortText(activeValuationScope)})
+            </span>
+          </button>
+
+          <button
+            type="button"
+            disabled={exportingKey !== null}
+            onClick={() => handleDownloadInventoryExcel()}
+            className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-60 text-white font-semibold text-xs shadow-lg transition"
+          >
+            {exportingKey === 'excel:ALL' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="w-4 h-4 shrink-0" />
+            )}
+            <span className="truncate">
+              Download Excel ({getScopeShortText(activeValuationScope)})
+            </span>
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <button
             onClick={handlePrintLowStockReport}
             className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white font-semibold text-xs shadow-lg transition"
@@ -1020,46 +1334,79 @@ export const AdminInventory: React.FC = () => {
 
                     {!isCollapsed && (
                       <>
-                        {/* Per-Shop Location Filter: All (default), Shop, Store */}
+                        {/* Per-Shop Location Filter (All / Shop / Store) + Per-Shop PDF & Excel Downloads */}
                         <div className="px-3.5 py-2.5 bg-slate-950/60 border-b border-slate-800 flex items-center justify-between gap-2 flex-wrap">
-                          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                            Inventory View
-                          </span>
-                          <div className="grid grid-cols-3 gap-1.5 bg-slate-900 border border-slate-800 rounded-xl p-1 text-[11px] font-semibold">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                              Inventory View
+                            </span>
+                            <div className="grid grid-cols-3 gap-1 bg-slate-900 border border-slate-800 rounded-xl p-1 text-[11px] font-semibold">
+                              <button
+                                type="button"
+                                onClick={() => handleSetShopLocationFilter(shop.id, 'ALL')}
+                                className={`px-2.5 py-1.5 rounded-lg transition ${
+                                  locationFilter === 'ALL'
+                                    ? 'bg-blue-600 text-white shadow-sm'
+                                    : 'text-slate-400 hover:text-white'
+                                }`}
+                              >
+                                All
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSetShopLocationFilter(shop.id, 'SHOP')}
+                                className={`flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg transition ${
+                                  locationFilter === 'SHOP'
+                                    ? 'bg-emerald-600 text-white shadow-sm'
+                                    : 'text-slate-400 hover:text-white'
+                                }`}
+                              >
+                                <Store className="w-3 h-3" />
+                                <span>Shop</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSetShopLocationFilter(shop.id, 'STORE')}
+                                className={`flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg transition ${
+                                  locationFilter === 'STORE'
+                                    ? 'bg-indigo-600 text-white shadow-sm'
+                                    : 'text-slate-400 hover:text-white'
+                                }`}
+                              >
+                                <Warehouse className="w-3 h-3" />
+                                <span>Store</span>
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleSetShopLocationFilter(shop.id, 'ALL')}
-                              className={`px-3 py-1.5 rounded-lg transition ${
-                                locationFilter === 'ALL'
-                                  ? 'bg-blue-600 text-white shadow-sm'
-                                  : 'text-slate-400 hover:text-white'
-                              }`}
+                              disabled={exportingKey !== null || filteredShopProducts.length === 0}
+                              onClick={() => handleDownloadInventoryPdf(shop.id)}
+                              title={`Download ${shop.name} (${getScopeShortText(locationFilter)}) PDF`}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 disabled:opacity-40 text-[11px] font-semibold transition"
                             >
-                              All
+                              {exportingKey === `pdf:${shop.id}` ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <FileText className="w-3 h-3" />
+                              )}
+                              <span>PDF</span>
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleSetShopLocationFilter(shop.id, 'SHOP')}
-                              className={`flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg transition ${
-                                locationFilter === 'SHOP'
-                                  ? 'bg-emerald-600 text-white shadow-sm'
-                                  : 'text-slate-400 hover:text-white'
-                              }`}
+                              disabled={exportingKey !== null || filteredShopProducts.length === 0}
+                              onClick={() => handleDownloadInventoryExcel(shop.id)}
+                              title={`Download ${shop.name} (${getScopeShortText(locationFilter)}) Excel`}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 disabled:opacity-40 text-[11px] font-semibold transition"
                             >
-                              <Store className="w-3 h-3" />
-                              <span>Shop</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleSetShopLocationFilter(shop.id, 'STORE')}
-                              className={`flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg transition ${
-                                locationFilter === 'STORE'
-                                  ? 'bg-indigo-600 text-white shadow-sm'
-                                  : 'text-slate-400 hover:text-white'
-                              }`}
-                            >
-                              <Warehouse className="w-3 h-3" />
-                              <span>Store</span>
+                              {exportingKey === `excel:${shop.id}` ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <FileSpreadsheet className="w-3 h-3" />
+                              )}
+                              <span>Excel</span>
                             </button>
                           </div>
                         </div>

@@ -2308,3 +2308,424 @@ export async function downloadSinglePurchasePdf(
   return triggerPdfDownload(doc, `purchase_${poTag}_${dateTag}.pdf`);
 }
 
+// =====================================================================
+// 16. INVENTORY STOCK REPORT PDF (AdminInventory.tsx — All / Shop / Store)
+// =====================================================================
+export type InventoryExportScope = 'ALL' | 'SHOP' | 'STORE' | 'MIXED';
+
+export interface InventoryExportRow {
+  shopName: string;
+  productName: string;
+  variation?: string;
+  sku: string;
+  unit: string;
+  shopQty: number;
+  storeQty: number;
+  totalQty: number;
+  activeQty: number;
+  rowScope: 'ALL' | 'SHOP' | 'STORE';
+  minStock: number;
+  purchasePrice: number;
+  sellingPrice: number;
+  buyValue: number;
+  sellValue: number;
+  potentialProfit: number;
+  storeBreakdown?: string;
+  status: 'IN STOCK' | 'LOW STOCK' | 'OUT OF STOCK' | 'INACTIVE';
+}
+
+export interface InventoryExportMeta {
+  scope: InventoryExportScope;
+  shopLabel: string;
+  searchQuery?: string;
+  lowStockOnly?: boolean;
+}
+
+export function buildInventoryReportPdfDoc(
+  rows: InventoryExportRow[],
+  settings: BusinessSettings,
+  meta: InventoryExportMeta
+): jsPDF {
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  const symbol = settings?.currencySymbol || 'TSh';
+  const biz = settings?.businessName || 'Inventory Report';
+
+  const scopeTitle =
+    meta.scope === 'SHOP'
+      ? 'Shop Inventory Stock Report'
+      : meta.scope === 'STORE'
+        ? 'Store Inventory Stock Report'
+        : meta.scope === 'MIXED'
+          ? 'Filtered Inventory Stock Report'
+          : 'All Inventory Stock Report (Shop + Store)';
+
+  const scopeBadge =
+    meta.scope === 'SHOP'
+      ? 'Shop Stock Only'
+      : meta.scope === 'STORE'
+        ? 'Store Stock Only'
+        : meta.scope === 'MIXED'
+          ? 'Custom Per-Shop Scope'
+          : 'All (Shop + Store)';
+
+  const bannerColor =
+    meta.scope === 'SHOP'
+      ? COLORS.emerald
+      : meta.scope === 'STORE'
+        ? COLORS.violet
+        : meta.scope === 'MIXED'
+          ? COLORS.navy
+          : COLORS.blueDark;
+
+  const filterNotes: string[] = [];
+  if (meta.lowStockOnly) filterNotes.push('Low Stock Only');
+  if (meta.searchQuery && meta.searchQuery.trim()) {
+    filterNotes.push(`Search: "${meta.searchQuery.trim()}"`);
+  }
+
+  const totalShopQty = rows.reduce((sum, r) => sum + Number(r.shopQty || 0), 0);
+  const totalStoreQty = rows.reduce((sum, r) => sum + Number(r.storeQty || 0), 0);
+  const totalActiveQty = rows.reduce((sum, r) => sum + Number(r.activeQty || 0), 0);
+  const totalBuyValue = rows.reduce((sum, r) => sum + Number(r.buyValue || 0), 0);
+  const totalSellValue = rows.reduce((sum, r) => sum + Number(r.sellValue || 0), 0);
+  const totalPotentialProfit = totalSellValue - totalBuyValue;
+
+  let y = drawBanner(
+    doc,
+    scopeTitle,
+    `${biz} | ${meta.shopLabel}`,
+    [
+      `Scope: ${scopeBadge}`,
+      `Generated: ${new Date().toLocaleString()}`,
+      filterNotes.length > 0 ? `Filters: ${filterNotes.join(' | ')}` : `Total Products: ${rows.length}`,
+    ],
+    bannerColor
+  );
+
+  y = drawMetaStrip(doc, y, [
+    { label: 'Inventory Scope', value: scopeBadge },
+    { label: 'Shop Selection', value: meta.shopLabel },
+    {
+      label: 'Active Filters',
+      value: filterNotes.length > 0 ? filterNotes.join(' | ') : 'None (Full Stock List)',
+    },
+    { label: 'Potential Profit', value: formatCurrency(totalPotentialProfit, symbol) },
+  ]);
+
+  y = drawKpiRow(doc, y, [
+    {
+      label: 'Total SKUs',
+      value: `${rows.length.toLocaleString()} items`,
+      color: COLORS.navy,
+    },
+    {
+      label:
+        meta.scope === 'SHOP'
+          ? 'Shop Units'
+          : meta.scope === 'STORE'
+            ? 'Store Units'
+            : 'Total Units',
+      value:
+        meta.scope === 'ALL'
+          ? `${formatQtyCompact(totalActiveQty)} (Sh:${formatQtyCompact(totalShopQty)} | St:${formatQtyCompact(totalStoreQty)})`
+          : `${formatQtyCompact(totalActiveQty)} units`,
+      color: COLORS.blue,
+    },
+    {
+      label: 'Total Buy Value',
+      value: formatCurrency(totalBuyValue, symbol),
+      color: COLORS.violet,
+    },
+    {
+      label: 'Total Selling Value',
+      value: formatCurrency(totalSellValue, symbol),
+      color: COLORS.emerald,
+    },
+  ]);
+
+  if (meta.scope === 'SHOP') {
+    const body = rows.map((r, idx) => [
+      String(idx + 1),
+      pdfSafe(r.shopName),
+      pdfSafe(r.variation ? `${r.productName}\n(${r.variation})` : r.productName),
+      pdfSafe(r.sku || '-'),
+      `${formatQtyCompact(r.shopQty)} ${pdfSafe(r.unit)}`,
+      formatQtyCompact(r.minStock),
+      pdfSafe(formatCurrency(r.purchasePrice, symbol)),
+      pdfSafe(formatCurrency(r.sellingPrice, symbol)),
+      pdfSafe(formatCurrency(r.buyValue, symbol)),
+      pdfSafe(formatCurrency(r.sellValue, symbol)),
+      r.status,
+    ]);
+
+    const foot = [
+      [
+        '',
+        'TOTAL',
+        `${rows.length} product(s)`,
+        '',
+        formatQtyCompact(totalActiveQty),
+        '',
+        '',
+        '',
+        pdfSafe(formatCurrency(totalBuyValue, symbol)),
+        pdfSafe(formatCurrency(totalSellValue, symbol)),
+        '',
+      ],
+    ];
+
+    autoTable(doc, {
+      startY: y,
+      margin: { left: 12, right: 12, bottom: 16 },
+      rowPageBreak: 'avoid',
+      head: [
+        [
+          '#',
+          'Shop',
+          'Product & Variation',
+          'SKU',
+          'Shop Qty',
+          'Min',
+          'Buy Price',
+          'Sell Price',
+          'Buy Value',
+          'Sell Value',
+          'Status',
+        ],
+      ],
+      body,
+      foot,
+      styles: {
+        fontSize: 7.4,
+        cellPadding: { top: 2.3, right: 2, bottom: 2.3, left: 2 },
+        overflow: 'linebreak',
+        lineColor: COLORS.slate200,
+        lineWidth: 0.2,
+        textColor: COLORS.slate900,
+      },
+      headStyles: { fillColor: COLORS.emerald, textColor: COLORS.white, fontStyle: 'bold' },
+      footStyles: { fillColor: COLORS.emeraldBg, textColor: COLORS.navy, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: COLORS.slate50 },
+      columnStyles: {
+        0: { cellWidth: 9, halign: 'center', textColor: COLORS.slate500 },
+        1: { cellWidth: 26 },
+        2: { cellWidth: 56, fontStyle: 'bold' },
+        3: { cellWidth: 24, textColor: COLORS.slate700 },
+        4: { cellWidth: 18, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+        5: { cellWidth: 13, halign: 'right', textColor: COLORS.slate500 },
+        6: { cellWidth: 25, halign: 'right' },
+        7: { cellWidth: 25, halign: 'right' },
+        8: { cellWidth: 28, halign: 'right', fontStyle: 'bold', textColor: COLORS.violet },
+        9: { cellWidth: 28, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+        10: { cellWidth: 21, halign: 'center', fontStyle: 'bold' },
+      },
+      didParseCell: data => {
+        if (data.section === 'body' && data.column.index === 10) {
+          const val = String(data.cell.raw || '');
+          if (val === 'OUT OF STOCK') {
+            data.cell.styles.textColor = COLORS.rose;
+          } else if (val === 'LOW STOCK') {
+            data.cell.styles.textColor = COLORS.amber;
+          } else if (val === 'IN STOCK') {
+            data.cell.styles.textColor = COLORS.emerald;
+          } else {
+            data.cell.styles.textColor = COLORS.slate500;
+          }
+        }
+      },
+    });
+  } else if (meta.scope === 'STORE') {
+    const body = rows.map((r, idx) => [
+      String(idx + 1),
+      pdfSafe(r.shopName),
+      pdfSafe(r.variation ? `${r.productName}\n(${r.variation})` : r.productName),
+      pdfSafe(r.sku || '-'),
+      `${formatQtyCompact(r.storeQty)} ${pdfSafe(r.unit)}`,
+      pdfSafe(r.storeBreakdown || 'Store Stock'),
+      pdfSafe(formatCurrency(r.purchasePrice, symbol)),
+      pdfSafe(formatCurrency(r.sellingPrice, symbol)),
+      pdfSafe(formatCurrency(r.buyValue, symbol)),
+      pdfSafe(formatCurrency(r.sellValue, symbol)),
+    ]);
+
+    const foot = [
+      [
+        '',
+        'TOTAL',
+        `${rows.length} product(s)`,
+        '',
+        formatQtyCompact(totalActiveQty),
+        '',
+        '',
+        '',
+        pdfSafe(formatCurrency(totalBuyValue, symbol)),
+        pdfSafe(formatCurrency(totalSellValue, symbol)),
+      ],
+    ];
+
+    autoTable(doc, {
+      startY: y,
+      margin: { left: 12, right: 12, bottom: 16 },
+      rowPageBreak: 'avoid',
+      head: [
+        [
+          '#',
+          'Shop',
+          'Product & Variation',
+          'SKU',
+          'Store Qty',
+          'Warehouse Breakdown',
+          'Buy Price',
+          'Sell Price',
+          'Buy Value',
+          'Sell Value',
+        ],
+      ],
+      body,
+      foot,
+      styles: {
+        fontSize: 7.4,
+        cellPadding: { top: 2.3, right: 2, bottom: 2.3, left: 2 },
+        overflow: 'linebreak',
+        lineColor: COLORS.slate200,
+        lineWidth: 0.2,
+        textColor: COLORS.slate900,
+      },
+      headStyles: { fillColor: COLORS.violet, textColor: COLORS.white, fontStyle: 'bold' },
+      footStyles: { fillColor: [237, 233, 254], textColor: COLORS.navy, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: COLORS.slate50 },
+      columnStyles: {
+        0: { cellWidth: 9, halign: 'center', textColor: COLORS.slate500 },
+        1: { cellWidth: 25 },
+        2: { cellWidth: 50, fontStyle: 'bold' },
+        3: { cellWidth: 22, textColor: COLORS.slate700 },
+        4: { cellWidth: 18, halign: 'right', fontStyle: 'bold', textColor: COLORS.violet },
+        5: { cellWidth: 41, textColor: COLORS.slate700 },
+        6: { cellWidth: 24, halign: 'right' },
+        7: { cellWidth: 24, halign: 'right' },
+        8: { cellWidth: 30, halign: 'right', fontStyle: 'bold', textColor: COLORS.violet },
+        9: { cellWidth: 30, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+      },
+    });
+  } else {
+    // ALL or MIXED
+    const isMixed = meta.scope === 'MIXED';
+    const body = rows.map((r, idx) => [
+      String(idx + 1),
+      pdfSafe(isMixed ? `${r.shopName} [${r.rowScope}]` : r.shopName),
+      pdfSafe(r.variation ? `${r.productName}\n(${r.variation})` : r.productName),
+      pdfSafe(r.sku || '-'),
+      formatQtyCompact(r.shopQty),
+      formatQtyCompact(r.storeQty),
+      `${formatQtyCompact(r.activeQty)} ${pdfSafe(r.unit)}`,
+      pdfSafe(formatCurrency(r.purchasePrice, symbol)),
+      pdfSafe(formatCurrency(r.sellingPrice, symbol)),
+      pdfSafe(formatCurrency(r.buyValue, symbol)),
+      pdfSafe(formatCurrency(r.sellValue, symbol)),
+      r.status,
+    ]);
+
+    const foot = [
+      [
+        '',
+        'TOTAL',
+        `${rows.length} product(s)`,
+        '',
+        formatQtyCompact(totalShopQty),
+        formatQtyCompact(totalStoreQty),
+        formatQtyCompact(totalActiveQty),
+        '',
+        '',
+        pdfSafe(formatCurrency(totalBuyValue, symbol)),
+        pdfSafe(formatCurrency(totalSellValue, symbol)),
+        '',
+      ],
+    ];
+
+    autoTable(doc, {
+      startY: y,
+      margin: { left: 12, right: 12, bottom: 16 },
+      rowPageBreak: 'avoid',
+      head: [
+        [
+          '#',
+          isMixed ? 'Shop [Scope]' : 'Shop',
+          'Product & Variation',
+          'SKU',
+          'Shop Qty',
+          'Store Qty',
+          isMixed ? 'Active Qty' : 'Total Qty',
+          'Buy Price',
+          'Sell Price',
+          'Buy Value',
+          'Sell Value',
+          'Status',
+        ],
+      ],
+      body,
+      foot,
+      styles: {
+        fontSize: 7.3,
+        cellPadding: { top: 2.2, right: 1.8, bottom: 2.2, left: 1.8 },
+        overflow: 'linebreak',
+        lineColor: COLORS.slate200,
+        lineWidth: 0.2,
+        textColor: COLORS.slate900,
+      },
+      headStyles: { fillColor: COLORS.navy, textColor: COLORS.white, fontStyle: 'bold' },
+      footStyles: { fillColor: [239, 246, 255], textColor: COLORS.blueDark, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: COLORS.slate50 },
+      columnStyles: {
+        0: { cellWidth: 8, halign: 'center', textColor: COLORS.slate500 },
+        1: { cellWidth: 24 },
+        2: { cellWidth: 48, fontStyle: 'bold' },
+        3: { cellWidth: 21, textColor: COLORS.slate700 },
+        4: { cellWidth: 16, halign: 'right', textColor: COLORS.emerald, fontStyle: 'bold' },
+        5: { cellWidth: 16, halign: 'right', textColor: COLORS.violet, fontStyle: 'bold' },
+        6: { cellWidth: 17, halign: 'right', fontStyle: 'bold', textColor: COLORS.blueDark },
+        7: { cellWidth: 23, halign: 'right' },
+        8: { cellWidth: 23, halign: 'right' },
+        9: { cellWidth: 28, halign: 'right', fontStyle: 'bold', textColor: COLORS.violet },
+        10: { cellWidth: 28, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+        11: { cellWidth: 21, halign: 'center', fontStyle: 'bold' },
+      },
+      didParseCell: data => {
+        if (data.section === 'body' && data.column.index === 11) {
+          const val = String(data.cell.raw || '');
+          if (val === 'OUT OF STOCK') {
+            data.cell.styles.textColor = COLORS.rose;
+          } else if (val === 'LOW STOCK') {
+            data.cell.styles.textColor = COLORS.amber;
+          } else if (val === 'IN STOCK') {
+            data.cell.styles.textColor = COLORS.emerald;
+          } else {
+            data.cell.styles.textColor = COLORS.slate500;
+          }
+        }
+      },
+    });
+  }
+
+  applyPageFooters(doc, `${biz} - ${scopeTitle} (${meta.shopLabel})`);
+  return doc;
+}
+
+export async function downloadInventoryReportPdf(
+  rows: InventoryExportRow[],
+  settings: BusinessSettings,
+  meta: InventoryExportMeta
+): Promise<boolean> {
+  const doc = buildInventoryReportPdfDoc(rows, settings, meta);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const scopeSlug =
+    meta.scope === 'SHOP'
+      ? 'shop'
+      : meta.scope === 'STORE'
+        ? 'store'
+        : meta.scope === 'MIXED'
+          ? 'filtered'
+          : 'all';
+  return triggerPdfDownload(doc, `inventory_${scopeSlug}_${meta.shopLabel}_${stamp}.pdf`);
+}
+
+

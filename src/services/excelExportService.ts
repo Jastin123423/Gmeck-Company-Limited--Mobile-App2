@@ -2,8 +2,9 @@
 import * as XLSX from 'xlsx';
 import { Capacitor } from '@capacitor/core';
 import { db } from '../db/storage';
-import { Product, Store } from '../types';
+import { BusinessSettings, Product, Store } from '../types';
 import { saveFileCrossPlatform } from '../utils/nativeDownload';
+import type { InventoryExportMeta, InventoryExportRow } from '../utils/pdfExport';
 
 function writeWorkbookCrossPlatform(wb: XLSX.WorkBook, fileName: string): void {
   if (Capacitor.isNativePlatform()) {
@@ -17,6 +18,24 @@ function writeWorkbookCrossPlatform(wb: XLSX.WorkBook, fileName: string): void {
     return;
   }
   XLSX.writeFile(wb, fileName);
+}
+
+async function writeWorkbookCrossPlatformAsync(
+  wb: XLSX.WorkBook,
+  fileName: string
+): Promise<boolean> {
+  if (Capacitor.isNativePlatform()) {
+    const base64Data = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' }) as string;
+    const res = await saveFileCrossPlatform({
+      fileName,
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      base64Data,
+      openAfterSave: true,
+    });
+    return res.ok;
+  }
+  XLSX.writeFile(wb, fileName);
+  return true;
 }
 
 export interface ExcelExportResult {
@@ -234,6 +253,299 @@ export class ExcelExportService {
       return { success: true, fileName, rowCount: rows.length };
     } catch (err: any) {
       return { success: false, fileName: '', error: err.message || 'Export failed.' };
+    }
+  }
+
+  public static async exportInventoryReport(
+    rows: InventoryExportRow[],
+    settings: BusinessSettings,
+    meta: InventoryExportMeta
+  ): Promise<ExcelExportResult> {
+    try {
+      if (!rows || rows.length === 0) {
+        return {
+          success: false,
+          fileName: '',
+          error: 'No inventory items available to export for this selection.',
+        };
+      }
+
+      const biz = settings?.businessName || 'Inventory Report';
+      const currency = settings?.currencySymbol || 'TSh';
+      const generatedAt = new Date().toLocaleString();
+
+      const scopeTitle =
+        meta.scope === 'SHOP'
+          ? 'Shop Inventory Report'
+          : meta.scope === 'STORE'
+            ? 'Store Inventory Report'
+            : meta.scope === 'MIXED'
+              ? 'Filtered Inventory Report (Shop & Store)'
+              : 'All Inventory Report (Shop + Store)';
+
+      const scopeSheetName =
+        meta.scope === 'SHOP'
+          ? 'Shop Inventory'
+          : meta.scope === 'STORE'
+            ? 'Store Inventory'
+            : meta.scope === 'MIXED'
+              ? 'Filtered Inventory'
+              : 'All Inventory';
+
+      const scopeSlug =
+        meta.scope === 'SHOP'
+          ? 'shop'
+          : meta.scope === 'STORE'
+            ? 'store'
+            : meta.scope === 'MIXED'
+              ? 'filtered'
+              : 'all';
+
+      const totalShopQty = rows.reduce((s, r) => s + Number(r.shopQty || 0), 0);
+      const totalStoreQty = rows.reduce((s, r) => s + Number(r.storeQty || 0), 0);
+      const totalActiveQty = rows.reduce((s, r) => s + Number(r.activeQty || 0), 0);
+      const totalBuyValue = Number(
+        rows.reduce((s, r) => s + Number(r.buyValue || 0), 0).toFixed(2)
+      );
+      const totalSellValue = Number(
+        rows.reduce((s, r) => s + Number(r.sellValue || 0), 0).toFixed(2)
+      );
+      const totalPotentialProfit = Number((totalSellValue - totalBuyValue).toFixed(2));
+      const lowStockCount = rows.filter(r => r.status === 'LOW STOCK').length;
+      const outOfStockCount = rows.filter(r => r.status === 'OUT OF STOCK').length;
+
+      let headers: string[];
+      let dataRows: (string | number)[][];
+      let totalRow: (string | number)[];
+
+      if (meta.scope === 'SHOP') {
+        headers = [
+          '#',
+          'Shop',
+          'Product Name',
+          'Variation',
+          'SKU',
+          'Unit',
+          'Shop Qty',
+          'Min Stock',
+          `Buying Price (${currency})`,
+          `Selling Price (${currency})`,
+          `Total Buy Value (${currency})`,
+          `Total Selling Value (${currency})`,
+          `Potential Profit (${currency})`,
+          'Status',
+        ];
+        dataRows = rows.map((r, idx) => [
+          idx + 1,
+          r.shopName,
+          r.productName,
+          r.variation || '',
+          r.sku || '',
+          r.unit || 'pcs',
+          Number(r.shopQty || 0),
+          Number(r.minStock || 0),
+          Number(r.purchasePrice || 0),
+          Number(r.sellingPrice || 0),
+          Number(r.buyValue || 0),
+          Number(r.sellValue || 0),
+          Number(r.potentialProfit || 0),
+          r.status,
+        ]);
+        totalRow = [
+          '',
+          'TOTAL',
+          `${rows.length} product(s)`,
+          '',
+          '',
+          '',
+          totalActiveQty,
+          '',
+          '',
+          '',
+          totalBuyValue,
+          totalSellValue,
+          totalPotentialProfit,
+          '',
+        ];
+      } else if (meta.scope === 'STORE') {
+        headers = [
+          '#',
+          'Shop',
+          'Product Name',
+          'Variation',
+          'SKU',
+          'Unit',
+          'Store Qty',
+          'Warehouse Breakdown',
+          `Buying Price (${currency})`,
+          `Selling Price (${currency})`,
+          `Total Buy Value (${currency})`,
+          `Total Selling Value (${currency})`,
+          `Potential Profit (${currency})`,
+          'Status',
+        ];
+        dataRows = rows.map((r, idx) => [
+          idx + 1,
+          r.shopName,
+          r.productName,
+          r.variation || '',
+          r.sku || '',
+          r.unit || 'pcs',
+          Number(r.storeQty || 0),
+          r.storeBreakdown || 'Store Stock',
+          Number(r.purchasePrice || 0),
+          Number(r.sellingPrice || 0),
+          Number(r.buyValue || 0),
+          Number(r.sellValue || 0),
+          Number(r.potentialProfit || 0),
+          r.status,
+        ]);
+        totalRow = [
+          '',
+          'TOTAL',
+          `${rows.length} product(s)`,
+          '',
+          '',
+          '',
+          totalActiveQty,
+          '',
+          '',
+          '',
+          totalBuyValue,
+          totalSellValue,
+          totalPotentialProfit,
+          '',
+        ];
+      } else {
+        const isMixed = meta.scope === 'MIXED';
+        headers = [
+          '#',
+          'Shop',
+          ...(isMixed ? ['Scope'] : []),
+          'Product Name',
+          'Variation',
+          'SKU',
+          'Unit',
+          'Shop Qty',
+          'Store Qty',
+          isMixed ? 'Active Qty' : 'Total Qty',
+          'Min Stock',
+          `Buying Price (${currency})`,
+          `Selling Price (${currency})`,
+          `Total Buy Value (${currency})`,
+          `Total Selling Value (${currency})`,
+          `Potential Profit (${currency})`,
+          'Warehouse Breakdown',
+          'Status',
+        ];
+        dataRows = rows.map((r, idx) => [
+          idx + 1,
+          r.shopName,
+          ...(isMixed ? [r.rowScope] : []),
+          r.productName,
+          r.variation || '',
+          r.sku || '',
+          r.unit || 'pcs',
+          Number(r.shopQty || 0),
+          Number(r.storeQty || 0),
+          Number(r.activeQty || 0),
+          Number(r.minStock || 0),
+          Number(r.purchasePrice || 0),
+          Number(r.sellingPrice || 0),
+          Number(r.buyValue || 0),
+          Number(r.sellValue || 0),
+          Number(r.potentialProfit || 0),
+          r.storeBreakdown || '',
+          r.status,
+        ]);
+        totalRow = [
+          '',
+          'TOTAL',
+          ...(isMixed ? [''] : []),
+          `${rows.length} product(s)`,
+          '',
+          '',
+          '',
+          totalShopQty,
+          totalStoreQty,
+          totalActiveQty,
+          '',
+          '',
+          '',
+          totalBuyValue,
+          totalSellValue,
+          totalPotentialProfit,
+          '',
+          '',
+        ];
+      }
+
+      const mainAoa: (string | number)[][] = [
+        [biz, '', scopeTitle],
+        ['Shop Scope', meta.shopLabel, 'Generated', generatedAt],
+        [],
+        headers,
+        ...dataRows,
+        [],
+        totalRow,
+      ];
+
+      const wsMain = XLSX.utils.aoa_to_sheet(mainAoa);
+      wsMain['!cols'] = autoColWidths([headers, ...dataRows, totalRow]);
+
+      const summaryAoa: (string | number)[][] = [
+        ['Inventory Export Summary', ''],
+        ['Business Name', biz],
+        ['Report Type', scopeTitle],
+        ['Shop Selection', meta.shopLabel],
+        ['Search Filter', meta.searchQuery?.trim() || 'None'],
+        ['Low Stock Filter', meta.lowStockOnly ? 'Yes (Low Stock Only)' : 'No (All)'],
+        ['Currency', currency],
+        ['Generated At', generatedAt],
+        [],
+        ['Metric', 'Value'],
+        ['Total SKUs Exported', rows.length],
+        ...(meta.scope === 'SHOP'
+          ? [['Total Shop Units', totalActiveQty]]
+          : meta.scope === 'STORE'
+            ? [['Total Store Units', totalActiveQty]]
+            : [
+                ['Total Shop Units', totalShopQty],
+                ['Total Store Units', totalStoreQty],
+                ['Total Active Units', totalActiveQty],
+              ]),
+        [`Total Buy Value (${currency})`, totalBuyValue],
+        [`Total Selling Value (${currency})`, totalSellValue],
+        [`Potential Profit (${currency})`, totalPotentialProfit],
+        ['Low Stock SKUs', lowStockCount],
+        ['Out of Stock SKUs', outOfStockCount],
+      ];
+
+      const wsSummary = XLSX.utils.aoa_to_sheet(summaryAoa);
+      wsSummary['!cols'] = autoColWidths(summaryAoa);
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, wsMain, scopeSheetName);
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+      const fileName = `inventory_${scopeSlug}_${slugifyFileName(meta.shopLabel)}_${todayStamp()}.xlsx`;
+      const saved = await writeWorkbookCrossPlatformAsync(wb, fileName);
+
+      if (!saved) {
+        return {
+          success: false,
+          fileName,
+          error: 'Could not save Excel file on this device.',
+        };
+      }
+
+      return { success: true, fileName, rowCount: rows.length };
+    } catch (err: any) {
+      return {
+        success: false,
+        fileName: '',
+        error: err?.message || 'Inventory Excel export failed.',
+      };
     }
   }
 }
