@@ -16,6 +16,84 @@ export interface PurchaseItemInput {
   productId: string;
   quantity: number;
   unitCost: number;
+  sellingPrice?: number;
+}
+
+const YMD_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function toLocalYMD(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function resolvePurchaseDate(requestedDate?: string): {
+  ok: boolean;
+  dateYMD: string;
+  createdAtIso: string;
+  error?: string;
+} {
+  const now = new Date();
+  const todayYMD = toLocalYMD(now);
+  const trimmed = requestedDate?.trim();
+
+  if (!trimmed || trimmed === todayYMD) {
+    return {
+      ok: true,
+      dateYMD: todayYMD,
+      createdAtIso: now.toISOString(),
+    };
+  }
+
+  if (!YMD_PATTERN.test(trimmed)) {
+    return {
+      ok: false,
+      dateYMD: todayYMD,
+      createdAtIso: now.toISOString(),
+      error: 'Invalid purchase date format. Expected YYYY-MM-DD.',
+    };
+  }
+
+  if (trimmed > todayYMD) {
+    return {
+      ok: false,
+      dateYMD: todayYMD,
+      createdAtIso: now.toISOString(),
+      error: 'Purchase date cannot be in the future. Please select today or a previous date.',
+    };
+  }
+
+  const [year, month, day] = trimmed.split('-').map(Number);
+  const localDate = new Date(
+    year,
+    month - 1,
+    day,
+    now.getHours(),
+    now.getMinutes(),
+    now.getSeconds(),
+    now.getMilliseconds()
+  );
+
+  if (
+    Number.isNaN(localDate.getTime()) ||
+    localDate.getFullYear() !== year ||
+    localDate.getMonth() !== month - 1 ||
+    localDate.getDate() !== day
+  ) {
+    return {
+      ok: false,
+      dateYMD: todayYMD,
+      createdAtIso: now.toISOString(),
+      error: 'Invalid calendar date selected for purchase.',
+    };
+  }
+
+  return {
+    ok: true,
+    dateYMD: trimmed,
+    createdAtIso: localDate.toISOString(),
+  };
 }
 
 export class PurchaseService {
@@ -28,6 +106,7 @@ export class PurchaseService {
       shopId?: string;
       storeId?: string;
       supplierName: string;
+      supplierPhone?: string;
       date?: string;
       items: PurchaseItemInput[];
       paymentStatus: PaymentStatus;
@@ -36,6 +115,13 @@ export class PurchaseService {
     },
     currentUser: User
   ): { success: boolean; purchase?: Purchase; error?: string } {
+    const resolvedDate = resolvePurchaseDate(params.date);
+    if (!resolvedDate.ok) {
+      return { success: false, error: resolvedDate.error };
+    }
+    const purchaseDateYMD = resolvedDate.dateYMD;
+    const purchaseCreatedAt = resolvedDate.createdAtIso;
+
     const platformAdmin = isPlatformAdmin(currentUser);
     const shopAdmin = isShopAdmin(currentUser);
     const managedShopIds = getShopAdminShopIds(currentUser);
@@ -118,6 +204,21 @@ export class PurchaseService {
         };
       }
 
+      if (
+        itemInput.sellingPrice !== undefined &&
+        (!Number.isFinite(itemInput.sellingPrice) || itemInput.sellingPrice < 0)
+      ) {
+        return {
+          success: false,
+          error: `Selling price for ${prod.name} cannot be negative.`,
+        };
+      }
+
+      const nextSellingPrice =
+        itemInput.sellingPrice !== undefined && Number.isFinite(itemInput.sellingPrice)
+          ? Number(itemInput.sellingPrice.toFixed(2))
+          : prod.sellingPrice;
+
       const itemTotal = itemInput.quantity * itemInput.unitCost;
       totalAmount += itemTotal;
 
@@ -127,6 +228,8 @@ export class PurchaseService {
         productName: prod.name,
         quantity: itemInput.quantity,
         unitCost: itemInput.unitCost,
+        sellingPrice:
+          itemInput.sellingPrice !== undefined ? nextSellingPrice : undefined,
         total: itemTotal,
       });
 
@@ -152,7 +255,7 @@ export class PurchaseService {
             storeName: targetStore.name,
             quantity: nextStoreStocks[targetStore.id],
             unitPurchasePrice: Number(itemInput.unitCost.toFixed(2)),
-            unitSellingPrice: prod.sellingPrice || 0,
+            unitSellingPrice: nextSellingPrice || 0,
             lastImportedAt: new Date().toISOString(),
           },
         };
@@ -163,6 +266,7 @@ export class PurchaseService {
           storeStocks: nextStoreStocks,
           storeDetails: nextStoreDetails,
           purchasePrice: Number(itemInput.unitCost.toFixed(2)),
+          sellingPrice: nextSellingPrice,
           updatedAt: new Date().toISOString(),
         };
 
@@ -183,7 +287,7 @@ export class PurchaseService {
           costValue: itemTotal,
           userId: currentUser.id,
           userName: currentUser.name,
-          createdAt: new Date().toISOString(),
+          createdAt: purchaseCreatedAt,
         };
         db.saveMovements([movement, ...db.getMovements()]);
       } else {
@@ -196,6 +300,7 @@ export class PurchaseService {
           ...synced,
           currentStock: newStock,
           purchasePrice: Number(itemInput.unitCost.toFixed(2)), // ✅ Always latest price
+          sellingPrice: nextSellingPrice,
           updatedAt: new Date().toISOString(),
         };
 
@@ -216,7 +321,7 @@ export class PurchaseService {
           costValue: itemTotal,
           userId: currentUser.id,
           userName: currentUser.name,
-          createdAt: new Date().toISOString(),
+          createdAt: purchaseCreatedAt,
         };
         db.saveMovements([movement, ...db.getMovements()]);
       }
@@ -226,6 +331,7 @@ export class PurchaseService {
     db.saveProducts(products);
 
     const finalSupplierName = params.supplierName?.trim() || 'Walk-in Supplier';
+    const finalSupplierPhone = params.supplierPhone?.trim() || undefined;
 
     const newPurchase: Purchase = {
       id: purchaseId,
@@ -235,7 +341,8 @@ export class PurchaseService {
       storeName: targetStore?.name,
       purchaseNumber,
       supplierName: finalSupplierName,
-      date: params.date || new Date().toISOString().slice(0, 10),
+      supplierPhone: finalSupplierPhone,
+      date: purchaseDateYMD,
       items: purchaseItems,
       totalAmount,
       paymentStatus: params.paymentStatus,
@@ -243,7 +350,7 @@ export class PurchaseService {
       invoiceNumber: params.invoiceNumber?.trim() || undefined,
       createdByUserId: currentUser.id,
       createdByName: currentUser.name,
-      createdAt: new Date().toISOString(),
+      createdAt: purchaseCreatedAt,
     };
 
     db.savePurchases([newPurchase, ...db.getPurchases()]);
@@ -277,6 +384,7 @@ export class PurchaseService {
       shopId?: string;
       storeId?: string;
       supplierName: string;
+      supplierPhone?: string;
       date?: string;
       items: PurchaseItemInput[];
       paymentStatus: PaymentStatus;
@@ -296,6 +404,8 @@ export class PurchaseService {
     purchaseId: string,
     updates: {
       supplierName?: string;
+      supplierPhone?: string;
+      date?: string;
       invoiceNumber?: string;
       paymentStatus?: PaymentStatus;
       notes?: string;
@@ -311,6 +421,22 @@ export class PurchaseService {
     }
 
     const current = purchases[index];
+
+    let nextDate = current.date;
+    let nextCreatedAt = current.createdAt;
+    if (updates.date && updates.date.trim() && updates.date.trim() !== current.date) {
+      const resolved = resolvePurchaseDate(updates.date);
+      if (!resolved.ok) {
+        return { success: false, error: resolved.error };
+      }
+      nextDate = resolved.dateYMD;
+      nextCreatedAt = resolved.createdAtIso;
+    }
+
+    const nextSupplierPhone =
+      updates.supplierPhone !== undefined
+        ? updates.supplierPhone.trim() || undefined
+        : current.supplierPhone;
 
     // Check permissions
     const canEdit =
@@ -375,6 +501,18 @@ export class PurchaseService {
           return { success: false, error: `Unit cost cannot be negative.` };
         }
 
+        if (
+          itemInput.sellingPrice !== undefined &&
+          (!Number.isFinite(itemInput.sellingPrice) || itemInput.sellingPrice < 0)
+        ) {
+          return { success: false, error: `Selling price cannot be negative.` };
+        }
+
+        const nextSellingPrice =
+          itemInput.sellingPrice !== undefined && Number.isFinite(itemInput.sellingPrice)
+            ? Number(itemInput.sellingPrice.toFixed(2))
+            : products[prodIndex].sellingPrice;
+
         const itemTotal = itemInput.quantity * itemInput.unitCost;
         totalAmount += itemTotal;
 
@@ -384,6 +522,8 @@ export class PurchaseService {
           productName: products[prodIndex].name,
           quantity: itemInput.quantity,
           unitCost: itemInput.unitCost,
+          sellingPrice:
+            itemInput.sellingPrice !== undefined ? nextSellingPrice : undefined,
           total: itemTotal,
         });
 
@@ -393,13 +533,26 @@ export class PurchaseService {
           : products[prodIndex].currentStock || 0;
         const newTotalStock = prevStock + itemInput.quantity;
 
-        // Add new stock with LATEST price
+        const updatedStoreDetails =
+          isStorePurchase && current.storeId && products[prodIndex].storeDetails?.[current.storeId]
+            ? {
+                ...(products[prodIndex].storeDetails || {}),
+                [current.storeId]: {
+                  ...products[prodIndex].storeDetails![current.storeId],
+                  unitPurchasePrice: Number(itemInput.unitCost.toFixed(2)),
+                  unitSellingPrice: nextSellingPrice || 0,
+                },
+              }
+            : products[prodIndex].storeDetails;
+
+        // Add new stock with LATEST price & optional updated selling price
         products[prodIndex] = {
           ...products[prodIndex],
           ...(isStorePurchase
-            ? { storeStock: newTotalStock }
+            ? { storeStock: newTotalStock, storeDetails: updatedStoreDetails }
             : { currentStock: newTotalStock }),
           purchasePrice: Number(itemInput.unitCost.toFixed(2)), // ✅ Latest price
+          sellingPrice: nextSellingPrice,
           updatedAt: new Date().toISOString(),
         };
 
@@ -431,6 +584,9 @@ export class PurchaseService {
       const updatedPurchase: Purchase = {
         ...current,
         supplierName: updates.supplierName?.trim() || current.supplierName,
+        supplierPhone: nextSupplierPhone,
+        date: nextDate,
+        createdAt: nextCreatedAt,
         invoiceNumber: updates.invoiceNumber?.trim() || undefined,
         paymentStatus: updates.paymentStatus || current.paymentStatus,
         notes: updates.notes?.trim() || undefined,
@@ -472,6 +628,9 @@ export class PurchaseService {
     const updatedPurchase: Purchase = {
       ...current,
       supplierName: updates.supplierName?.trim() || current.supplierName,
+      supplierPhone: nextSupplierPhone,
+      date: nextDate,
+      createdAt: nextCreatedAt,
       invoiceNumber: updates.invoiceNumber?.trim() || undefined,
       paymentStatus: updates.paymentStatus || current.paymentStatus,
       notes: updates.notes?.trim() || undefined,

@@ -4,6 +4,7 @@ import {
   BusinessSettings,
   InventoryMovement,
   Product,
+  Purchase,
   Sale,
   SaleEditRequest,
   Shop,
@@ -1679,3 +1680,631 @@ export async function downloadReceiptPdf(
 
   return triggerPdfDownload(doc, `receipt_${sale.receiptNumber}.pdf`);
 }
+
+// =====================================================================
+// 8. PURCHASES REPORT PDF (AdminPurchases.tsx — Period-Aware List)
+// =====================================================================
+export interface PurchasesReportPdfMeta {
+  shopLabel: string;
+  periodKey?: 'all' | 'day' | 'week' | 'month' | 'custom' | 'search' | string;
+  periodTitle?: string;
+  periodLabel?: string;
+  dateRangeText?: string;
+  startDate?: string;
+  endDate?: string;
+  searchQuery?: string;
+  storeNameById?: Record<string, string>;
+}
+
+function resolvePurchasesPeriodMeta(meta: PurchasesReportPdfMeta) {
+  const key = (meta.periodKey || 'all').toLowerCase();
+  const defaultTitle =
+    key === 'day' || key === 'today'
+      ? 'Daily Purchases Report'
+      : key === 'week'
+        ? 'Weekly Purchases Report'
+        : key === 'month'
+          ? 'Monthly Purchases Report'
+          : key === 'custom'
+            ? 'Custom Period Purchases Report'
+            : key === 'search'
+              ? 'Purchases Search Report'
+              : 'All Purchases Report';
+
+  const defaultLabel =
+    key === 'day' || key === 'today'
+      ? 'Day (Today)'
+      : key === 'week'
+        ? 'Week (Last 7 Days)'
+        : key === 'month'
+          ? 'Month (This Month)'
+          : key === 'custom'
+            ? 'Custom Range'
+            : key === 'search'
+              ? 'Search Results (All Dates)'
+              : 'All Dates';
+
+  const rangeText =
+    meta.dateRangeText ||
+    (meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate} to ${meta.endDate}`
+      : key === 'all' || key === 'search'
+        ? 'All Dates'
+        : `${meta.startDate || 'Beginning'} to ${meta.endDate || 'Present'}`);
+
+  return {
+    key: key || 'all',
+    title: meta.periodTitle || defaultTitle,
+    label: meta.periodLabel || defaultLabel,
+    rangeText,
+  };
+}
+
+export function buildPurchasesReportPdfDoc(
+  purchases: Purchase[],
+  settings: BusinessSettings,
+  meta: PurchasesReportPdfMeta
+): jsPDF {
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  const symbol = settings?.currencySymbol || 'TSh';
+  const biz = settings?.businessName || 'Procurement Control';
+  const period = resolvePurchasesPeriodMeta(meta);
+
+  const totalSpend = purchases.reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
+  const paidCount = purchases.filter(p => p.paymentStatus === 'PAID').length;
+  const unpaidCount = purchases.length - paidCount;
+
+  const supplierSet = new Set(
+    purchases.map(p => (p.supplierName || 'Walk-in Supplier').trim().toLowerCase())
+  );
+
+  const productAggMap = new Map<
+    string,
+    {
+      name: string;
+      orders: number;
+      qtyPurchased: number;
+      totalCost: number;
+    }
+  >();
+
+  let totalUnitsPurchased = 0;
+
+  for (const purchase of purchases) {
+    const seenInOrder = new Set<string>();
+    for (const item of purchase.items || []) {
+      const qty = Number(item.quantity) || 0;
+      const unitCost = Number(item.unitCost) || 0;
+      const lineTotal =
+        item.total !== undefined && item.total !== null ? Number(item.total) : qty * unitCost;
+
+      totalUnitsPurchased += qty;
+
+      const prodKey = item.productId || item.productName;
+      const existing = productAggMap.get(prodKey);
+      if (existing) {
+        existing.qtyPurchased += qty;
+        existing.totalCost += lineTotal;
+        if (!seenInOrder.has(prodKey)) {
+          existing.orders += 1;
+          seenInOrder.add(prodKey);
+        }
+      } else {
+        productAggMap.set(prodKey, {
+          name: item.productName || 'Unnamed Product',
+          orders: 1,
+          qtyPurchased: qty,
+          totalCost: lineTotal,
+        });
+        seenInOrder.add(prodKey);
+      }
+    }
+  }
+
+  const aggregatedProducts = Array.from(productAggMap.values()).sort(
+    (a, b) => b.totalCost - a.totalCost || b.qtyPurchased - a.qtyPurchased
+  );
+
+  const filtersSummary = meta.searchQuery?.trim()
+    ? `Search: "${meta.searchQuery.trim()}"`
+    : 'All Suppliers & Statuses';
+
+  let y = drawBanner(
+    doc,
+    period.title,
+    `${biz}${settings?.tagline ? ` | ${settings.tagline}` : ''}`,
+    [
+      `Period: ${period.label} (${period.rangeText})`,
+      `Generated: ${new Date().toLocaleString()}`,
+      settings?.phone ? `Phone: ${settings.phone}` : settings?.address || '',
+    ].filter(Boolean),
+    COLORS.navy
+  );
+
+  y = drawMetaStrip(doc, y, [
+    { label: 'Scope / Shop', value: meta.shopLabel },
+    { label: 'Selected Period', value: `${period.label} - ${period.rangeText}` },
+    { label: 'Filter / Query', value: filtersSummary },
+    {
+      label: 'Payment Breakdown',
+      value:
+        unpaidCount > 0
+          ? `${paidCount} Paid, ${unpaidCount} Partial/Unpaid`
+          : `${paidCount} Paid order(s)`,
+    },
+  ]);
+
+  y = drawKpiRow(doc, y, [
+    {
+      label: 'Total Purchase Spend',
+      value: formatCurrency(totalSpend, symbol),
+      color: COLORS.blue,
+    },
+    {
+      label: 'Purchase Orders',
+      value: `${purchases.length} order(s)`,
+      color: COLORS.navy,
+    },
+    {
+      label: 'Products Received',
+      value: `${formatQtyCompact(totalUnitsPurchased)} units (${aggregatedProducts.length} items)`,
+      color: COLORS.emerald,
+    },
+    {
+      label: 'Suppliers',
+      value: `${supplierSet.size} supplier(s)`,
+      color: COLORS.violet,
+    },
+  ]);
+
+  // Section 1: Purchase Orders
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(...COLORS.slate900);
+  doc.text(
+    pdfSafe(`1. Purchase Orders (${period.label} | ${period.rangeText})`),
+    12,
+    y + 2.5
+  );
+  y += 5;
+
+  const orderRows =
+    purchases.length === 0
+      ? [
+          [
+            '-',
+            '-',
+            '-',
+            `No purchases found for ${period.label} (${period.rangeText})`,
+            '-',
+            '-',
+          ],
+        ]
+      : purchases.map(purchase => {
+          const items = purchase.items || [];
+          const productLines =
+            items.length === 0
+              ? ['-']
+              : items.map((item, idx) => {
+                  const qtyStr = formatQtyCompact(Number(item.quantity) || 0);
+                  const costStr = formatCurrency(Number(item.unitCost) || 0, symbol);
+                  const lineTotal =
+                    item.total !== undefined && item.total !== null
+                      ? Number(item.total)
+                      : (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
+                  const totalStr = formatCurrency(lineTotal, symbol);
+                  const prefix = items.length > 1 ? `${idx + 1}. ` : '';
+                  return `${prefix}${item.productName}   |   ${qtyStr} x ${costStr}  =  ${totalStr}`;
+                });
+
+          const poAndDate = pdfSafeMultiline([
+            purchase.purchaseNumber || 'PO',
+            purchase.date || purchase.createdAt.slice(0, 10),
+            purchase.invoiceNumber ? `Inv: ${purchase.invoiceNumber}` : '',
+          ]);
+
+          const supplierBlock = pdfSafeMultiline([
+            purchase.supplierName || 'Walk-in Supplier',
+            purchase.supplierPhone ? `Tel: ${purchase.supplierPhone}` : '',
+            purchase.createdByName ? `By: ${purchase.createdByName}` : '',
+          ]);
+
+          const resolvedStoreName =
+            purchase.storeName ||
+            (purchase.storeId && meta.storeNameById?.[purchase.storeId]) ||
+            '';
+          const destinationBlock = pdfSafeMultiline([
+            purchase.shopName || 'Shop',
+            purchase.storeId
+              ? `Store: ${resolvedStoreName || 'Warehouse'}`
+              : 'Shop Floor',
+          ]);
+
+          return [
+            poAndDate,
+            supplierBlock,
+            destinationBlock,
+            pdfSafeMultiline(productLines),
+            pdfSafe(purchase.paymentStatus || 'PAID'),
+            pdfSafe(formatCurrency(purchase.totalAmount || 0, symbol)),
+          ];
+        });
+
+  autoTable(doc, {
+    startY: y,
+    margin: { left: 12, right: 12, bottom: 15 },
+    rowPageBreak: 'avoid',
+    head: [
+      [
+        'PO # & Date',
+        'Supplier & Phone',
+        'Shop & Destination',
+        'Products Purchased (Item | Qty x Cost = Subtotal)',
+        'Status',
+        'Total',
+      ],
+    ],
+    body: orderRows,
+    styles: {
+      fontSize: 7.5,
+      cellPadding: { top: 2.8, right: 2.5, bottom: 2.8, left: 2.5 },
+      textColor: COLORS.slate900,
+      overflow: 'linebreak',
+      valign: 'top',
+      lineColor: COLORS.slate200,
+      lineWidth: 0.2,
+    },
+    headStyles: {
+      fillColor: COLORS.navy,
+      textColor: COLORS.white,
+      fontStyle: 'bold',
+      fontSize: 7.5,
+      valign: 'middle',
+      cellPadding: { top: 3, right: 2.5, bottom: 3, left: 2.5 },
+    },
+    alternateRowStyles: { fillColor: COLORS.slate50 },
+    columnStyles: {
+      0: { cellWidth: 36 },
+      1: { cellWidth: 44 },
+      2: { cellWidth: 36 },
+      3: { cellWidth: 109, fontSize: 7.3 },
+      4: { cellWidth: 20, halign: 'center' },
+      5: { cellWidth: 28, halign: 'right', fontStyle: 'bold' },
+    },
+    didParseCell: data => {
+      if (data.section === 'body' && data.column.index === 0) {
+        data.cell.styles.fontStyle = 'bold';
+      }
+      if (data.section === 'body' && data.column.index === 4) {
+        const val = String(data.cell.raw || '');
+        if (val === 'PAID') {
+          data.cell.styles.textColor = COLORS.emerald;
+          data.cell.styles.fontStyle = 'bold';
+        } else if (val === 'PARTIAL' || val === 'UNPAID') {
+          data.cell.styles.textColor = COLORS.amber;
+          data.cell.styles.fontStyle = 'bold';
+        }
+      }
+    },
+  });
+
+  // Section 2: Products Purchased Breakdown
+  if (aggregatedProducts.length > 0) {
+    let nextY = getLastTableY(doc, y + 30) + 9;
+    const pageH = doc.internal.pageSize.getHeight();
+    if (nextY > pageH - 38) {
+      doc.addPage();
+      nextY = 16;
+    }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...COLORS.slate900);
+    doc.text(
+      pdfSafe(
+        `2. Products Purchased Breakdown - ${period.label} (${aggregatedProducts.length} product(s) | ${formatQtyCompact(totalUnitsPurchased)} total units)`
+      ),
+      12,
+      nextY
+    );
+
+    const productSummaryRows = aggregatedProducts.map((p, idx) => {
+      const avgUnitCost = p.qtyPurchased > 0 ? p.totalCost / p.qtyPurchased : 0;
+      return [
+        String(idx + 1),
+        pdfSafe(p.name),
+        String(p.orders),
+        formatQtyCompact(p.qtyPurchased),
+        pdfSafe(formatCurrency(avgUnitCost, symbol)),
+        pdfSafe(formatCurrency(p.totalCost, symbol)),
+      ];
+    });
+
+    const totalProductsCost = aggregatedProducts.reduce((s, p) => s + p.totalCost, 0);
+
+    autoTable(doc, {
+      startY: nextY + 3.5,
+      margin: { left: 12, right: 12, bottom: 15 },
+      rowPageBreak: 'avoid',
+      head: [['#', 'Product Name', 'Orders', 'Qty Purchased', 'Avg Unit Cost', 'Total Cost']],
+      body: productSummaryRows,
+      foot: [
+        [
+          '',
+          `PERIOD TOTAL (${aggregatedProducts.length} PRODUCTS)`,
+          String(purchases.length),
+          formatQtyCompact(totalUnitsPurchased),
+          '',
+          pdfSafe(formatCurrency(totalProductsCost, symbol)),
+        ],
+      ],
+      styles: {
+        fontSize: 7.8,
+        cellPadding: { top: 2.6, right: 2.5, bottom: 2.6, left: 2.5 },
+        textColor: COLORS.slate900,
+        overflow: 'linebreak',
+        valign: 'middle',
+        lineColor: COLORS.slate200,
+        lineWidth: 0.2,
+      },
+      headStyles: {
+        fillColor: COLORS.blueDark,
+        textColor: COLORS.white,
+        fontStyle: 'bold',
+        fontSize: 7.8,
+      },
+      footStyles: {
+        fillColor: COLORS.slate100,
+        textColor: COLORS.slate900,
+        fontStyle: 'bold',
+        fontSize: 8,
+      },
+      alternateRowStyles: { fillColor: COLORS.slate50 },
+      columnStyles: {
+        0: { cellWidth: 12, halign: 'center', textColor: COLORS.slate500 },
+        1: { cellWidth: 125, fontStyle: 'bold' },
+        2: { cellWidth: 24, halign: 'right' },
+        3: { cellWidth: 32, halign: 'right', fontStyle: 'bold', textColor: COLORS.blueDark },
+        4: { cellWidth: 38, halign: 'right' },
+        5: { cellWidth: 42, halign: 'right', fontStyle: 'bold' },
+      },
+    });
+  }
+
+  applyPageFooters(
+    doc,
+    `${biz} - ${period.title} (${meta.shopLabel} | ${period.rangeText})`
+  );
+  return doc;
+}
+
+export async function downloadPurchasesReportPdf(
+  purchases: Purchase[],
+  settings: BusinessSettings,
+  meta: PurchasesReportPdfMeta
+): Promise<boolean> {
+  const doc = buildPurchasesReportPdfDoc(purchases, settings, meta);
+  const period = resolvePurchasesPeriodMeta(meta);
+  const dateTag =
+    meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate}_to_${meta.endDate}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfDownload(
+    doc,
+    `purchases_report_${period.key}_${meta.shopLabel}_${dateTag}.pdf`
+  );
+}
+
+// =====================================================================
+// 9. SINGLE PURCHASE ORDER VOUCHER PDF (AdminPurchases.tsx)
+// =====================================================================
+export function buildSinglePurchasePdfDoc(
+  purchase: Purchase,
+  settings: BusinessSettings,
+  resolvedStoreName?: string
+): jsPDF {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const symbol = settings?.currencySymbol || 'TSh';
+  const biz = settings?.businessName || 'Purchase Order';
+
+  const items = purchase.items || [];
+  const totalQty = items.reduce((s, i) => s + (Number(i.quantity) || 0), 0);
+  const grandTotal =
+    Number(purchase.totalAmount) ||
+    items.reduce(
+      (s, i) =>
+        s +
+        (i.total !== undefined && i.total !== null
+          ? Number(i.total)
+          : (Number(i.quantity) || 0) * (Number(i.unitCost) || 0)),
+      0
+    );
+
+  const isPaid = purchase.paymentStatus === 'PAID';
+  const purchaseDateStr = purchase.date || purchase.createdAt.slice(0, 10);
+  const destLabel = purchase.storeId
+    ? `${purchase.shopName || 'Shop'} - Store: ${purchase.storeName || resolvedStoreName || 'Warehouse'}`
+    : `${purchase.shopName || 'Shop'} - Shop Floor`;
+
+  let y = drawBanner(
+    doc,
+    'PURCHASE ORDER VOUCHER',
+    `${biz}${settings?.address ? ` | ${settings.address}` : ''}${settings?.phone ? ` | ${settings.phone}` : ''}`,
+    [
+      `PO #: ${purchase.purchaseNumber || purchase.id.slice(0, 8)}`,
+      `Purchase Date: ${purchaseDateStr}`,
+      `Payment: ${purchase.paymentStatus}`,
+    ],
+    isPaid ? COLORS.navy : COLORS.amber
+  );
+
+  y = drawMetaStrip(doc, y, [
+    {
+      label: 'Supplier / Vendor',
+      value: purchase.supplierPhone
+        ? `${purchase.supplierName} (${purchase.supplierPhone})`
+        : purchase.supplierName || 'Walk-in Supplier',
+    },
+    {
+      label: 'Invoice #',
+      value: purchase.invoiceNumber || 'Not Provided',
+    },
+    {
+      label: 'Destination',
+      value: destLabel,
+    },
+  ]);
+
+  y = drawKpiRow(doc, y, [
+    { label: 'Line Items', value: `${items.length} product(s)`, color: COLORS.navy },
+    {
+      label: 'Total Units',
+      value: `${formatQtyCompact(totalQty)} units`,
+      color: COLORS.blue,
+    },
+    {
+      label: 'Payment Status',
+      value: purchase.paymentStatus,
+      color: isPaid ? COLORS.emerald : COLORS.amber,
+    },
+    {
+      label: 'Total Amount',
+      value: formatCurrency(grandTotal, symbol),
+      color: COLORS.violet,
+    },
+  ]);
+
+  const rows =
+    items.length === 0
+      ? [['-', 'No products recorded on this purchase', '-', '-', '-']]
+      : items.map((item, idx) => {
+          const qty = Number(item.quantity) || 0;
+          const unitCost = Number(item.unitCost) || 0;
+          const lineTotal =
+            item.total !== undefined && item.total !== null ? Number(item.total) : qty * unitCost;
+          return [
+            String(idx + 1),
+            pdfSafe(item.productName),
+            formatQtyCompact(qty),
+            pdfSafe(formatCurrency(unitCost, symbol)),
+            pdfSafe(formatCurrency(lineTotal, symbol)),
+          ];
+        });
+
+  autoTable(doc, {
+    startY: y,
+    margin: { left: 12, right: 12, bottom: 20 },
+    rowPageBreak: 'avoid',
+    head: [['#', 'Product Name', 'Quantity', 'Unit Cost', 'Subtotal']],
+    body: rows,
+    styles: {
+      fontSize: 8.5,
+      cellPadding: { top: 2.8, right: 2.5, bottom: 2.8, left: 2.5 },
+      textColor: COLORS.slate900,
+      lineColor: COLORS.slate200,
+      lineWidth: 0.2,
+    },
+    headStyles: { fillColor: COLORS.navy, textColor: COLORS.white, fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: COLORS.slate50 },
+    columnStyles: {
+      0: { cellWidth: 12, halign: 'center', textColor: COLORS.slate500 },
+      1: { fontStyle: 'bold' },
+      2: { cellWidth: 26, halign: 'center', fontStyle: 'bold', textColor: COLORS.blueDark },
+      3: { cellWidth: 34, halign: 'right' },
+      4: { cellWidth: 38, halign: 'right', fontStyle: 'bold' },
+    },
+  });
+
+  let afterY = getLastTableY(doc, y + 30) + 6;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  if (afterY > pageH - 55) {
+    doc.addPage();
+    afterY = 18;
+  }
+
+  // Left: Supplier Contact & Notes
+  const leftBoxW = 104;
+  doc.setFillColor(...COLORS.slate50);
+  doc.setDrawColor(...COLORS.slate200);
+  doc.roundedRect(12, afterY, leftBoxW, 26, 2, 2, 'FD');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.5);
+  doc.setTextColor(...COLORS.slate500);
+  doc.text('SUPPLIER & ORDER NOTES', 15, afterY + 5.5);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(...COLORS.slate900);
+  const noteLines = [
+    `Supplier: ${purchase.supplierName || 'Walk-in Supplier'}${purchase.supplierPhone ? `  |  Tel: ${purchase.supplierPhone}` : ''}`,
+    `Recorded: ${formatDateTime(purchase.createdAt)} by ${purchase.createdByName || 'Admin'}`,
+    purchase.notes ? `Notes: ${purchase.notes}` : '',
+  ].filter(Boolean);
+  doc.text(pdfSafeMultiline(noteLines), 15, afterY + 10.5, { maxWidth: leftBoxW - 6 });
+
+  // Right: Grand Total Box
+  const sumX = pageW - 12 - 76;
+  doc.setFillColor(...COLORS.slate50);
+  doc.setDrawColor(...COLORS.slate200);
+  doc.roundedRect(sumX, afterY, 76, 26, 2, 2, 'FD');
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.5);
+  doc.setTextColor(...COLORS.slate700);
+  doc.text('Total Line Items:', sumX + 4, afterY + 6.5);
+  doc.text(`${items.length} (${formatQtyCompact(totalQty)} units)`, sumX + 72, afterY + 6.5, {
+    align: 'right',
+  });
+
+  doc.text('Payment Status:', sumX + 4, afterY + 13);
+  doc.text(pdfSafe(purchase.paymentStatus), sumX + 72, afterY + 13, {
+    align: 'right',
+  });
+
+  doc.setFillColor(...COLORS.navy);
+  doc.roundedRect(sumX + 2, afterY + 16.5, 72, 8, 1.5, 1.5, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(...COLORS.white);
+  doc.text('GRAND TOTAL:', sumX + 5, afterY + 21.8);
+  doc.text(pdfSafe(formatCurrency(grandTotal, symbol)), sumX + 71, afterY + 21.8, {
+    align: 'right',
+  });
+
+  // Signature Lines
+  const sigY = afterY + 42;
+  doc.setDrawColor(...COLORS.slate500);
+  doc.setLineWidth(0.3);
+  doc.line(12, sigY, 92, sigY);
+  doc.line(pageW - 92, sigY, pageW - 12, sigY);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.5);
+  doc.setTextColor(...COLORS.slate500);
+  doc.text(pdfSafe(`Recorded By (${purchase.createdByName || 'Admin'})`), 12, sigY + 4.5);
+  doc.text('Supplier / Receiver Signature & Date', pageW - 92, sigY + 4.5);
+
+  applyPageFooters(
+    doc,
+    `${biz} - Purchase Order Voucher (${purchase.purchaseNumber || purchase.id.slice(0, 8)})`
+  );
+  return doc;
+}
+
+export async function downloadSinglePurchasePdf(
+  purchase: Purchase,
+  settings: BusinessSettings,
+  resolvedStoreName?: string
+): Promise<boolean> {
+  const doc = buildSinglePurchasePdfDoc(purchase, settings, resolvedStoreName);
+  const poTag = purchase.purchaseNumber || purchase.id.slice(0, 8);
+  const dateTag = purchase.date || purchase.createdAt.slice(0, 10);
+  return triggerPdfDownload(doc, `purchase_${poTag}_${dateTag}.pdf`);
+}
+

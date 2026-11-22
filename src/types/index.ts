@@ -313,6 +313,7 @@ export interface PurchaseItem {
   productName: string;
   quantity: number;
   unitCost: number;
+  sellingPrice?: number;
   total: number;
 }
 
@@ -324,6 +325,7 @@ export interface Purchase {
   storeId?: string;
   storeName?: string;
   supplierName: string;
+  supplierPhone?: string;
   date: string;
   items: PurchaseItem[];
   totalAmount: number;

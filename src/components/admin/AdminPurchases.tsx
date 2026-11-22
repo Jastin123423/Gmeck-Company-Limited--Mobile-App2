@@ -17,11 +17,21 @@ import {
   Warehouse,
   User as UserIcon,
   Calendar,
+  Phone,
+  Download,
+  FileDown,
+  PackagePlus,
+  UserPlus,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { PurchaseIcon } from '../common/PurchaseIcon';
 import { PurchaseService } from '../../services/purchaseService';
+import { ProductService } from '../../services/productService';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
+import {
+  downloadPurchasesReportPdf,
+  downloadSinglePurchasePdf,
+} from '../../utils/pdfExport';
 import type { Purchase } from '../../types';
 import {
   getAdminManagedShops,
@@ -31,11 +41,73 @@ import {
 } from '../../utils/permissions';
 
 const PAGE_SIZE = 15;
+const SAVED_SUPPLIERS_KEY = 'omnibiz_saved_suppliers_v1';
+type PurchasePeriodFilter = 'all' | 'day' | 'week' | 'month' | 'custom';
+
+interface SavedSupplier {
+  name: string;
+  phone?: string;
+}
+
+function loadSavedSuppliers(): SavedSupplier[] {
+  try {
+    const raw = localStorage.getItem(SAVED_SUPPLIERS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((s: any) => s && typeof s.name === 'string' && s.name.trim())
+      .map((s: any) => ({
+        name: s.name.trim(),
+        phone: typeof s.phone === 'string' && s.phone.trim() ? s.phone.trim() : undefined,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedSuppliers(list: SavedSupplier[]) {
+  try {
+    localStorage.setItem(SAVED_SUPPLIERS_KEY, JSON.stringify(list));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function toLocalYMD(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getPurchaseLocalYMD(purchase: Purchase): string {
+  if (purchase.date && /^\d{4}-\d{2}-\d{2}$/.test(purchase.date.trim())) {
+    return purchase.date.trim();
+  }
+  const d = new Date(purchase.createdAt);
+  if (!Number.isNaN(d.getTime())) {
+    return toLocalYMD(d);
+  }
+  return toLocalYMD(new Date());
+}
+
+function formatReadableYMD(ymd: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
 
 interface PurchaseItemInput {
   productId: string;
   quantity: number | string;
   unitCost: number | string;
+  sellingPrice: number | string;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -294,8 +366,19 @@ export const AdminPurchases: React.FC = () => {
   const [returnError, setReturnError] = useState('');
   const [isReturning, setIsReturning] = useState(false);
 
-  // List search & pagination
+  // List search, period filter & pagination
+  const todayYMD = toLocalYMD(new Date());
   const [searchQuery, setSearchQuery] = useState('');
+  const [periodFilter, setPeriodFilter] = useState<PurchasePeriodFilter>('all');
+  const [customStartDate, setCustomStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return toLocalYMD(d);
+  });
+  const [customEndDate, setCustomEndDate] = useState(() => toLocalYMD(new Date()));
+  const [searchPeriodOnly, setSearchPeriodOnly] = useState(false);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const [downloadingPurchaseId, setDownloadingPurchaseId] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
 
@@ -308,7 +391,9 @@ export const AdminPurchases: React.FC = () => {
   const [purchaseShopId, setPurchaseShopId] = useState('');
   const [destinationType, setDestinationType] = useState<'SHOP_FLOOR' | 'STORE'>('SHOP_FLOOR');
   const [purchaseStoreId, setPurchaseStoreId] = useState('');
+  const [purchaseDate, setPurchaseDate] = useState(() => toLocalYMD(new Date()));
   const [supplierName, setSupplierName] = useState('');
+  const [supplierPhone, setSupplierPhone] = useState('');
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [paymentStatus, setPaymentStatus] = useState<'PAID' | 'PARTIAL' | 'UNPAID'>('PAID');
   const [notes, setNotes] = useState('');
@@ -317,6 +402,26 @@ export const AdminPurchases: React.FC = () => {
   const [purchaseProductSearch, setPurchaseProductSearch] = useState('');
   const [purchaseSearchLimit, setPurchaseSearchLimit] = useState(PAGE_SIZE);
   const purchaseProductSearchRef = useRef<HTMLInputElement>(null);
+
+  // Inline Create Product Modal state (from Add/Edit Purchase page)
+  const [isCreateProductOpen, setIsCreateProductOpen] = useState(false);
+  const [newProdName, setNewProdName] = useState('');
+  const [newProdVariation, setNewProdVariation] = useState('');
+  const [newProdCategoryId, setNewProdCategoryId] = useState('');
+  const [newProdUnit, setNewProdUnit] = useState('pcs');
+  const [newProdBuyPrice, setNewProdBuyPrice] = useState('');
+  const [newProdSellPrice, setNewProdSellPrice] = useState('');
+  const [newProdSku, setNewProdSku] = useState('');
+  const [newProdMinStock, setNewProdMinStock] = useState('5');
+  const [createProdError, setCreateProdError] = useState('');
+  const [isCreatingProduct, setIsCreatingProduct] = useState(false);
+
+  // Saved suppliers directory + Add New Supplier modal state
+  const [savedSuppliers, setSavedSuppliers] = useState<SavedSupplier[]>(() => loadSavedSuppliers());
+  const [isAddSupplierOpen, setIsAddSupplierOpen] = useState(false);
+  const [newSupplierName, setNewSupplierName] = useState('');
+  const [newSupplierPhone, setNewSupplierPhone] = useState('');
+  const [newSupplierError, setNewSupplierError] = useState('');
 
   if (!currentUser) return null;
 
@@ -366,9 +471,78 @@ export const AdminPurchases: React.FC = () => {
     });
   }, [purchaseProductPool, purchaseProductSearch]);
 
-  // ✅ Filter (search) → sort newest first → memo
+  // Compute active date range for Purchase List period filter
+  const periodRange = useMemo(() => {
+    const now = new Date();
+    const today = toLocalYMD(now);
+    if (periodFilter === 'day') {
+      return {
+        startDate: today,
+        endDate: today,
+        periodTitle: 'Daily Purchases Report',
+        periodLabel: 'Day (Today)',
+        dateRangeText: formatReadableYMD(today),
+      };
+    }
+    if (periodFilter === 'week') {
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+      const startStr = toLocalYMD(start);
+      return {
+        startDate: startStr,
+        endDate: today,
+        periodTitle: 'Weekly Purchases Report',
+        periodLabel: 'Week (Last 7 Days)',
+        dateRangeText: `${formatReadableYMD(startStr)} - ${formatReadableYMD(today)}`,
+      };
+    }
+    if (periodFilter === 'month') {
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      const startStr = toLocalYMD(start);
+      return {
+        startDate: startStr,
+        endDate: today,
+        periodTitle: 'Monthly Purchases Report',
+        periodLabel: 'Month (This Month)',
+        dateRangeText: `${formatReadableYMD(startStr)} - ${formatReadableYMD(today)}`,
+      };
+    }
+    if (periodFilter === 'custom') {
+      const s = customStartDate || today;
+      const e = customEndDate || today;
+      const [lo, hi] = s <= e ? [s, e] : [e, s];
+      return {
+        startDate: lo,
+        endDate: hi,
+        periodTitle: 'Custom Period Purchases Report',
+        periodLabel: 'Custom Range',
+        dateRangeText:
+          lo === hi
+            ? formatReadableYMD(lo)
+            : `${formatReadableYMD(lo)} - ${formatReadableYMD(hi)}`,
+      };
+    }
+    return {
+      startDate: undefined as string | undefined,
+      endDate: undefined as string | undefined,
+      periodTitle: 'All Purchases Report',
+      periodLabel: 'All Dates',
+      dateRangeText: 'All Recorded Dates',
+    };
+  }, [periodFilter, customStartDate, customEndDate]);
+
+  const storeNameMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const st of dbState.stores || []) {
+      map[st.id] = st.name;
+    }
+    return map;
+  }, [dbState.stores]);
+
+  const isGlobalSearchActive = Boolean(searchQuery.trim()) && !searchPeriodOnly && periodFilter !== 'all';
+
+  // ✅ Filter (period + multi-token search) → sort by purchase date desc, then createdAt desc
   const purchases = useMemo(() => {
-    const filtered = PurchaseService.getPurchases(
+    const base = PurchaseService.getPurchases(
       {
         shopId: isSeller
           ? currentShop?.id || selectedShopId
@@ -377,34 +551,79 @@ export const AdminPurchases: React.FC = () => {
           : selectedShopId,
       },
       currentUser
-    ).filter(purchase => {
-      if (!searchQuery.trim()) return true;
+    );
 
-      const q = searchQuery.trim().toLowerCase();
+    const rawQ = searchQuery.trim().toLowerCase();
+    const tokens = rawQ ? rawQ.split(/\s+/).filter(Boolean) : [];
+    const applyDateWindow = periodFilter !== 'all' && (!rawQ || searchPeriodOnly);
 
-      if (purchase.supplierName.toLowerCase().includes(q)) return true;
-      if (purchase.purchaseNumber.toLowerCase().includes(q)) return true;
-      if (purchase.invoiceNumber && purchase.invoiceNumber.toLowerCase().includes(q)) return true;
-      if (
-        (purchase.items || []).some(
-          item =>
-            item.productName.toLowerCase().includes(q) ||
-            item.productId.toLowerCase().includes(q)
-        )
-      )
-        return true;
-      if (purchase.shopName && purchase.shopName.toLowerCase().includes(q)) return true;
+    const filtered = base.filter(purchase => {
+      if (applyDateWindow && periodRange.startDate && periodRange.endDate) {
+        const pYmd = getPurchaseLocalYMD(purchase);
+        if (pYmd < periodRange.startDate || pYmd > periodRange.endDate) {
+          return false;
+        }
+      }
 
-      return false;
+      if (tokens.length === 0) return true;
+
+      const storeLabel =
+        purchase.storeName || (purchase.storeId ? storeNameMap[purchase.storeId] || '' : '');
+      const itemsText = (purchase.items || [])
+        .map(i => `${i.productName} ${i.productId}`)
+        .join(' ');
+      const haystack = [
+        purchase.supplierName,
+        purchase.supplierPhone || '',
+        purchase.purchaseNumber,
+        purchase.invoiceNumber || '',
+        purchase.shopName || '',
+        storeLabel,
+        purchase.notes || '',
+        purchase.paymentStatus,
+        purchase.date || '',
+        getPurchaseLocalYMD(purchase),
+        purchase.createdByName || '',
+        itemsText,
+      ]
+        .join(' ')
+        .toLowerCase();
+
+      return tokens.every(tok => haystack.includes(tok));
     });
 
-    // Sort newest first
+    // Sort newest purchase date first, then createdAt descending
     return [...filtered].sort((a, b) => {
-      const da = new Date(a.createdAt).getTime();
-      const db = new Date(b.createdAt).getTime();
-      return db - da;
+      const ymdA = getPurchaseLocalYMD(a);
+      const ymdB = getPurchaseLocalYMD(b);
+      if (ymdA !== ymdB) return ymdB.localeCompare(ymdA);
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
-  }, [dbState.purchases, searchQuery, selectedShopId, currentShop, currentUser, isSeller]);
+  }, [
+    dbState.purchases,
+    searchQuery,
+    periodFilter,
+    periodRange,
+    searchPeriodOnly,
+    storeNameMap,
+    selectedShopId,
+    currentShop,
+    currentUser,
+    isSeller,
+  ]);
+
+  const listMetrics = useMemo(() => {
+    const totalSpend = purchases.reduce((sum, p) => sum + (Number(p.totalAmount) || 0), 0);
+    const totalUnits = purchases.reduce(
+      (sum, p) => sum + (p.items || []).reduce((s, i) => s + (Number(i.quantity) || 0), 0),
+      0
+    );
+    return {
+      orderCount: purchases.length,
+      totalSpend,
+      totalUnits: Number(totalUnits.toFixed(3)),
+    };
+  }, [purchases]);
 
   // Filter purchase returns (Return List)
   const purchaseReturns = useMemo(() => {
@@ -454,10 +673,10 @@ export const AdminPurchases: React.FC = () => {
     return { totalReturns, totalUnits, totalValue };
   }, [purchaseReturns]);
 
-  // Reset pagination on search or shop change
+  // Reset pagination on search, period, or shop change
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
-  }, [searchQuery, selectedShopId]);
+  }, [searchQuery, periodFilter, customStartDate, customEndDate, searchPeriodOnly, selectedShopId]);
 
   useEffect(() => {
     setVisibleReturnsCount(PAGE_SIZE);
@@ -496,7 +715,9 @@ export const AdminPurchases: React.FC = () => {
       st => st.shopId === targetShop && st.status === 'ACTIVE'
     );
     setPurchaseStoreId(shopStores[0]?.id || '');
+    setPurchaseDate(toLocalYMD(new Date()));
     setSupplierName('');
+    setSupplierPhone('');
     setInvoiceNumber('');
     setPaymentStatus('PAID');
     setNotes('');
@@ -537,23 +758,146 @@ export const AdminPurchases: React.FC = () => {
     setPurchasesSubTab('add');
   };
 
+  // Build deduplicated list of existing suppliers (from past purchases + locally added suppliers)
+  const existingSuppliers = useMemo(() => {
+    const map = new Map<string, SavedSupplier>();
+
+    // First read from purchases sorted newest-first so most recent phone wins
+    const sortedPurchases = [...(dbState.purchases || [])].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    for (const p of sortedPurchases) {
+      const cleanName = (p.supplierName || '').trim();
+      if (!cleanName || cleanName.toLowerCase() === 'walk-in supplier') continue;
+      const key = cleanName.toLowerCase();
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, {
+          name: cleanName,
+          phone: p.supplierPhone?.trim() || undefined,
+        });
+      } else if (!existing.phone && p.supplierPhone?.trim()) {
+        existing.phone = p.supplierPhone.trim();
+      }
+    }
+
+    // Merge saved local suppliers (user-added via "+ Add New Supplier")
+    for (const s of savedSuppliers) {
+      const cleanName = s.name.trim();
+      if (!cleanName || cleanName.toLowerCase() === 'walk-in supplier') continue;
+      const key = cleanName.toLowerCase();
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, { name: cleanName, phone: s.phone });
+      } else if (s.phone) {
+        existing.phone = s.phone;
+      }
+    }
+
+    // Ensure currently selected supplier (e.g., while editing) is always present
+    const currentClean = supplierName.trim();
+    if (currentClean && currentClean.toLowerCase() !== 'walk-in supplier') {
+      const key = currentClean.toLowerCase();
+      if (!map.has(key)) {
+        map.set(key, {
+          name: currentClean,
+          phone: supplierPhone.trim() || undefined,
+        });
+      }
+    }
+
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [dbState.purchases, savedSuppliers, supplierName, supplierPhone]);
+
+  const handleSelectSupplier = (selectedValue: string) => {
+    if (selectedValue === '__ADD_NEW_SUPPLIER__') {
+      setNewSupplierName('');
+      setNewSupplierPhone('');
+      setNewSupplierError('');
+      setIsAddSupplierOpen(true);
+      return;
+    }
+
+    if (!selectedValue) {
+      setSupplierName('');
+      setSupplierPhone('');
+      return;
+    }
+
+    const matched = existingSuppliers.find(
+      s => s.name.toLowerCase() === selectedValue.toLowerCase()
+    );
+    setSupplierName(matched ? matched.name : selectedValue);
+    if (matched?.phone) {
+      setSupplierPhone(matched.phone);
+    } else {
+      setSupplierPhone('');
+    }
+  };
+
+  const handleSaveNewSupplier = (e: React.FormEvent) => {
+    e.preventDefault();
+    setNewSupplierError('');
+    const cleanName = newSupplierName.trim();
+    const cleanPhone = newSupplierPhone.trim() || undefined;
+
+    if (!cleanName) {
+      setNewSupplierError('Please enter the supplier name.');
+      return;
+    }
+
+    const nextList: SavedSupplier[] = [
+      { name: cleanName, phone: cleanPhone },
+      ...savedSuppliers.filter(s => s.name.toLowerCase() !== cleanName.toLowerCase()),
+    ];
+    setSavedSuppliers(nextList);
+    persistSavedSuppliers(nextList);
+
+    setSupplierName(cleanName);
+    setSupplierPhone(cleanPhone || '');
+    setIsAddSupplierOpen(false);
+    setNewSupplierName('');
+    setNewSupplierPhone('');
+
+    addToast({
+      type: 'success',
+      title: 'Supplier Added & Selected',
+      description: `${cleanName}${cleanPhone ? ` (${cleanPhone})` : ''} is now selected for this purchase.`,
+    });
+  };
+
   const openEditPurchase = (purchase: Purchase) => {
     setEditingPurchase(purchase);
     setIsEditMode(true);
     setPurchaseShopId(purchase.shopId);
     setDestinationType(purchase.storeId ? 'STORE' : 'SHOP_FLOOR');
     setPurchaseStoreId(purchase.storeId || '');
-    setSupplierName(purchase.supplierName);
+    setPurchaseDate(getPurchaseLocalYMD(purchase));
+    setSupplierName(
+      purchase.supplierName && purchase.supplierName.toLowerCase() !== 'walk-in supplier'
+        ? purchase.supplierName
+        : ''
+    );
+    setSupplierPhone(purchase.supplierPhone || '');
     setInvoiceNumber(purchase.invoiceNumber || '');
     setPaymentStatus(purchase.paymentStatus);
     setNotes(purchase.notes || '');
 
     setItems(
-      (purchase.items || []).map(item => ({
-        productId: item.productId,
-        quantity: item.quantity.toString(),
-        unitCost: item.unitCost.toString(),
-      }))
+      (purchase.items || []).map(item => {
+        const matchedProd = visibleProducts.find(p => p.id === item.productId);
+        const currentSell =
+          item.sellingPrice !== undefined && item.sellingPrice !== null
+            ? item.sellingPrice
+            : matchedProd?.sellingPrice;
+        return {
+          productId: item.productId,
+          quantity: item.quantity.toString(),
+          unitCost: item.unitCost.toString(),
+          sellingPrice:
+            currentSell !== undefined && currentSell !== null ? currentSell.toString() : '',
+        };
+      })
     );
 
     setPurchaseProductSearch('');
@@ -583,6 +927,10 @@ export const AdminPurchases: React.FC = () => {
           unitCost:
             product.purchasePrice !== undefined && product.purchasePrice !== null && product.purchasePrice > 0
               ? product.purchasePrice.toString()
+              : '',
+          sellingPrice:
+            product.sellingPrice !== undefined && product.sellingPrice !== null && product.sellingPrice > 0
+              ? product.sellingPrice.toString()
               : '',
         },
         ...prev,
@@ -630,6 +978,10 @@ export const AdminPurchases: React.FC = () => {
               matched?.purchasePrice !== undefined && matched?.purchasePrice !== null
                 ? matched.purchasePrice.toString()
                 : '',
+            sellingPrice:
+              matched?.sellingPrice !== undefined && matched?.sellingPrice !== null
+                ? matched.sellingPrice.toString()
+                : '',
           };
         }
         return { ...item, [field]: value };
@@ -643,20 +995,215 @@ export const AdminPurchases: React.FC = () => {
     return sum + qty * cost;
   }, 0);
 
+  // Categories scoped to the active purchase shop (for inline Create Product modal)
+  const purchaseShopCategories = useMemo(() => {
+    const allCats = dbState.categories || [];
+    const shopSpecific = allCats.filter(
+      c => !c.shopId || c.shopId === purchaseShopId
+    );
+    return shopSpecific.length > 0 ? shopSpecific : allCats;
+  }, [dbState.categories, purchaseShopId]);
+
+  const openCreateProductModal = (prefillName?: string) => {
+    const trimmedPrefill = (prefillName ?? purchaseProductSearch).trim();
+    setNewProdName(trimmedPrefill);
+    setNewProdVariation('');
+    setNewProdCategoryId(purchaseShopCategories[0]?.id || 'general');
+    setNewProdUnit('pcs');
+    setNewProdBuyPrice('');
+    setNewProdSellPrice('');
+    setNewProdSku('');
+    setNewProdMinStock('5');
+    setCreateProdError('');
+    setIsCreateProductOpen(true);
+  };
+
+  const closeCreateProductModal = () => {
+    if (isCreatingProduct) return;
+    setIsCreateProductOpen(false);
+    setCreateProdError('');
+  };
+
+  const handleCreateProductAndAttach = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreateProdError('');
+
+    const targetShopId = purchaseShopId || availableShops[0]?.id || '';
+    if (!targetShopId) {
+      setCreateProdError('Please select a Target Shop / Unit first.');
+      return;
+    }
+
+    const trimmedName = newProdName.trim();
+    if (!trimmedName) {
+      setCreateProdError('Product name is required.');
+      return;
+    }
+
+    const buyPriceVal = newProdBuyPrice.trim() ? parseFloat(newProdBuyPrice) : 0;
+    if (!Number.isFinite(buyPriceVal) || buyPriceVal < 0) {
+      setCreateProdError('Buy price must be a valid non-negative number.');
+      return;
+    }
+
+    const sellPriceVal = newProdSellPrice.trim() ? parseFloat(newProdSellPrice) : buyPriceVal;
+    if (!Number.isFinite(sellPriceVal) || sellPriceVal < 0) {
+      setCreateProdError('Selling price must be a valid non-negative number.');
+      return;
+    }
+
+    const minStockVal = newProdMinStock.trim() ? parseFloat(newProdMinStock) : 5;
+
+    setIsCreatingProduct(true);
+    try {
+      // Create with currentStock: 0 so saving this purchase accurately adds the purchased quantity
+      const res = await ProductService.createProduct(
+        {
+          shopId: targetShopId,
+          name: trimmedName,
+          variation: newProdVariation.trim() || undefined,
+          categoryId: newProdCategoryId || purchaseShopCategories[0]?.id || 'general',
+          unit: newProdUnit.trim() || 'pcs',
+          purchasePrice: buyPriceVal,
+          sellingPrice: sellPriceVal,
+          currentStock: 0,
+          minStock: Number.isFinite(minStockVal) && minStockVal >= 0 ? minStockVal : 5,
+          sku: newProdSku.trim() || undefined,
+          status: 'ACTIVE',
+        },
+        currentUser
+      );
+
+      if (!res.success || !res.product) {
+        setCreateProdError(res.error || 'Could not create product.');
+        return;
+      }
+
+      const createdProduct = res.product;
+
+      // Immediately attach the newly created product to the top of the purchase list
+      setItems(prev => [
+        {
+          productId: createdProduct.id,
+          quantity: '1',
+          unitCost:
+            createdProduct.purchasePrice && createdProduct.purchasePrice > 0
+              ? createdProduct.purchasePrice.toString()
+              : buyPriceVal > 0
+                ? buyPriceVal.toString()
+                : '',
+          sellingPrice:
+            createdProduct.sellingPrice !== undefined && createdProduct.sellingPrice !== null
+              ? createdProduct.sellingPrice.toString()
+              : sellPriceVal > 0
+                ? sellPriceVal.toString()
+                : '',
+        },
+        ...prev.filter(i => i.productId !== createdProduct.id),
+      ]);
+
+      setPurchaseProductSearch('');
+      setPurchaseSearchLimit(PAGE_SIZE);
+      setIsCreateProductOpen(false);
+      setFormError('');
+
+      addToast({
+        type: 'success',
+        title: 'Product Created & Added to Purchase',
+        description: `"${createdProduct.name}" was created and attached to your purchase list.`,
+      });
+    } finally {
+      setIsCreatingProduct(false);
+    }
+  };
+
+  const handleDownloadPurchasesPdf = async () => {
+    if (isDownloadingPdf) return;
+    setIsDownloadingPdf(true);
+    try {
+      const scopeLabel = isSeller
+        ? currentShop?.name || 'My Shop'
+        : selectedShopId === 'ALL'
+          ? 'All Shops'
+          : availableShops.find(s => s.id === selectedShopId)?.name || 'Shop';
+
+      const effectivePeriodKey = isGlobalSearchActive ? 'search' : periodFilter;
+      const ok = await downloadPurchasesReportPdf(purchases, settings, {
+        shopLabel: scopeLabel,
+        periodKey: effectivePeriodKey,
+        periodTitle: isGlobalSearchActive
+          ? 'Purchases Search Report'
+          : periodRange.periodTitle,
+        periodLabel: isGlobalSearchActive
+          ? 'Search Results (All Dates)'
+          : periodRange.periodLabel,
+        dateRangeText: isGlobalSearchActive ? 'All Dates' : periodRange.dateRangeText,
+        startDate: isGlobalSearchActive ? undefined : periodRange.startDate,
+        endDate: isGlobalSearchActive ? undefined : periodRange.endDate,
+        searchQuery: searchQuery.trim() || undefined,
+        storeNameById: storeNameMap,
+      });
+
+      if (ok) {
+        addToast({
+          type: 'success',
+          title: 'Purchases PDF Downloaded',
+          description: `Exported ${purchases.length} purchase order(s) for ${
+            isGlobalSearchActive ? 'your search' : periodRange.periodLabel
+          }.`,
+        });
+      }
+    } finally {
+      setIsDownloadingPdf(false);
+    }
+  };
+
+  const handleDownloadSinglePurchasePdf = async (purchase: Purchase) => {
+    if (downloadingPurchaseId) return;
+    setDownloadingPurchaseId(purchase.id);
+    try {
+      const resolvedStore =
+        purchase.storeName ||
+        (purchase.storeId ? storeNameMap[purchase.storeId] : undefined);
+      const ok = await downloadSinglePurchasePdf(purchase, settings, resolvedStore);
+      if (ok) {
+        addToast({
+          type: 'success',
+          title: 'Purchase Voucher Downloaded',
+          description: `Saved PDF for ${purchase.purchaseNumber || purchase.supplierName}.`,
+        });
+      }
+    } finally {
+      setDownloadingPurchaseId(null);
+    }
+  };
+
   const handleSavePurchase = (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
+
+    const effectiveDate = purchaseDate.trim() || toLocalYMD(new Date());
+    if (effectiveDate > toLocalYMD(new Date())) {
+      setFormError('Purchase date cannot be in the future. Choose today or a previous date.');
+      return;
+    }
 
     if (items.length === 0) {
       setFormError('Please add at least one line item.');
       return;
     }
 
-    const finalItems = items.map(item => ({
-      productId: item.productId,
-      quantity: parseFloat(item.quantity as string) || 0,
-      unitCost: parseFloat(item.unitCost as string) || 0,
-    }));
+    const finalItems = items.map(item => {
+      const rawSell = String(item.sellingPrice ?? '').trim();
+      const parsedSell = rawSell !== '' ? parseFloat(rawSell) : undefined;
+      return {
+        productId: item.productId,
+        quantity: parseFloat(item.quantity as string) || 0,
+        unitCost: parseFloat(item.unitCost as string) || 0,
+        sellingPrice:
+          parsedSell !== undefined && Number.isFinite(parsedSell) ? parsedSell : undefined,
+      };
+    });
 
     for (const item of finalItems) {
       if (item.quantity <= 0) {
@@ -667,6 +1214,10 @@ export const AdminPurchases: React.FC = () => {
         setFormError('Unit cost must be greater than 0 for all items.');
         return;
       }
+      if (item.sellingPrice !== undefined && item.sellingPrice < 0) {
+        setFormError('Selling price cannot be negative.');
+        return;
+      }
       if (!item.productId) {
         setFormError('Please select a product for all items.');
         return;
@@ -674,12 +1225,30 @@ export const AdminPurchases: React.FC = () => {
     }
 
     const finalSupplierName = supplierName.trim() || 'Walk-in Supplier';
+    const finalSupplierPhone = supplierPhone.trim() || undefined;
+
+    // Remember supplier phone update in local directory for future purchases
+    if (
+      finalSupplierName.toLowerCase() !== 'walk-in supplier' &&
+      finalSupplierPhone
+    ) {
+      const nextSaved: SavedSupplier[] = [
+        { name: finalSupplierName, phone: finalSupplierPhone },
+        ...savedSuppliers.filter(
+          s => s.name.toLowerCase() !== finalSupplierName.toLowerCase()
+        ),
+      ];
+      setSavedSuppliers(nextSaved);
+      persistSavedSuppliers(nextSaved);
+    }
 
     if (editingPurchase) {
       const res = PurchaseService.updatePurchase(
         editingPurchase.id,
         {
           supplierName: finalSupplierName,
+          supplierPhone: finalSupplierPhone ?? '',
+          date: effectiveDate,
           invoiceNumber: invoiceNumber.trim() || undefined,
           paymentStatus,
           notes,
@@ -694,7 +1263,7 @@ export const AdminPurchases: React.FC = () => {
           title: 'Purchase Updated',
           description: `Purchase ${
             editingPurchase.purchaseNumber || editingPurchase.id
-          } updated. Stock recalculated.`,
+          } updated (${effectiveDate}). Stock recalculated.`,
         });
         setEditingPurchase(null);
         setIsEditMode(false);
@@ -713,6 +1282,8 @@ export const AdminPurchases: React.FC = () => {
           shopId: purchaseShopId || availableShops[0]?.id || '',
           storeId: destinationType === 'STORE' ? purchaseStoreId : undefined,
           supplierName: finalSupplierName,
+          supplierPhone: finalSupplierPhone,
+          date: effectiveDate,
           invoiceNumber: invoiceNumber.trim() || undefined,
           items: finalItems,
           paymentStatus,
@@ -722,13 +1293,14 @@ export const AdminPurchases: React.FC = () => {
       );
 
       if (res.success) {
+        const isPast = effectiveDate < toLocalYMD(new Date());
         addToast({
           type: 'success',
-          title: 'Purchase Recorded & Stock Ingested',
+          title: isPast ? `Past Purchase Recorded (${effectiveDate})` : 'Purchase Recorded & Stock Ingested',
           description:
             destinationType === 'STORE'
-              ? `Order from ${finalSupplierName} recorded and added to Store warehouse stock.`
-              : `Order from ${finalSupplierName} recorded. Shop floor inventories were restocked.`,
+              ? `Order from ${finalSupplierName} recorded for ${effectiveDate} and added to Store warehouse stock.`
+              : `Order from ${finalSupplierName} recorded for ${effectiveDate}. Shop floor inventories were restocked.`,
         });
         setPurchasesSubTab('list');
       } else {
@@ -1044,18 +1616,142 @@ export const AdminPurchases: React.FC = () => {
               </div>
             )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            {/* Purchase Date Calendar (Default Today — Switch to Past Date to Backdate) */}
+            <div
+              className={`p-3.5 rounded-xl border space-y-2 transition ${
+                purchaseDate < todayYMD
+                  ? 'bg-amber-500/10 border-amber-500/35'
+                  : 'bg-slate-950/80 border-slate-800'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="text-slate-200 font-semibold flex items-center gap-1.5">
+                  <Calendar
+                    className={`w-4 h-4 ${
+                      purchaseDate < todayYMD ? 'text-amber-400' : 'text-blue-400'
+                    }`}
+                  />
+                  <span>Purchase Date</span>
+                  {purchaseDate === todayYMD ? (
+                    <span className="px-1.5 py-0.5 rounded bg-blue-500/15 border border-blue-500/30 text-blue-300 text-[10px] font-bold">
+                      Today
+                    </span>
+                  ) : (
+                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold">
+                      Past Date ({formatReadableYMD(purchaseDate)})
+                    </span>
+                  )}
+                </label>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={purchaseDate}
+                    max={todayYMD}
+                    onChange={e => {
+                      const val = e.target.value;
+                      if (!val) {
+                        setPurchaseDate(todayYMD);
+                        return;
+                      }
+                      setPurchaseDate(val > todayYMD ? todayYMD : val);
+                    }}
+                    className={`bg-slate-900 border rounded-lg px-3 py-1.5 text-xs font-mono text-white focus:outline-none focus:ring-1 ${
+                      purchaseDate < todayYMD
+                        ? 'border-amber-500/50 focus:ring-amber-500'
+                        : 'border-slate-700 focus:ring-blue-500'
+                    }`}
+                  />
+                  {purchaseDate !== todayYMD && (
+                    <button
+                      type="button"
+                      onClick={() => setPurchaseDate(todayYMD)}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-[11px] font-semibold transition"
+                    >
+                      Back to Today
+                    </button>
+                  )}
+                </div>
+              </div>
+              <p
+                className={`text-[11px] ${
+                  purchaseDate < todayYMD ? 'text-amber-300/90' : 'text-slate-500'
+                }`}
+              >
+                {purchaseDate < todayYMD
+                  ? `This purchase will be listed and filtered under ${formatReadableYMD(purchaseDate)}.`
+                  : 'Defaults to today. Pick an earlier calendar date to record a past purchase.'}
+              </p>
+            </div>
+
+            {/* Supplier Selector (+ New Supplier), Supplier Phone Number, Vendor Invoice # */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-slate-300 font-semibold">
+                    Supplier / Vendor
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewSupplierName('');
+                      setNewSupplierPhone('');
+                      setNewSupplierError('');
+                      setIsAddSupplierOpen(true);
+                    }}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 transition"
+                  >
+                    <UserPlus className="w-3 h-3" />
+                    <span>+ New Supplier</span>
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={supplierName}
+                    onChange={e => handleSelectSupplier(e.target.value)}
+                    className="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="">Walk-in Supplier (Default)</option>
+                    {existingSuppliers.map(sup => (
+                      <option key={sup.name.toLowerCase()} value={sup.name}>
+                        {sup.name}
+                        {sup.phone ? ` (${sup.phone})` : ''}
+                      </option>
+                    ))}
+                    <option value="__ADD_NEW_SUPPLIER__">+ Add New Supplier...</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewSupplierName('');
+                      setNewSupplierPhone('');
+                      setNewSupplierError('');
+                      setIsAddSupplierOpen(true);
+                    }}
+                    title="Add New Supplier"
+                    aria-label="Add New Supplier"
+                    className="shrink-0 p-2.5 rounded-xl bg-emerald-600/15 hover:bg-emerald-600 border border-emerald-500/30 text-emerald-400 hover:text-white transition"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
               <div>
                 <label className="block text-slate-300 font-semibold mb-1.5">
-                  Supplier / Vendor (Optional)
+                  Supplier Number / Phone
                 </label>
-                <input
-                  type="text"
-                  value={supplierName}
-                  onChange={e => setSupplierName(e.target.value)}
-                  placeholder="Leave blank for 'Walk-in Supplier'"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
+                <div className="relative">
+                  <Phone className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="tel"
+                    inputMode="tel"
+                    value={supplierPhone}
+                    onChange={e => setSupplierPhone(e.target.value)}
+                    placeholder="Auto-fills or enter phone"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-3.5 py-2.5 text-white font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
               </div>
 
               <div>
@@ -1072,7 +1768,7 @@ export const AdminPurchases: React.FC = () => {
               </div>
             </div>
 
-            {/* Line Items — Quick Search Bar (Tap a Product to Arrange on List, No Add Item Button) */}
+            {/* Line Items — Quick Search Bar + Create Product Button */}
             <div className="space-y-3">
               {isEditMode && (
                 <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[11px]">
@@ -1081,9 +1777,9 @@ export const AdminPurchases: React.FC = () => {
                 </div>
               )}
 
-              {/* Search Bar + Clear All */}
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1 min-w-0">
+              {/* Search Bar + Create Product + Clear All */}
+              <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
+                <div className="relative flex-1 min-w-[200px]">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
                     ref={purchaseProductSearchRef}
@@ -1115,6 +1811,15 @@ export const AdminPurchases: React.FC = () => {
                   )}
                 </div>
 
+                <button
+                  type="button"
+                  onClick={() => openCreateProductModal()}
+                  className="shrink-0 inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white text-xs font-semibold shadow-sm whitespace-nowrap transition"
+                >
+                  <PackagePlus className="w-4 h-4" />
+                  <span>Create Product</span>
+                </button>
+
                 {items.length > 0 && (
                   <button
                     type="button"
@@ -1143,14 +1848,24 @@ export const AdminPurchases: React.FC = () => {
                   </div>
 
                   {purchaseSearchResults.length === 0 ? (
-                    <div className="py-7 px-4 text-center">
-                      <Package className="w-8 h-8 mx-auto text-slate-600 mb-1.5" />
-                      <p className="text-xs font-medium text-slate-400">
-                        No products match &ldquo;{purchaseProductSearch.trim()}&rdquo;
-                      </p>
-                      <p className="text-[11px] text-slate-500 mt-0.5">
-                        Try a shorter search or verify the product SKU.
-                      </p>
+                    <div className="py-7 px-4 text-center space-y-2.5">
+                      <Package className="w-8 h-8 mx-auto text-slate-600" />
+                      <div>
+                        <p className="text-xs font-medium text-slate-300">
+                          No products match &ldquo;{purchaseProductSearch.trim()}&rdquo;
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          Create it now and it will attach directly to your purchase list.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => openCreateProductModal(purchaseProductSearch.trim())}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow transition"
+                      >
+                        <PackagePlus className="w-4 h-4" />
+                        <span>Create &ldquo;{purchaseProductSearch.trim()}&rdquo;</span>
+                      </button>
                     </div>
                   ) : (
                     <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/70 overscroll-contain">
@@ -1300,48 +2015,121 @@ export const AdminPurchases: React.FC = () => {
                           </button>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-2.5 items-end pt-1 border-t border-slate-900">
-                          <div>
-                            <label className="block text-slate-400 text-[10px] mb-1">
-                              Quantity{matchedProduct?.unit ? ` (${matchedProduct.unit})` : ''}
-                            </label>
-                            <input
-                              type="number"
-                              inputMode="decimal"
-                              min="0"
-                              step="any"
-                              value={item.quantity}
-                              onChange={e => updateItemRow(idx, 'quantity', e.target.value)}
-                              onFocus={e => e.target.select()}
-                              placeholder="0"
-                              className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs text-center focus:outline-none focus:ring-1 focus:ring-blue-500"
-                            />
-                          </div>
+                        {(() => {
+                          const sellVal = parseFloat(String(item.sellingPrice ?? '')) || 0;
+                          const originalSell = matchedProduct?.sellingPrice ?? 0;
+                          const sellChanged =
+                            String(item.sellingPrice ?? '').trim() !== '' &&
+                            Math.abs(sellVal - originalSell) > 0.001;
+                          const isBelowCost =
+                            String(item.sellingPrice ?? '').trim() !== '' &&
+                            costVal > 0 &&
+                            sellVal < costVal;
+                          const unitMargin = sellVal - costVal;
 
-                          <div>
-                            <label className="block text-slate-400 text-[10px] mb-1">
-                              Buy Price ({settings.currencySymbol})
-                            </label>
-                            <input
-                              type="number"
-                              inputMode="decimal"
-                              step="0.01"
-                              min="0"
-                              value={item.unitCost}
-                              onChange={e => updateItemRow(idx, 'unitCost', e.target.value)}
-                              onFocus={e => e.target.select()}
-                              placeholder="0"
-                              className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                            />
-                          </div>
+                          return (
+                            <>
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 items-end pt-1.5 border-t border-slate-900">
+                                <div>
+                                  <label className="block text-slate-400 text-[10px] mb-1">
+                                    Quantity{matchedProduct?.unit ? ` (${matchedProduct.unit})` : ''}
+                                  </label>
+                                  <input
+                                    type="number"
+                                    inputMode="decimal"
+                                    min="0"
+                                    step="any"
+                                    value={item.quantity}
+                                    onChange={e => updateItemRow(idx, 'quantity', e.target.value)}
+                                    onFocus={e => e.target.select()}
+                                    placeholder="0"
+                                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs text-center focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                  />
+                                </div>
 
-                          <div className="text-right pb-1.5">
-                            <label className="block text-slate-500 text-[10px] mb-1">Subtotal</label>
-                            <div className="font-mono font-bold text-emerald-400 text-xs sm:text-sm truncate">
-                              {formatCurrency(lineTotal, settings.currencySymbol)}
-                            </div>
-                          </div>
-                        </div>
+                                <div>
+                                  <label className="block text-slate-400 text-[10px] mb-1">
+                                    Buy Price ({settings.currencySymbol})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    inputMode="decimal"
+                                    step="0.01"
+                                    min="0"
+                                    value={item.unitCost}
+                                    onChange={e => updateItemRow(idx, 'unitCost', e.target.value)}
+                                    onFocus={e => e.target.select()}
+                                    placeholder="0"
+                                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-white font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                  />
+                                </div>
+
+                                <div>
+                                  <label className="flex items-center justify-between text-slate-400 text-[10px] mb-1">
+                                    <span>Sell Price ({settings.currencySymbol})</span>
+                                    {sellChanged && (
+                                      <span className="text-[9px] font-bold text-amber-300 bg-amber-500/15 px-1 rounded">
+                                        New
+                                      </span>
+                                    )}
+                                  </label>
+                                  <input
+                                    type="number"
+                                    inputMode="decimal"
+                                    step="0.01"
+                                    min="0"
+                                    value={item.sellingPrice}
+                                    onChange={e =>
+                                      updateItemRow(idx, 'sellingPrice', e.target.value)
+                                    }
+                                    onFocus={e => e.target.select()}
+                                    placeholder="0"
+                                    className={`w-full bg-slate-900 border rounded-lg px-2.5 py-2 text-white font-mono text-xs focus:outline-none focus:ring-1 ${
+                                      isBelowCost
+                                        ? 'border-rose-500/60 focus:ring-rose-500'
+                                        : sellChanged
+                                          ? 'border-amber-500/60 focus:ring-amber-500'
+                                          : 'border-slate-800 focus:ring-blue-500'
+                                    }`}
+                                  />
+                                </div>
+
+                                <div className="text-right pb-1.5">
+                                  <label className="block text-slate-500 text-[10px] mb-1">
+                                    Subtotal
+                                  </label>
+                                  <div className="font-mono font-bold text-emerald-400 text-xs sm:text-sm truncate">
+                                    {formatCurrency(lineTotal, settings.currencySymbol)}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {(sellChanged || isBelowCost || (costVal > 0 && sellVal > 0)) && (
+                                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] pt-0.5">
+                                  <span
+                                    className={
+                                      isBelowCost
+                                        ? 'text-rose-400 font-semibold'
+                                        : 'text-slate-400'
+                                    }
+                                  >
+                                    {isBelowCost
+                                      ? `Warning: Selling price is below buy cost (${formatCurrency(unitMargin, settings.currencySymbol)}/unit)`
+                                      : costVal > 0 && sellVal > 0
+                                        ? `Profit/unit: ${formatCurrency(unitMargin, settings.currencySymbol)}`
+                                        : ''}
+                                  </span>
+                                  {sellChanged && (
+                                    <span className="text-amber-300/90 font-medium">
+                                      Updates product price: {formatCurrency(originalSell, settings.currencySymbol)} →{' '}
+                                      {formatCurrency(sellVal, settings.currencySymbol)}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     );
                   })}
@@ -1409,6 +2197,290 @@ export const AdminPurchases: React.FC = () => {
             </div>
           </form>
         </div>
+
+        {/* Inline Create Product Modal (auto-attaches to purchase list) */}
+        {isCreateProductOpen && (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4 overflow-y-auto">
+            <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-lg w-full p-4 sm:p-6 shadow-2xl max-h-[92vh] overflow-y-auto my-auto">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
+                <div className="flex items-center gap-2 text-emerald-400 min-w-0">
+                  <PackagePlus className="w-5 h-5 shrink-0" />
+                  <div className="min-w-0">
+                    <h3 className="text-sm sm:text-base font-bold text-white truncate">
+                      Create New Product
+                    </h3>
+                    <p className="text-[11px] text-slate-400 truncate">
+                      Saves to{' '}
+                      {availableShops.find(s => s.id === purchaseShopId)?.name || 'selected shop'} &amp;
+                      attaches directly to this purchase
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeCreateProductModal}
+                  className="text-slate-400 hover:text-white p-1 shrink-0"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {createProdError && (
+                <div className="mb-3.5 p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-medium">
+                  {createProdError}
+                </div>
+              )}
+
+              <form onSubmit={handleCreateProductAndAttach} className="space-y-3.5 text-xs">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    Product Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    value={newProdName}
+                    onChange={e => setNewProdName(e.target.value)}
+                    placeholder="e.g. Samsung Galaxy A15 128GB"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">
+                      Category
+                    </label>
+                    <select
+                      value={newProdCategoryId}
+                      onChange={e => setNewProdCategoryId(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    >
+                      {purchaseShopCategories.length === 0 ? (
+                        <option value="general">General</option>
+                      ) : (
+                        purchaseShopCategories.map(c => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">
+                      Unit *
+                    </label>
+                    <input
+                      type="text"
+                      value={newProdUnit}
+                      onChange={e => setNewProdUnit(e.target.value)}
+                      placeholder="pcs, kg, box, pack, L..."
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">
+                      Buy Price / Cost ({settings.currencySymbol})
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="0.01"
+                      min="0"
+                      value={newProdBuyPrice}
+                      onChange={e => setNewProdBuyPrice(e.target.value)}
+                      placeholder="0"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">
+                      Selling Price ({settings.currencySymbol}) *
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="0.01"
+                      min="0"
+                      required
+                      value={newProdSellPrice}
+                      onChange={e => setNewProdSellPrice(e.target.value)}
+                      placeholder="0"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-slate-400 font-medium mb-1">
+                      Variation (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={newProdVariation}
+                      onChange={e => setNewProdVariation(e.target.value)}
+                      placeholder="e.g. 500ml, Red"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-400 font-medium mb-1">
+                      SKU (Auto if blank)
+                    </label>
+                    <input
+                      type="text"
+                      value={newProdSku}
+                      onChange={e => setNewProdSku(e.target.value)}
+                      placeholder="Auto-generated"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-400 font-medium mb-1">
+                      Min Stock Alert
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min="0"
+                      value={newProdMinStock}
+                      onChange={e => setNewProdMinStock(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-slate-400 bg-slate-950/70 border border-slate-800 rounded-xl px-3 py-2">
+                  Initial stock starts at <strong className="text-white">0</strong> so saving this
+                  purchase adds the exact purchased quantity without double-counting.
+                </p>
+
+                <div className="flex items-center gap-2.5 pt-2">
+                  <button
+                    type="button"
+                    onClick={closeCreateProductModal}
+                    disabled={isCreatingProduct}
+                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isCreatingProduct}
+                    className="flex-1 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold shadow-lg transition flex items-center justify-center gap-2 disabled:opacity-60"
+                  >
+                    {isCreatingProduct ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Creating...</span>
+                      </>
+                    ) : (
+                      <>
+                        <PackagePlus className="w-4 h-4" />
+                        <span>Create &amp; Attach to Purchase</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Add New Supplier Modal */}
+        {isAddSupplierOpen && (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm sm:p-4 overflow-y-auto">
+            <div className="bg-slate-900 border border-slate-800 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-4 sm:p-6 shadow-2xl my-auto">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
+                <div className="flex items-center gap-2 text-emerald-400 min-w-0">
+                  <UserPlus className="w-5 h-5 shrink-0" />
+                  <div className="min-w-0">
+                    <h3 className="text-sm sm:text-base font-bold text-white truncate">
+                      Add New Supplier
+                    </h3>
+                    <p className="text-[11px] text-slate-400 truncate">
+                      Saves supplier for future purchases &amp; selects them now
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsAddSupplierOpen(false)}
+                  className="text-slate-400 hover:text-white p-1 shrink-0"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {newSupplierError && (
+                <div className="mb-3.5 p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-medium">
+                  {newSupplierError}
+                </div>
+              )}
+
+              <form onSubmit={handleSaveNewSupplier} className="space-y-3.5 text-xs">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    Supplier Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    value={newSupplierName}
+                    onChange={e => setNewSupplierName(e.target.value)}
+                    placeholder="e.g. Kariakoo Wholesale Ltd"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    Supplier Number / Phone (Optional)
+                  </label>
+                  <div className="relative">
+                    <Phone className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="tel"
+                      inputMode="tel"
+                      value={newSupplierPhone}
+                      onChange={e => setNewSupplierPhone(e.target.value)}
+                      placeholder="e.g. +255 712 345 678"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-3.5 py-2.5 text-white font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2.5 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsAddSupplierOpen(false)}
+                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold shadow-lg transition flex items-center justify-center gap-2"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                    <span>Save &amp; Select Supplier</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1766,11 +2838,39 @@ export const AdminPurchases: React.FC = () => {
             Purchase List
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            View procurement orders, edit entries, return purchased stock, or void orders
+            Filter procurement orders by period, download PDF reports, edit, return, or void
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleDownloadPurchasesPdf}
+            disabled={isDownloadingPdf}
+            className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-600/15 hover:bg-emerald-600 border border-emerald-500/30 text-emerald-300 hover:text-white font-semibold text-xs transition disabled:opacity-60"
+          >
+            {isDownloadingPdf ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            <span>
+              Download PDF (
+              {isGlobalSearchActive
+                ? 'Search'
+                : periodFilter === 'all'
+                  ? 'All'
+                  : periodFilter === 'day'
+                    ? 'Day'
+                    : periodFilter === 'week'
+                      ? 'Week'
+                      : periodFilter === 'month'
+                        ? 'Month'
+                        : 'Custom'}
+              )
+            </span>
+          </button>
+
           <button
             type="button"
             onClick={() => setPurchasesSubTab('returns')}
@@ -1798,167 +2898,167 @@ export const AdminPurchases: React.FC = () => {
         </div>
       </div>
 
-      {/* Toolbar */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 mb-4 space-y-2.5 text-xs">
-        <div className="relative w-full">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search supplier, product, invoice #..."
-            className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
+      {/* Period Filter + Search Toolbar */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-3.5 mb-4 space-y-3 text-xs">
+        <div className="flex flex-col md:flex-row md:items-center gap-2.5">
+          {/* Search Input */}
+          <div className="relative flex-1 min-w-0">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search supplier, phone, PO #, product, invoice #, date..."
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded text-slate-400 hover:text-white"
+                aria-label="Clear search"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Period Pills: All | Day | Week | Month | Custom */}
+          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 overflow-x-auto shrink-0">
+            {(
+              [
+                { id: 'all', label: 'All' },
+                { id: 'day', label: 'Day' },
+                { id: 'week', label: 'Week' },
+                { id: 'month', label: 'Month' },
+                { id: 'custom', label: 'Custom' },
+              ] as const
+            ).map(p => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setPeriodFilter(p.id)}
+                className={`px-3 py-1.5 rounded-md text-[11px] font-semibold whitespace-nowrap transition ${
+                  periodFilter === p.id
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="text-slate-400 font-medium text-right">
-          Total: <span className="text-white font-bold">{purchases.length}</span>
+        {/* Custom Date Range Inputs */}
+        {periodFilter === 'custom' && (
+          <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-slate-800/80">
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] text-slate-400 font-medium">From</label>
+              <input
+                type="date"
+                value={customStartDate}
+                max={todayYMD}
+                onChange={e => setCustomStartDate(e.target.value)}
+                className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] text-slate-400 font-medium">To</label>
+              <input
+                type="date"
+                value={customEndDate}
+                max={todayYMD}
+                onChange={e => setCustomEndDate(e.target.value)}
+                className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Search-across-all-dates indicator + Period Summary Strip */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/70 text-[11px]">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-slate-400">
+            <span>
+              Orders: <strong className="text-white font-mono">{listMetrics.orderCount}</strong>
+            </span>
+            <span>
+              Units: <strong className="text-blue-300 font-mono">{listMetrics.totalUnits.toLocaleString()}</strong>
+            </span>
+            <span>
+              Total Spend:{' '}
+              <strong className="text-emerald-400 font-mono">
+                {formatCurrency(listMetrics.totalSpend, settings.currencySymbol)}
+              </strong>
+            </span>
+            <span className="text-slate-500 hidden sm:inline">
+              · {isGlobalSearchActive ? 'Searching across all dates' : periodRange.dateRangeText}
+            </span>
+          </div>
+
+          {searchQuery.trim() && periodFilter !== 'all' && (
+            <button
+              type="button"
+              onClick={() => setSearchPeriodOnly(prev => !prev)}
+              className="text-[11px] font-semibold text-blue-400 hover:text-blue-300 underline-offset-2 hover:underline"
+            >
+              {searchPeriodOnly
+                ? `Searching ${periodRange.periodLabel} only — Search all dates`
+                : `Searching all dates — Filter to ${periodRange.periodLabel} only`}
+            </button>
+          )}
         </div>
       </div>
 
       {/* Purchases: Cards + Table */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
         {purchases.length === 0 ? (
-          <div className="py-12 text-center text-slate-500">
+          <div className="py-12 text-center text-slate-500 px-4">
             <PurchaseIcon className="w-8 h-8 mx-auto mb-2 opacity-40" />
-            <p className="text-xs">No supplier purchases recorded yet.</p>
+            <p className="text-xs text-slate-300 font-medium">
+              {searchQuery.trim()
+                ? `No purchases match "${searchQuery.trim()}".`
+                : periodFilter === 'all'
+                  ? 'No supplier purchases recorded yet.'
+                  : `No purchases recorded for ${periodRange.periodLabel} (${periodRange.dateRangeText}).`}
+            </p>
           </div>
         ) : (
           <>
             {/* Mobile Cards (< md) */}
             <div className="md:hidden divide-y divide-slate-800/80">
-              {visiblePurchases.map(purchase => (
-                <div key={purchase.id} className="p-3.5 space-y-2.5">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <h4 className="font-bold text-xs text-white truncate">
-                        {purchase.supplierName}
-                      </h4>
-                      <p className="text-[10px] font-mono text-slate-400">
-                        {formatDateTime(purchase.createdAt)}
-                      </p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <div className="font-mono font-bold text-white text-sm">
-                        {formatCurrency(purchase.totalAmount, settings.currencySymbol)}
-                      </div>
-                      <span
-                        className={`px-1.5 py-0.2 rounded text-[9px] font-bold inline-block mt-0.5 ${
-                          purchase.paymentStatus === 'PAID'
-                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                            : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                        }`}
-                      >
-                        {purchase.paymentStatus}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-slate-300 bg-slate-950/60 p-2 rounded-lg border border-slate-800 space-y-1">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-slate-400 font-medium">
-                        {(purchase.items || []).length} items received
-                        {purchase.storeId && (
-                          <span className="text-blue-400 ml-1.5">
-                            · Store:{' '}
-                            {purchase.storeName ||
-                              (dbState.stores || []).find(s => s.id === purchase.storeId)?.name ||
-                              'Warehouse'}
-                          </span>
-                        )}
-                      </span>
-                      {purchase.invoiceNumber && (
-                        <span className="font-mono text-slate-400">
-                          Inv: {purchase.invoiceNumber}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[10px] text-slate-500 truncate">
-                      {(purchase.items || [])
-                        .map(i => `${i.quantity}x ${i.productName}`)
-                        .join(', ')}
-                    </p>
-                  </div>
-
-                  {canRecordPurchase && (
-                    <div className="flex items-center gap-2 pt-1.5 border-t border-slate-800/60">
-                      <button
-                        onClick={() => openEditPurchase(purchase)}
-                        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-800 hover:bg-blue-600 active:bg-blue-700 text-slate-300 hover:text-white transition text-[11px] font-semibold"
-                      >
-                        <Pencil className="w-3.5 h-3.5" />
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => openReturnPurchaseModal(purchase)}
-                        disabled={(purchase.items || []).length === 0}
-                        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-amber-500/10 hover:bg-amber-600 active:bg-amber-700 text-amber-400 hover:text-white border border-amber-500/25 transition text-[11px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        Return
-                      </button>
-                      <button
-                        onClick={() => openVoidPurchaseModal(purchase)}
-                        className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-rose-500/10 hover:bg-rose-600 active:bg-rose-700 text-rose-400 hover:text-white border border-rose-500/20 transition text-[11px] font-semibold"
-                      >
-                        <Ban className="w-3.5 h-3.5" />
-                        Void
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            {/* Tablet / Desktop Table (md+) */}
-            <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400">
-                    <th className="py-3 px-4 font-semibold">Date</th>
-                    <th className="py-3 px-4 font-semibold">Supplier</th>
-                    <th className="py-3 px-4 font-semibold">Invoice #</th>
-                    <th className="py-3 px-4 font-semibold">Items</th>
-                    <th className="py-3 px-4 font-semibold">Payment</th>
-                    <th className="py-3 px-4 text-right font-semibold">Total</th>
-                    {canRecordPurchase && (
-                      <th className="py-3 px-4 text-right font-semibold">Actions</th>
-                    )}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {visiblePurchases.map(purchase => (
-                    <tr key={purchase.id} className="hover:bg-slate-850/60 transition">
-                      <td className="py-3.5 px-4 text-slate-400 font-mono">
-                        {formatDateTime(purchase.createdAt)}
-                      </td>
-                      <td className="py-3.5 px-4 font-bold text-white">
-                        {purchase.supplierName}
-                      </td>
-                      <td className="py-3.5 px-4 font-mono text-slate-400">
-                        {purchase.invoiceNumber || '—'}
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-300">
-                        <div>
-                          {(purchase.items || []).length} items
-                          {purchase.storeId && (
-                            <span className="text-[11px] text-blue-400 ml-1.5">
-                              · Store:{' '}
-                              {purchase.storeName ||
-                                (dbState.stores || []).find(s => s.id === purchase.storeId)?.name ||
-                                'Warehouse'}
+              {visiblePurchases.map(purchase => {
+                const purchaseYmd = getPurchaseLocalYMD(purchase);
+                return (
+                  <div key={purchase.id} className="p-3.5 space-y-2.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <h4 className="font-bold text-xs text-white truncate">
+                            {purchase.supplierName}
+                          </h4>
+                          {purchase.purchaseNumber && (
+                            <span className="text-[10px] font-mono text-slate-400 bg-slate-800/80 px-1.5 py-0.5 rounded">
+                              {purchase.purchaseNumber}
                             </span>
                           )}
                         </div>
-                        <div className="text-[10px] text-slate-500 truncate max-w-xs">
-                          {(purchase.items || [])
-                            .map(i => `${i.quantity}x ${i.productName}`)
-                            .join(', ')}
+                        {purchase.supplierPhone && (
+                          <div className="flex items-center gap-1 text-[10px] font-mono text-sky-400 mt-0.5">
+                            <Phone className="w-2.5 h-2.5 shrink-0" />
+                            <span>{purchase.supplierPhone}</span>
+                          </div>
+                        )}
+                        <p className="text-[10px] font-mono text-slate-400 mt-0.5">
+                          {formatReadableYMD(purchaseYmd)} · {formatDateTime(purchase.createdAt)}
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="font-mono font-bold text-white text-sm">
+                          {formatCurrency(purchase.totalAmount, settings.currencySymbol)}
                         </div>
-                      </td>
-                      <td className="py-3.5 px-4">
                         <span
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          className={`px-1.5 py-0.2 rounded text-[9px] font-bold inline-block mt-0.5 ${
                             purchase.paymentStatus === 'PAID'
                               ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                               : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
@@ -1966,40 +3066,197 @@ export const AdminPurchases: React.FC = () => {
                         >
                           {purchase.paymentStatus}
                         </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-right font-mono font-bold text-white text-sm">
-                        {formatCurrency(purchase.totalAmount, settings.currencySymbol)}
-                      </td>
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-slate-300 bg-slate-950/60 p-2 rounded-lg border border-slate-800 space-y-1">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-slate-400 font-medium">
+                          {(purchase.items || []).length} items received
+                          {purchase.storeId && (
+                            <span className="text-blue-400 ml-1.5">
+                              · Store:{' '}
+                              {purchase.storeName || storeNameMap[purchase.storeId] || 'Warehouse'}
+                            </span>
+                          )}
+                        </span>
+                        {purchase.invoiceNumber && (
+                          <span className="font-mono text-slate-400">
+                            Inv: {purchase.invoiceNumber}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-slate-500 truncate">
+                        {(purchase.items || [])
+                          .map(i => `${i.quantity}x ${i.productName}`)
+                          .join(', ')}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 pt-1.5 border-t border-slate-800/60">
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadSinglePurchasePdf(purchase)}
+                        disabled={downloadingPurchaseId === purchase.id}
+                        className="flex items-center justify-center gap-1 px-2.5 py-2 rounded-lg bg-emerald-500/10 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/25 transition text-[11px] font-semibold disabled:opacity-50"
+                        title="Download Purchase PDF"
+                      >
+                        {downloadingPurchaseId === purchase.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <FileDown className="w-3.5 h-3.5" />
+                        )}
+                        <span>PDF</span>
+                      </button>
+
                       {canRecordPurchase && (
+                        <>
+                          <button
+                            onClick={() => openEditPurchase(purchase)}
+                            className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-800 hover:bg-blue-600 active:bg-blue-700 text-slate-300 hover:text-white transition text-[11px] font-semibold"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => openReturnPurchaseModal(purchase)}
+                            disabled={(purchase.items || []).length === 0}
+                            className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-amber-500/10 hover:bg-amber-600 active:bg-amber-700 text-amber-400 hover:text-white border border-amber-500/25 transition text-[11px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            Return
+                          </button>
+                          <button
+                            onClick={() => openVoidPurchaseModal(purchase)}
+                            className="flex items-center justify-center gap-1 px-2.5 py-2 rounded-lg bg-rose-500/10 hover:bg-rose-600 active:bg-rose-700 text-rose-400 hover:text-white border border-rose-500/20 transition text-[11px] font-semibold"
+                          >
+                            <Ban className="w-3.5 h-3.5" />
+                            Void
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Tablet / Desktop Table (md+) */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400">
+                    <th className="py-3 px-4 font-semibold">Date &amp; PO #</th>
+                    <th className="py-3 px-4 font-semibold">Supplier &amp; Phone</th>
+                    <th className="py-3 px-4 font-semibold">Invoice #</th>
+                    <th className="py-3 px-4 font-semibold">Items</th>
+                    <th className="py-3 px-4 font-semibold">Payment</th>
+                    <th className="py-3 px-4 text-right font-semibold">Total</th>
+                    <th className="py-3 px-4 text-right font-semibold">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {visiblePurchases.map(purchase => {
+                    const purchaseYmd = getPurchaseLocalYMD(purchase);
+                    return (
+                      <tr key={purchase.id} className="hover:bg-slate-850/60 transition">
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <div className="text-slate-200 font-semibold font-mono text-[11px]">
+                            {formatReadableYMD(purchaseYmd)}
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-500 mt-0.5">
+                            {purchase.purchaseNumber || formatDateTime(purchase.createdAt)}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="font-bold text-white">{purchase.supplierName}</div>
+                          {purchase.supplierPhone && (
+                            <div className="flex items-center gap-1 text-[10px] font-mono text-sky-400 mt-0.5">
+                              <Phone className="w-2.5 h-2.5 shrink-0" />
+                              <span>{purchase.supplierPhone}</span>
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-4 font-mono text-slate-400">
+                          {purchase.invoiceNumber || '—'}
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-300">
+                          <div>
+                            {(purchase.items || []).length} items
+                            {purchase.storeId && (
+                              <span className="text-[11px] text-blue-400 ml-1.5">
+                                · Store:{' '}
+                                {purchase.storeName || storeNameMap[purchase.storeId] || 'Warehouse'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-500 truncate max-w-xs">
+                            {(purchase.items || [])
+                              .map(i => `${i.quantity}x ${i.productName}`)
+                              .join(', ')}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              purchase.paymentStatus === 'PAID'
+                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                                : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            }`}
+                          >
+                            {purchase.paymentStatus}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 text-right font-mono font-bold text-white text-sm">
+                          {formatCurrency(purchase.totalAmount, settings.currencySymbol)}
+                        </td>
                         <td className="py-3.5 px-4 text-right whitespace-nowrap">
                           <div className="inline-flex items-center justify-end gap-1.5">
                             <button
-                              onClick={() => openEditPurchase(purchase)}
-                              className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition inline-flex items-center gap-1"
+                              type="button"
+                              onClick={() => handleDownloadSinglePurchasePdf(purchase)}
+                              disabled={downloadingPurchaseId === purchase.id}
+                              className="px-2.5 py-1.5 rounded bg-emerald-500/10 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/25 text-[11px] font-medium transition inline-flex items-center gap-1 disabled:opacity-50"
+                              title="Download Purchase PDF"
                             >
-                              <Pencil className="w-3 h-3" />
-                              Edit
+                              {downloadingPurchaseId === purchase.id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <FileDown className="w-3 h-3" />
+                              )}
+                              PDF
                             </button>
-                            <button
-                              onClick={() => openReturnPurchaseModal(purchase)}
-                              disabled={(purchase.items || []).length === 0}
-                              className="px-2.5 py-1.5 rounded bg-amber-500/10 hover:bg-amber-600 text-amber-400 hover:text-white border border-amber-500/25 text-[11px] font-medium transition inline-flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
-                            >
-                              <RotateCcw className="w-3 h-3" />
-                              Return
-                            </button>
-                            <button
-                              onClick={() => openVoidPurchaseModal(purchase)}
-                              className="px-2.5 py-1.5 rounded bg-rose-500/10 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/20 text-[11px] font-medium transition inline-flex items-center gap-1"
-                            >
-                              <Ban className="w-3 h-3" />
-                              Void
-                            </button>
+                            {canRecordPurchase && (
+                              <>
+                                <button
+                                  onClick={() => openEditPurchase(purchase)}
+                                  className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition inline-flex items-center gap-1"
+                                >
+                                  <Pencil className="w-3 h-3" />
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() => openReturnPurchaseModal(purchase)}
+                                  disabled={(purchase.items || []).length === 0}
+                                  className="px-2.5 py-1.5 rounded bg-amber-500/10 hover:bg-amber-600 text-amber-400 hover:text-white border border-amber-500/25 text-[11px] font-medium transition inline-flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                  Return
+                                </button>
+                                <button
+                                  onClick={() => openVoidPurchaseModal(purchase)}
+                                  className="px-2.5 py-1.5 rounded bg-rose-500/10 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/20 text-[11px] font-medium transition inline-flex items-center gap-1"
+                                >
+                                  <Ban className="w-3 h-3" />
+                                  Void
+                                </button>
+                              </>
+                            )}
                           </div>
                         </td>
-                      )}
-                    </tr>
-                  ))}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
