@@ -29,7 +29,11 @@ import {
   formatSaleEditDetails,
   printSaleEditsReportPdf,
 } from '../../utils/saleEditsPrint';
-import { downloadSalesReportPdf } from '../../utils/pdfExport';
+import {
+  downloadSalesReportPdf,
+  printSalesReportPdf,
+  printSaleEditsPdf,
+} from '../../utils/pdfExport';
 import { saveTextFileCrossPlatform } from '../../utils/nativeDownload';
 import {
   getAdminManagedShops,
@@ -95,6 +99,8 @@ export const AdminSales: React.FC = () => {
   const [startDate, setStartDate] = useState<string>(() => initialTodayRange.start);
   const [endDate, setEndDate] = useState<string>(() => initialTodayRange.end);
   const [isPrinting, setIsPrinting] = useState(false);
+  const [isDirectPrinting, setIsDirectPrinting] = useState(false);
+  const [isPrintingEdits, setIsPrintingEdits] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Per-group pagination (default 15 per group, expand +15)
@@ -613,23 +619,25 @@ export const AdminSales: React.FC = () => {
       ? 'All Statuses'
       : statusFilter.charAt(0) + statusFilter.slice(1).toLowerCase();
 
+  const buildSalesPdfMeta = () => ({
+    shopLabel: selectedShopName,
+    startDate: isSearchingAllDates ? undefined : effectiveStartDate || undefined,
+    endDate: isSearchingAllDates ? undefined : effectiveEndDate || undefined,
+    periodKey: isSearchingAllDates ? 'search' : activePeriodMeta.periodKey,
+    periodTitle: isSearchingAllDates ? 'Sales Search Report' : activePeriodMeta.periodTitle,
+    periodLabel: isSearchingAllDates ? 'All Dates (Search)' : activePeriodMeta.periodLabel,
+    dateRangeText: isSearchingAllDates ? 'All Dates' : activePeriodMeta.dateRangeText,
+    sellerLabel: selectedSellerLabel,
+    paymentLabel: selectedPaymentLabel,
+    statusLabel: selectedStatusLabel,
+    searchQuery: searchQuery.trim() || undefined,
+    totalRevenue: totalVolume,
+    totalProfit,
+  });
+
   const handlePrint = async () => {
     setIsPrinting(true);
-    const ok = await downloadSalesReportPdf(sales, settings, {
-      shopLabel: selectedShopName,
-      startDate: isSearchingAllDates ? undefined : effectiveStartDate || undefined,
-      endDate: isSearchingAllDates ? undefined : effectiveEndDate || undefined,
-      periodKey: isSearchingAllDates ? 'search' : activePeriodMeta.periodKey,
-      periodTitle: isSearchingAllDates ? 'Sales Search Report' : activePeriodMeta.periodTitle,
-      periodLabel: isSearchingAllDates ? 'All Dates (Search)' : activePeriodMeta.periodLabel,
-      dateRangeText: isSearchingAllDates ? 'All Dates' : activePeriodMeta.dateRangeText,
-      sellerLabel: selectedSellerLabel,
-      paymentLabel: selectedPaymentLabel,
-      statusLabel: selectedStatusLabel,
-      searchQuery: searchQuery.trim() || undefined,
-      totalRevenue: totalVolume,
-      totalProfit,
-    });
+    const ok = await downloadSalesReportPdf(sales, settings, buildSalesPdfMeta());
     if (ok) {
       addToast({
         type: 'success',
@@ -644,6 +652,32 @@ export const AdminSales: React.FC = () => {
       });
     }
     setIsPrinting(false);
+  };
+
+  const handleDirectPrintSales = async () => {
+    if (isDirectPrinting) return;
+    setIsDirectPrinting(true);
+    try {
+      const res = await printSalesReportPdf(sales, settings, buildSalesPdfMeta());
+      if (res.ok) {
+        addToast({
+          type: 'success',
+          title: res.mode === 'fallback_download' ? 'Opened Sales PDF' : 'Print Dialog Opened',
+          description:
+            res.mode === 'fallback_download'
+              ? 'Use the printer icon in your PDF viewer to print.'
+              : `Ready to print ${sales.length} transaction(s) (${isSearchingAllDates ? 'Search' : activePeriodMeta.periodLabel}).`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Print Failed',
+          description: res.error || 'Could not open print dialog on this device.',
+        });
+      }
+    } finally {
+      setIsDirectPrinting(false);
+    }
   };
 
   const handleExportCSV = async () => {
@@ -818,6 +852,33 @@ export const AdminSales: React.FC = () => {
       }
     };
 
+    const handleDirectPrintEditList = async () => {
+      if (isPrintingEdits) return;
+      setIsPrintingEdits(true);
+      try {
+        const res = await printSaleEditsPdf(filteredHandledEdits, salesById, settings, {
+          periodLabel: editPeriodLabel,
+          statusLabel: editStatusLabel,
+          shopLabel: editShopLabel,
+        });
+        if (res.ok) {
+          addToast({
+            type: 'success',
+            title: res.mode === 'fallback_download' ? 'Opened Edit History PDF' : 'Print Dialog Opened',
+            description: `Ready to print ${filteredHandledEdits.length} handled sale edit(s).`,
+          });
+        } else {
+          addToast({
+            type: 'error',
+            title: 'Print Failed',
+            description: res.error || 'Could not print sale edits report.',
+          });
+        }
+      } finally {
+        setIsPrintingEdits(false);
+      }
+    };
+
     return (
       <div
         id="admin-sales-edit-list-page"
@@ -845,7 +906,7 @@ export const AdminSales: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={refreshEditRequests}
@@ -857,10 +918,19 @@ export const AdminSales: React.FC = () => {
             </button>
             <button
               type="button"
+              onClick={handleDirectPrintEditList}
+              disabled={isPrintingEdits}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow transition disabled:opacity-50"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>{isPrintingEdits ? 'Printing...' : 'Print'}</span>
+            </button>
+            <button
+              type="button"
               onClick={handlePrintEditList}
               className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow transition"
             >
-              <Printer className="w-3.5 h-3.5" />
+              <Download className="w-3.5 h-3.5" />
               <span>Download PDF</span>
             </button>
           </div>
@@ -1282,24 +1352,39 @@ export const AdminSales: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="grid grid-cols-3 gap-2">
           <button
-            onClick={handlePrint}
-            disabled={isPrinting}
-            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold shadow transition disabled:opacity-50"
+            type="button"
+            onClick={handleDirectPrintSales}
+            disabled={isDirectPrinting}
+            className="flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white text-xs font-semibold shadow transition disabled:opacity-50"
           >
-            <Printer className="w-3.5 h-3.5" />
-            <span>
-              {isPrinting
-                ? 'Generating...'
-                : `Download PDF (${isSearchingAllDates ? 'Search' : activePeriodMeta.shortLabel})`}
+            <Printer className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">
+              {isDirectPrinting
+                ? 'Printing...'
+                : `Print (${isSearchingAllDates ? 'Search' : activePeriodMeta.shortLabel})`}
             </span>
           </button>
           <button
-            onClick={handleExportCSV}
-            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 border border-slate-700 text-xs font-semibold transition"
+            type="button"
+            onClick={handlePrint}
+            disabled={isPrinting}
+            className="flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold shadow transition disabled:opacity-50"
           >
-            <Download className="w-3.5 h-3.5" />
+            <Download className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">
+              {isPrinting
+                ? 'Saving...'
+                : `PDF (${isSearchingAllDates ? 'Search' : activePeriodMeta.shortLabel})`}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={handleExportCSV}
+            className="flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 border border-slate-700 text-xs font-semibold transition"
+          >
+            <Download className="w-3.5 h-3.5 shrink-0" />
             <span>CSV</span>
           </button>
         </div>

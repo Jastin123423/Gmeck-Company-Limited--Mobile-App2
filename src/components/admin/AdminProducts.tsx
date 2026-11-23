@@ -79,6 +79,7 @@ export const AdminProducts: React.FC = () => {
   const [productImages, setProductImages] = useState<ProductImage[]>([]);
   const [destinationType, setDestinationType] = useState<'SHOP_FLOOR' | 'STORE'>('SHOP_FLOOR');
   const [selectedStoreId, setSelectedStoreId] = useState('');
+  const [secondLocationKey, setSecondLocationKey] = useState('');
   const [formError, setFormError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
@@ -219,6 +220,7 @@ export const AdminProducts: React.FC = () => {
       st => st.shopId === initialShopId && st.status === 'ACTIVE'
     );
     setSelectedStoreId(shopStores[0]?.id || '');
+    setSecondLocationKey('');
     setFormError('');
   };
 
@@ -285,6 +287,7 @@ export const AdminProducts: React.FC = () => {
     setProductImages(p.images || []);
     setDestinationType('SHOP_FLOOR');
     setSelectedStoreId('');
+    setSecondLocationKey('');
     setFormError('');
     setProductsSubTab('add_product');
   };
@@ -362,11 +365,48 @@ export const AdminProducts: React.FC = () => {
           setIsSaving(false);
           return;
         }
+        const parsedInitialStock = Math.max(0, parseInt(currentStock, 10) || 0);
+        let parsedSecondLocation:
+          | { type: 'SHOP_FLOOR' | 'STORE'; shopId: string; storeId?: string }
+          | undefined;
+
+        if (secondLocationKey) {
+          if (parsedInitialStock > 0) {
+            setFormError(
+              'Only products with 0 quantity qualify to be sent to multiple locations. Set Initial Stock to 0 or remove Second Location.'
+            );
+            setIsSaving(false);
+            return;
+          }
+          if (secondLocationKey.startsWith('SHOP:')) {
+            const secShopId = secondLocationKey.slice('SHOP:'.length);
+            if (secShopId && secShopId === productShopId) {
+              parsedSecondLocation = { type: 'SHOP_FLOOR', shopId: secShopId };
+            }
+          } else if (secondLocationKey.startsWith('STORE:')) {
+            const secStoreId = secondLocationKey.slice('STORE:'.length);
+            const secStore = (dbState.stores || []).find(
+              st => st.id === secStoreId && st.shopId === productShopId
+            );
+            if (!secStore) {
+              setFormError('Selected second location store must belong to this same shop.');
+              setIsSaving(false);
+              return;
+            }
+            parsedSecondLocation = {
+              type: 'STORE',
+              shopId: productShopId,
+              storeId: secStore.id,
+            };
+          }
+        }
+
         const parsedMinStock = parseInt(minStock, 10);
         result = await ProductService.createProduct(
           {
             shopId: productShopId,
             storeId: destinationType === 'STORE' ? selectedStoreId : undefined,
+            secondLocation: parsedSecondLocation,
             name,
             variation: variation.trim() || undefined,
             sku: sku.trim() || undefined,
@@ -374,7 +414,7 @@ export const AdminProducts: React.FC = () => {
             categoryId,
             purchasePrice: pPrice,
             sellingPrice: sPrice,
-            currentStock: parseInt(currentStock, 10) || 0,
+            currentStock: parsedInitialStock,
             minStock: Number.isFinite(parsedMinStock) && parsedMinStock >= 0 ? parsedMinStock : 0,
             unit,
             images: productImages,
@@ -966,7 +1006,10 @@ export const AdminProducts: React.FC = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => setDestinationType('SHOP_FLOOR')}
+                    onClick={() => {
+                      setDestinationType('SHOP_FLOOR');
+                      setSecondLocationKey('');
+                    }}
                     className={`px-3 py-2.5 rounded-xl border text-left font-semibold transition ${
                       destinationType === 'SHOP_FLOOR'
                         ? 'bg-blue-600/20 border-blue-500 text-blue-300'
@@ -979,6 +1022,7 @@ export const AdminProducts: React.FC = () => {
                     type="button"
                     onClick={() => {
                       setDestinationType('STORE');
+                      setSecondLocationKey('');
                       if (!selectedStoreId && activeShopStores.length > 0) {
                         setSelectedStoreId(activeShopStores[0].id);
                       }
@@ -1001,7 +1045,12 @@ export const AdminProducts: React.FC = () => {
                     {activeShopStores.length > 0 ? (
                       <select
                         value={selectedStoreId}
-                        onChange={e => setSelectedStoreId(e.target.value)}
+                        onChange={e => {
+                          setSelectedStoreId(e.target.value);
+                          if (secondLocationKey === `STORE:${e.target.value}`) {
+                            setSecondLocationKey('');
+                          }
+                        }}
                         className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                       >
                         <option value="">Select destination store...</option>
@@ -1020,6 +1069,84 @@ export const AdminProducts: React.FC = () => {
                     )}
                   </div>
                 )}
+                {(() => {
+                  const parsedQty = Math.max(0, parseInt(currentStock, 10) || 0);
+                  const qualifiesForMulti = parsedQty === 0;
+                  const primaryKey =
+                    destinationType === 'STORE' && selectedStoreId
+                      ? `STORE:${selectedStoreId}`
+                      : productShopId
+                        ? `SHOP:${productShopId}`
+                        : '';
+                  const currentShopObj = shops.find(sh => sh.id === productShopId);
+                  const currentShopName = currentShopObj?.name || 'Shop';
+                  const sameShopWarehouseStores = (dbState.stores || []).filter(
+                    st => st.shopId === productShopId && st.status === 'ACTIVE' && !st.isShopFloor
+                  );
+
+                  const sameShopOpts: { key: string; label: string }[] = [];
+                  if (productShopId) {
+                    const fKey = `SHOP:${productShopId}`;
+                    if (fKey !== primaryKey) {
+                      sameShopOpts.push({ key: fKey, label: `${currentShopName} — Shop Floor` });
+                    }
+                    for (const st of sameShopWarehouseStores) {
+                      const sKey = `STORE:${st.id}`;
+                      if (sKey === primaryKey) continue;
+                      sameShopOpts.push({
+                        key: sKey,
+                        label: `${st.name} (Store)${st.location ? ` — ${st.location}` : ''}`,
+                      });
+                    }
+                  }
+
+                  const safeSecondKey = sameShopOpts.some(o => o.key === secondLocationKey)
+                    ? secondLocationKey
+                    : '';
+
+                  return (
+                    <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="block text-slate-300 font-semibold text-xs">
+                          Second Location (Optional — Same Shop Only)
+                        </label>
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                            qualifiesForMulti
+                              ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                              : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                          }`}
+                        >
+                          {qualifiesForMulti ? 'Eligible (0 Qty)' : 'Requires 0 Qty'}
+                        </span>
+                      </div>
+                      {sameShopOpts.length > 0 ? (
+                        <select
+                          value={qualifiesForMulti ? safeSecondKey : ''}
+                          disabled={!qualifiesForMulti}
+                          onChange={e => setSecondLocationKey(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-white disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        >
+                          <option value="">None — Single Location Only (Default)</option>
+                          {sameShopOpts.map(opt => (
+                            <option key={opt.key} value={opt.key}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="px-3 py-2 rounded-xl bg-slate-900/70 border border-slate-800 text-[11px] text-slate-400">
+                          No other active stores under this shop yet.
+                        </div>
+                      )}
+                      <p className="text-[11px] text-slate-400">
+                        {qualifiesForMulti
+                          ? 'Assigning a second location registers this product in both locations within this shop at 0 quantity.'
+                          : 'Products sent to multiple locations must have 0 quantity. Set Initial Stock to 0 to enable.'}
+                      </p>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -1037,7 +1164,13 @@ export const AdminProducts: React.FC = () => {
                   min="0"
                   inputMode="numeric"
                   value={currentStock}
-                  onChange={e => setCurrentStock(e.target.value)}
+                  onChange={e => {
+                    const nextVal = e.target.value;
+                    setCurrentStock(nextVal);
+                    if ((parseInt(nextVal, 10) || 0) > 0 && secondLocationKey) {
+                      setSecondLocationKey('');
+                    }
+                  }}
                   placeholder="0"
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 />

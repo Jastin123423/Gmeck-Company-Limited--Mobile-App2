@@ -12,6 +12,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(NativeFileDownloadPlugin.class);
+        registerPlugin(NativePrintPlugin.class);
         super.onCreate(savedInstanceState);
 
         int appDarkColor = Color.parseColor("#020617");

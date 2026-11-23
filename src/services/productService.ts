@@ -130,12 +130,17 @@ export class ProductService {
 
   /**
    * Seller or Admin can create a new product.
-   * Associated with the target shop.
+   * Associated with the target shop (and optional store / optional 0-qty second location).
    */
   public static async createProduct(
     data: {
       shopId: string;
       storeId?: string;
+      secondLocation?: {
+        type: 'SHOP_FLOOR' | 'STORE';
+        shopId: string;
+        storeId?: string;
+      };
       name: string;
       variation?: string;
       sku?: string;
@@ -151,26 +156,27 @@ export class ProductService {
       imageUrl?: string;
     },
     currentUser: User
-  ): Promise<{ success: boolean; product?: Product; error?: string }> {
-    // Shop Admins & Sellers can only create products for their allowed shops
-    if (!isPlatformAdmin(currentUser)) {
+  ): Promise<{ success: boolean; product?: Product; secondaryProduct?: Product; error?: string }> {
+    const checkShopPermission = (shopIdToCheck: string): string | null => {
+      if (isPlatformAdmin(currentUser)) return null;
       if (isShopAdmin(currentUser)) {
         const managedIds = getShopAdminShopIds(currentUser);
-        if (!managedIds.includes(data.shopId)) {
-          return {
-            success: false,
-            error: 'Permission Denied: You can only add products to your managed shop.',
-          };
+        if (!managedIds.includes(shopIdToCheck)) {
+          return 'Permission Denied: You can only add products to your managed shop.';
         }
       } else {
         const assigned = currentUser.assignedShopIds || [];
-        if (assigned.length > 0 && !assigned.includes(data.shopId)) {
-          return {
-            success: false,
-            error: 'Permission Denied: You are not assigned to this shop.',
-          };
+        if (assigned.length > 0 && !assigned.includes(shopIdToCheck)) {
+          return 'Permission Denied: You are not assigned to this shop.';
         }
       }
+      return null;
+    };
+
+    // Shop Admins & Sellers can only create products for their allowed shops
+    const primaryPermErr = checkShopPermission(data.shopId);
+    if (primaryPermErr) {
+      return { success: false, error: primaryPermErr };
     }
 
     if (!data.name?.trim()) {
@@ -181,13 +187,16 @@ export class ProductService {
       return { success: false, error: 'Shop assignment is required for the product.' };
     }
 
-    const shop = db.getShops().find(s => s.id === data.shopId);
+    const allShops = db.getShops();
+    const allStores = db.getStores();
+
+    const shop = allShops.find(s => s.id === data.shopId);
     if (!shop) {
       return { success: false, error: 'Selected shop does not exist.' };
     }
 
     const targetStore = data.storeId
-      ? db.getStores().find(st => st.id === data.storeId)
+      ? allStores.find(st => st.id === data.storeId)
       : undefined;
     if (data.storeId) {
       if (!targetStore) {
@@ -201,6 +210,69 @@ export class ProductService {
       }
     }
 
+    const initialQty = Math.max(0, Number(data.currentStock || 0));
+
+    // Validate optional second location (strictly same-shop only & requires 0 quantity)
+    let secondStore: typeof targetStore | undefined;
+    const rawSecond = data.secondLocation;
+    let effectiveSecond: typeof rawSecond | undefined;
+
+    if (rawSecond) {
+      if (rawSecond.shopId !== data.shopId) {
+        return {
+          success: false,
+          error:
+            'Second location must belong to the same shop. Cross-shop assignment is not allowed.',
+        };
+      }
+
+      const isSamePrimary =
+        (rawSecond.type === 'SHOP_FLOOR' && !data.storeId) ||
+        (rawSecond.type === 'STORE' &&
+          Boolean(data.storeId) &&
+          rawSecond.storeId === data.storeId);
+
+      if (!isSamePrimary) {
+        if (initialQty > 0) {
+          return {
+            success: false,
+            error:
+              'Only products with 0 quantity qualify to be sent to multiple locations. Set quantity to 0.',
+          };
+        }
+
+        if (rawSecond.type === 'STORE') {
+          if (!rawSecond.storeId) {
+            return { success: false, error: 'Please select a valid second location store.' };
+          }
+          secondStore = allStores.find(st => st.id === rawSecond.storeId);
+          if (!secondStore) {
+            return { success: false, error: 'Selected second location store does not exist.' };
+          }
+          if (secondStore.shopId !== data.shopId) {
+            return {
+              success: false,
+              error: 'Second location store must belong to the same shop.',
+            };
+          }
+          if (secondStore.isShopFloor) {
+            return {
+              success: false,
+              error: 'Select the Shop Floor option instead of a floor store entry.',
+            };
+          }
+          if (secondStore.status !== 'ACTIVE') {
+            return {
+              success: false,
+              error: `Second location store '${secondStore.name}' is inactive.`,
+            };
+          }
+        }
+
+        effectiveSecond = rawSecond;
+      }
+    }
+
     if (data.sellingPrice === undefined || data.sellingPrice < 0) {
       return { success: false, error: 'Valid selling price is required.' };
     }
@@ -210,7 +282,7 @@ export class ProductService {
     const cleanBarcode =
       data.barcode?.trim() || `${Math.floor(100000000000 + Math.random() * 900000000000)}`;
 
-    // SKU uniqueness within the shop
+    // SKU uniqueness within the primary shop
     const duplicateSku = products.find(
       p => p.shopId === data.shopId && p.sku.toLowerCase() === cleanSku.toLowerCase()
     );
@@ -236,46 +308,89 @@ export class ProductService {
         ? normalizedImages[0].thumbnailUrl || normalizedImages[0].dataUrl
         : data.imageUrl;
 
-    const initialQty = Math.max(0, Number(data.currentStock || 0));
     const isSentToStore = Boolean(data.storeId && targetStore);
     const cleanVariation =
       data.variation?.trim() && data.variation.trim().toUpperCase() !== 'DUMMY'
         ? data.variation.trim()
         : undefined;
     const nowIso = new Date().toISOString();
-    const initialStoreStocks =
-      isSentToStore && data.storeId
-        ? { [data.storeId]: initialQty }
-        : undefined;
-    const initialStoreDetails =
-      isSentToStore && data.storeId && targetStore
-        ? {
-            [data.storeId]: {
-              storeId: data.storeId,
-              storeName: targetStore.name,
-              quantity: initialQty,
-              unitPurchasePrice: Number(data.purchasePrice || 0),
-              unitSellingPrice: Number(data.sellingPrice),
-              lastImportedAt: nowIso,
-            },
-          }
-        : undefined;
+
+    const storeStocksMap: Record<string, number> = {};
+    const storeDetailsMap: Record<
+      string,
+      {
+        storeId: string;
+        storeName: string;
+        quantity: number;
+        unitPurchasePrice: number;
+        unitSellingPrice: number;
+        lastImportedAt: string;
+      }
+    > = {};
+
+    let primaryStoreId: string | undefined = isSentToStore ? data.storeId : undefined;
+    let assignPrimaryShopFloor = !isSentToStore;
+
+    const addStoreEntry = (st: NonNullable<typeof targetStore>, qty: number) => {
+      storeStocksMap[st.id] = qty;
+      storeDetailsMap[st.id] = {
+        storeId: st.id,
+        storeName: st.name,
+        quantity: qty,
+        unitPurchasePrice: Number(data.purchasePrice || 0),
+        unitSellingPrice: Number(data.sellingPrice),
+        lastImportedAt: nowIso,
+      };
+    };
+
+    if (isSentToStore && targetStore) {
+      addStoreEntry(targetStore, initialQty);
+    }
+
+    // Same-shop second location attaches directly to the same Product record at 0 qty
+    const isSameShopSecond = Boolean(effectiveSecond && effectiveSecond.shopId === data.shopId);
+    if (isSameShopSecond && effectiveSecond) {
+      if (effectiveSecond.type === 'STORE' && secondStore) {
+        addStoreEntry(secondStore, 0);
+        if (!primaryStoreId) {
+          primaryStoreId = secondStore.id;
+        }
+      } else if (effectiveSecond.type === 'SHOP_FLOOR') {
+        assignPrimaryShopFloor = true;
+      }
+    }
+
+    // Register shop floor store entry if shop has an active floor store record
+    if (assignPrimaryShopFloor) {
+      const primaryFloorStore = allStores.find(
+        st => st.shopId === data.shopId && st.isShopFloor && st.status === 'ACTIVE'
+      );
+      if (primaryFloorStore && storeStocksMap[primaryFloorStore.id] === undefined) {
+        addStoreEntry(primaryFloorStore, isSentToStore ? 0 : initialQty);
+      }
+    }
+
+    const hasAnyStoreMap = Object.keys(storeStocksMap).length > 0;
+    const primaryCustomFields = assignPrimaryShopFloor
+      ? { assignedShopFloor: true }
+      : undefined;
 
     const newProduct: Product = {
       id: productId,
       shopId: data.shopId,
-      storeId: isSentToStore ? data.storeId : undefined,
+      storeId: primaryStoreId,
       name: data.name.trim(),
       ...(cleanVariation ? { variation: cleanVariation } : {}),
       sku: cleanSku,
       barcode: cleanBarcode,
-      categoryId: data.categoryId || 'cat-supplies',
+      categoryId: data.categoryId || '',
       sellingPrice: Number(data.sellingPrice),
       purchasePrice: Number(data.purchasePrice || 0),
       currentStock: isSentToStore ? 0 : initialQty,
       storeStock: isSentToStore ? initialQty : 0,
-      ...(initialStoreStocks ? { storeStocks: initialStoreStocks } : {}),
-      ...(initialStoreDetails ? { storeDetails: initialStoreDetails } : {}),
+      ...(hasAnyStoreMap ? { storeStocks: storeStocksMap } : {}),
+      ...(hasAnyStoreMap ? { storeDetails: storeDetailsMap } : {}),
+      ...(primaryCustomFields ? { customFields: primaryCustomFields } : {}),
       minStock: Math.max(0, Number(data.minStock ?? 0)),
       unit: data.unit?.trim() || 'pcs',
       status: data.status || 'ACTIVE',
@@ -322,7 +437,7 @@ export class ProductService {
       payload: isSentToStore
         ? {
             ...newProduct,
-            storeId: data.storeId,
+            storeId: primaryStoreId,
             currentStock: initialQty,
             createdByUserId: currentUser.id,
           }
@@ -331,6 +446,12 @@ export class ProductService {
       createdAt: new Date().toISOString(),
     });
 
+    const secondLocAuditText = effectiveSecond
+      ? effectiveSecond.type === 'STORE' && secondStore
+        ? ` + 2nd Location Store '${secondStore.name}' [${shop.name}] (0 qty)`
+        : ` + 2nd Location Shop Floor [${shop.name}] (0 qty)`
+      : '';
+
     // Audit log
     db.addAuditLog({
       id: generateUUID(),
@@ -338,8 +459,8 @@ export class ProductService {
       userName: currentUser.name,
       action: 'CREATE_PRODUCT',
       details: isSentToStore
-        ? `Created product '${newProduct.name}' in [${shop.name}] -> Store '${targetStore!.name}' (SKU: ${newProduct.sku}, Store Stock: ${initialQty})`
-        : `Created product '${newProduct.name}' in [${shop.name}] (SKU: ${newProduct.sku}, Stock: ${newProduct.currentStock})`,
+        ? `Created product '${newProduct.name}' in [${shop.name}] -> Store '${targetStore!.name}' (SKU: ${newProduct.sku}, Store Stock: ${initialQty})${secondLocAuditText}`
+        : `Created product '${newProduct.name}' in [${shop.name}] (SKU: ${newProduct.sku}, Stock: ${newProduct.currentStock})${secondLocAuditText}`,
       entityType: 'PRODUCT',
       entityId: newProduct.id,
       timestamp: new Date().toISOString(),

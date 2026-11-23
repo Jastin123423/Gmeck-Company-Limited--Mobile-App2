@@ -161,6 +161,7 @@ export interface ProductCustomFields {
   field2?: string;
   field3?: string;
   field4?: string;
+  assignedShopFloor?: boolean;
 }
 
 export interface Product {

@@ -20,6 +20,7 @@ import {
   Phone,
   Download,
   FileDown,
+  Printer,
   PackagePlus,
   UserPlus,
 } from 'lucide-react';
@@ -31,6 +32,8 @@ import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import {
   downloadPurchasesReportPdf,
   downloadSinglePurchasePdf,
+  printPurchasesReportPdf,
+  printSinglePurchasePdf,
 } from '../../utils/pdfExport';
 import type { Purchase } from '../../types';
 import {
@@ -378,7 +381,9 @@ export const AdminPurchases: React.FC = () => {
   const [customEndDate, setCustomEndDate] = useState(() => toLocalYMD(new Date()));
   const [searchPeriodOnly, setSearchPeriodOnly] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const [isPrintingPdf, setIsPrintingPdf] = useState(false);
   const [downloadingPurchaseId, setDownloadingPurchaseId] = useState<string | null>(null);
+  const [printingPurchaseId, setPrintingPurchaseId] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
 
@@ -412,7 +417,8 @@ export const AdminPurchases: React.FC = () => {
   const [newProdBuyPrice, setNewProdBuyPrice] = useState('');
   const [newProdSellPrice, setNewProdSellPrice] = useState('');
   const [newProdSku, setNewProdSku] = useState('');
-  const [newProdMinStock, setNewProdMinStock] = useState('5');
+  const [newProdMinStock, setNewProdMinStock] = useState('0');
+  const [newProdSecondLocationKey, setNewProdSecondLocationKey] = useState('');
   const [createProdError, setCreateProdError] = useState('');
   const [isCreatingProduct, setIsCreatingProduct] = useState(false);
 
@@ -711,10 +717,7 @@ export const AdminPurchases: React.FC = () => {
       '';
     setPurchaseShopId(targetShop);
     setDestinationType('SHOP_FLOOR');
-    const shopStores = (dbState.stores || []).filter(
-      st => st.shopId === targetShop && st.status === 'ACTIVE'
-    );
-    setPurchaseStoreId(shopStores[0]?.id || '');
+    setPurchaseStoreId('');
     setPurchaseDate(toLocalYMD(new Date()));
     setSupplierName('');
     setSupplierPhone('');
@@ -1004,16 +1007,100 @@ export const AdminPurchases: React.FC = () => {
     return shopSpecific.length > 0 ? shopSpecific : allCats;
   }, [dbState.categories, purchaseShopId]);
 
+  // Primary location resolved from the purchase form (Shop Floor vs Warehouse Store)
+  const createProdPrimaryLocation = useMemo(() => {
+    const targetShopId = purchaseShopId || availableShops[0]?.id || '';
+    const shopObj = availableShops.find(s => s.id === targetShopId);
+    const shopName = shopObj?.name || 'Selected Shop';
+
+    if (destinationType === 'STORE' && purchaseStoreId) {
+      const storeObj = (dbState.stores || []).find(
+        st => st.id === purchaseStoreId && st.shopId === targetShopId
+      );
+      if (storeObj) {
+        return {
+          key: `STORE:${storeObj.id}`,
+          type: 'STORE' as const,
+          shopId: targetShopId,
+          storeId: storeObj.id,
+          label: `Store: ${storeObj.name} (${shopName})`,
+        };
+      }
+    }
+
+    return {
+      key: targetShopId ? `SHOP:${targetShopId}` : '',
+      type: 'SHOP_FLOOR' as const,
+      shopId: targetShopId,
+      storeId: undefined as string | undefined,
+      label: `Shop Floor: ${shopName}`,
+    };
+  }, [purchaseShopId, availableShops, destinationType, purchaseStoreId, dbState.stores]);
+
+  // Optional second location options — strictly SAME SHOP ONLY, excluding the location already selected on the purchase form:
+  // • Purchase to Shop Floor → only active stores under that shop
+  // • Purchase to Store      → that shop's Shop Floor + any other active stores under that same shop
+  const createProdSecondLocationOptions = useMemo(() => {
+    const targetShopId = createProdPrimaryLocation.shopId;
+    const primaryKey = createProdPrimaryLocation.key;
+    if (!targetShopId) return [] as { key: string; label: string }[];
+
+    const targetShop = availableShops.find(s => s.id === targetShopId);
+    const targetShopName = targetShop?.name || 'Shop';
+    const sameShopWarehouseStores = (dbState.stores || []).filter(
+      st => st.shopId === targetShopId && st.status === 'ACTIVE' && !st.isShopFloor
+    );
+
+    const options: { key: string; label: string }[] = [];
+
+    // If purchase destination is a Store, offer this shop's Shop Floor as a second location
+    const floorKey = `SHOP:${targetShopId}`;
+    if (floorKey !== primaryKey) {
+      options.push({
+        key: floorKey,
+        label: `${targetShopName} — Shop Floor`,
+      });
+    }
+
+    // Offer all active stores belonging to this SAME shop (excluding the store already chosen on the purchase)
+    for (const st of sameShopWarehouseStores) {
+      const storeKey = `STORE:${st.id}`;
+      if (storeKey === primaryKey) continue;
+      options.push({
+        key: storeKey,
+        label: `${st.name} (Store)${st.location ? ` — ${st.location}` : ''}`,
+      });
+    }
+
+    return options;
+  }, [createProdPrimaryLocation, availableShops, dbState.stores]);
+
+  const effectiveSecondLocationKey = useMemo(() => {
+    if (!newProdSecondLocationKey) return '';
+    return createProdSecondLocationOptions.some(opt => opt.key === newProdSecondLocationKey)
+      ? newProdSecondLocationKey
+      : '';
+  }, [newProdSecondLocationKey, createProdSecondLocationOptions]);
+
+  const selectedSecondLocationLabel = useMemo(() => {
+    if (!effectiveSecondLocationKey) return '';
+    return (
+      createProdSecondLocationOptions.find(opt => opt.key === effectiveSecondLocationKey)?.label ||
+      ''
+    );
+  }, [effectiveSecondLocationKey, createProdSecondLocationOptions]);
+
   const openCreateProductModal = (prefillName?: string) => {
     const trimmedPrefill = (prefillName ?? purchaseProductSearch).trim();
     setNewProdName(trimmedPrefill);
     setNewProdVariation('');
-    setNewProdCategoryId(purchaseShopCategories[0]?.id || 'general');
+    setNewProdCategoryId('');
     setNewProdUnit('pcs');
     setNewProdBuyPrice('');
     setNewProdSellPrice('');
     setNewProdSku('');
-    setNewProdMinStock('5');
+    setNewProdMinStock('0');
+    setNewProdSecondLocationKey('');
     setCreateProdError('');
     setIsCreateProductOpen(true);
   };
@@ -1031,6 +1118,12 @@ export const AdminPurchases: React.FC = () => {
     const targetShopId = purchaseShopId || availableShops[0]?.id || '';
     if (!targetShopId) {
       setCreateProdError('Please select a Target Shop / Unit first.');
+      return;
+    }
+
+    const isStoreDirected = destinationType === 'STORE';
+    if (isStoreDirected && !purchaseStoreId) {
+      setCreateProdError('Please select a destination Store on the purchase form first.');
       return;
     }
 
@@ -1052,22 +1145,52 @@ export const AdminPurchases: React.FC = () => {
       return;
     }
 
-    const minStockVal = newProdMinStock.trim() ? parseFloat(newProdMinStock) : 5;
+    const minStockVal = newProdMinStock.trim() ? parseFloat(newProdMinStock) : 0;
+
+    // Parse optional second location (same-shop only, strictly 0 initial quantity)
+    let secondLocation:
+      | { type: 'SHOP_FLOOR' | 'STORE'; shopId: string; storeId?: string }
+      | undefined;
+
+    if (effectiveSecondLocationKey) {
+      if (effectiveSecondLocationKey.startsWith('SHOP:')) {
+        const secShopId = effectiveSecondLocationKey.slice('SHOP:'.length);
+        if (secShopId && secShopId === targetShopId) {
+          secondLocation = { type: 'SHOP_FLOOR', shopId: secShopId };
+        }
+      } else if (effectiveSecondLocationKey.startsWith('STORE:')) {
+        const secStoreId = effectiveSecondLocationKey.slice('STORE:'.length);
+        const secStore = (dbState.stores || []).find(
+          st => st.id === secStoreId && st.shopId === targetShopId
+        );
+        if (!secStore) {
+          setCreateProdError('Selected second location store must belong to this same shop.');
+          return;
+        }
+        secondLocation = {
+          type: 'STORE',
+          shopId: targetShopId,
+          storeId: secStore.id,
+        };
+      }
+    }
 
     setIsCreatingProduct(true);
     try {
-      // Create with currentStock: 0 so saving this purchase accurately adds the purchased quantity
+      // Strictly 0 initial stock (required for multi-location qualification & prevents double-counting when purchase saves)
       const res = await ProductService.createProduct(
         {
           shopId: targetShopId,
+          storeId: isStoreDirected ? purchaseStoreId : undefined,
+          secondLocation,
           name: trimmedName,
           variation: newProdVariation.trim() || undefined,
-          categoryId: newProdCategoryId || purchaseShopCategories[0]?.id || 'general',
+          categoryId: newProdCategoryId || '',
           unit: newProdUnit.trim() || 'pcs',
           purchasePrice: buyPriceVal,
           sellingPrice: sellPriceVal,
           currentStock: 0,
-          minStock: Number.isFinite(minStockVal) && minStockVal >= 0 ? minStockVal : 5,
+          minStock: Number.isFinite(minStockVal) && minStockVal >= 0 ? minStockVal : 0,
           sku: newProdSku.trim() || undefined,
           status: 'ACTIVE',
         },
@@ -1104,45 +1227,54 @@ export const AdminPurchases: React.FC = () => {
 
       setPurchaseProductSearch('');
       setPurchaseSearchLimit(PAGE_SIZE);
+      setNewProdSecondLocationKey('');
       setIsCreateProductOpen(false);
       setFormError('');
 
       addToast({
         type: 'success',
-        title: 'Product Created & Added to Purchase',
-        description: `"${createdProduct.name}" was created and attached to your purchase list.`,
+        title: secondLocation
+          ? 'Product Created in Both Locations & Attached'
+          : 'Product Created & Added to Purchase',
+        description: secondLocation && selectedSecondLocationLabel
+          ? `"${createdProduct.name}" was created at 0 qty in ${createProdPrimaryLocation.label} & ${selectedSecondLocationLabel}, and attached to this purchase.`
+          : `"${createdProduct.name}" was created in ${createProdPrimaryLocation.label} and attached to your purchase list.`,
       });
     } finally {
       setIsCreatingProduct(false);
     }
   };
 
+  const buildPurchasesPdfMeta = () => {
+    const scopeLabel = isSeller
+      ? currentShop?.name || 'My Shop'
+      : selectedShopId === 'ALL'
+        ? 'All Shops'
+        : availableShops.find(s => s.id === selectedShopId)?.name || 'Shop';
+
+    const effectivePeriodKey = isGlobalSearchActive ? 'search' : periodFilter;
+    return {
+      shopLabel: scopeLabel,
+      periodKey: effectivePeriodKey,
+      periodTitle: isGlobalSearchActive
+        ? 'Purchases Search Report'
+        : periodRange.periodTitle,
+      periodLabel: isGlobalSearchActive
+        ? 'Search Results (All Dates)'
+        : periodRange.periodLabel,
+      dateRangeText: isGlobalSearchActive ? 'All Dates' : periodRange.dateRangeText,
+      startDate: isGlobalSearchActive ? undefined : periodRange.startDate,
+      endDate: isGlobalSearchActive ? undefined : periodRange.endDate,
+      searchQuery: searchQuery.trim() || undefined,
+      storeNameById: storeNameMap,
+    };
+  };
+
   const handleDownloadPurchasesPdf = async () => {
     if (isDownloadingPdf) return;
     setIsDownloadingPdf(true);
     try {
-      const scopeLabel = isSeller
-        ? currentShop?.name || 'My Shop'
-        : selectedShopId === 'ALL'
-          ? 'All Shops'
-          : availableShops.find(s => s.id === selectedShopId)?.name || 'Shop';
-
-      const effectivePeriodKey = isGlobalSearchActive ? 'search' : periodFilter;
-      const ok = await downloadPurchasesReportPdf(purchases, settings, {
-        shopLabel: scopeLabel,
-        periodKey: effectivePeriodKey,
-        periodTitle: isGlobalSearchActive
-          ? 'Purchases Search Report'
-          : periodRange.periodTitle,
-        periodLabel: isGlobalSearchActive
-          ? 'Search Results (All Dates)'
-          : periodRange.periodLabel,
-        dateRangeText: isGlobalSearchActive ? 'All Dates' : periodRange.dateRangeText,
-        startDate: isGlobalSearchActive ? undefined : periodRange.startDate,
-        endDate: isGlobalSearchActive ? undefined : periodRange.endDate,
-        searchQuery: searchQuery.trim() || undefined,
-        storeNameById: storeNameMap,
-      });
+      const ok = await downloadPurchasesReportPdf(purchases, settings, buildPurchasesPdfMeta());
 
       if (ok) {
         addToast({
@@ -1155,6 +1287,32 @@ export const AdminPurchases: React.FC = () => {
       }
     } finally {
       setIsDownloadingPdf(false);
+    }
+  };
+
+  const handlePrintPurchasesPdf = async () => {
+    if (isPrintingPdf) return;
+    setIsPrintingPdf(true);
+    try {
+      const res = await printPurchasesReportPdf(purchases, settings, buildPurchasesPdfMeta());
+      if (res.ok) {
+        addToast({
+          type: 'success',
+          title: res.mode === 'fallback_download' ? 'Opened Purchases PDF' : 'Print Dialog Opened',
+          description:
+            res.mode === 'fallback_download'
+              ? 'Use the printer option in your PDF viewer to print.'
+              : `Ready to print ${purchases.length} purchase order(s).`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Print Failed',
+          description: res.error || 'Could not open print dialog on this device.',
+        });
+      }
+    } finally {
+      setIsPrintingPdf(false);
     }
   };
 
@@ -1175,6 +1333,32 @@ export const AdminPurchases: React.FC = () => {
       }
     } finally {
       setDownloadingPurchaseId(null);
+    }
+  };
+
+  const handlePrintSinglePurchasePdf = async (purchase: Purchase) => {
+    if (printingPurchaseId) return;
+    setPrintingPurchaseId(purchase.id);
+    try {
+      const resolvedStore =
+        purchase.storeName ||
+        (purchase.storeId ? storeNameMap[purchase.storeId] : undefined);
+      const res = await printSinglePurchasePdf(purchase, settings, resolvedStore);
+      if (res.ok) {
+        addToast({
+          type: 'success',
+          title: res.mode === 'fallback_download' ? 'Opened Purchase Voucher' : 'Print Dialog Opened',
+          description: `Ready to print ${purchase.purchaseNumber || purchase.supplierName}.`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Print Failed',
+          description: res.error || 'Could not open print dialog on this device.',
+        });
+      }
+    } finally {
+      setPrintingPurchaseId(null);
     }
   };
 
@@ -1536,10 +1720,7 @@ export const AdminPurchases: React.FC = () => {
                       setPurchaseShopId(nextShopId);
                       setPurchaseProductSearch('');
                       setPurchaseSearchLimit(PAGE_SIZE);
-                      const nextStores = (dbState.stores || []).filter(
-                        st => st.shopId === nextShopId && st.status === 'ACTIVE'
-                      );
-                      setPurchaseStoreId(nextStores[0]?.id || '');
+                      setPurchaseStoreId('');
                     }}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                   >
@@ -1556,7 +1737,10 @@ export const AdminPurchases: React.FC = () => {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <button
                       type="button"
-                      onClick={() => setDestinationType('SHOP_FLOOR')}
+                      onClick={() => {
+                        setDestinationType('SHOP_FLOOR');
+                        setPurchaseStoreId('');
+                      }}
                       className={`px-3.5 py-2.5 rounded-xl border text-left font-semibold flex items-center gap-2 transition ${
                         destinationType === 'SHOP_FLOOR'
                           ? 'bg-blue-600/20 border-blue-500 text-blue-300'
@@ -1570,9 +1754,6 @@ export const AdminPurchases: React.FC = () => {
                       type="button"
                       onClick={() => {
                         setDestinationType('STORE');
-                        if (!purchaseStoreId && activeShopStores.length > 0) {
-                          setPurchaseStoreId(activeShopStores[0].id);
-                        }
                       }}
                       className={`px-3.5 py-2.5 rounded-xl border text-left font-semibold flex items-center gap-2 transition ${
                         destinationType === 'STORE'
@@ -2210,9 +2391,7 @@ export const AdminPurchases: React.FC = () => {
                       Create New Product
                     </h3>
                     <p className="text-[11px] text-slate-400 truncate">
-                      Saves to{' '}
-                      {availableShops.find(s => s.id === purchaseShopId)?.name || 'selected shop'} &amp;
-                      attaches directly to this purchase
+                      Saves to {createProdPrimaryLocation.label} &amp; attaches directly to this purchase
                     </p>
                   </div>
                 </div>
@@ -2250,36 +2429,41 @@ export const AdminPurchases: React.FC = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
-                      Category
+                      Category (Optional)
                     </label>
                     <select
                       value={newProdCategoryId}
                       onChange={e => setNewProdCategoryId(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
                     >
-                      {purchaseShopCategories.length === 0 ? (
-                        <option value="general">General</option>
-                      ) : (
-                        purchaseShopCategories.map(c => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))
-                      )}
+                      <option value="">Select category (Optional)...</option>
+                      {purchaseShopCategories.map(c => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
-                      Unit *
+                      Unit of Measure *
                     </label>
-                    <input
-                      type="text"
+                    <select
                       value={newProdUnit}
                       onChange={e => setNewProdUnit(e.target.value)}
-                      placeholder="pcs, kg, box, pack, L..."
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                    />
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    >
+                      <option value="pcs">Pieces (pcs)</option>
+                      <option value="meter">Meter (m)</option>
+                      <option value="pack">Pack</option>
+                      <option value="box">Box</option>
+                      <option value="kg">Kilogram (kg)</option>
+                      <option value="pair">Pair</option>
+                      <option value="roll">Roll</option>
+                      <option value="liter">Liter</option>
+                      <option value="set">Set</option>
+                    </select>
                   </div>
                 </div>
 
@@ -2360,10 +2544,82 @@ export const AdminPurchases: React.FC = () => {
                   </div>
                 </div>
 
-                <p className="text-[11px] text-slate-400 bg-slate-950/70 border border-slate-800 rounded-xl px-3 py-2">
-                  Initial stock starts at <strong className="text-white">0</strong> so saving this
-                  purchase adds the exact purchased quantity without double-counting.
-                </p>
+                {/* Location Assignment (Primary from Purchase + Optional Second Location at 0 Qty) */}
+                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[11px] font-semibold text-slate-300">
+                      Product Locations
+                    </span>
+                    <span className="px-2 py-0.5 rounded-full bg-blue-500/15 border border-blue-500/30 text-blue-300 text-[10px] font-bold">
+                      Initial Qty: 0
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-[11px]">
+                    {createProdPrimaryLocation.type === 'STORE' ? (
+                      <Warehouse className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    ) : (
+                      <Store className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <span className="text-slate-400">Primary (Purchase Destination): </span>
+                      <span className="text-white font-semibold">
+                        {createProdPrimaryLocation.label}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">
+                      Second Location (Optional — Same Shop Only)
+                    </label>
+                    {createProdSecondLocationOptions.length > 0 ? (
+                      <select
+                        value={effectiveSecondLocationKey}
+                        onChange={e => setNewProdSecondLocationKey(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                      >
+                        <option value="">None — Single Location Only (Default)</option>
+                        {createProdSecondLocationOptions.map(opt => (
+                          <option key={opt.key} value={opt.key}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="px-3 py-2 rounded-xl bg-slate-900/70 border border-slate-800 text-[11px] text-slate-400">
+                        No other active stores under this shop yet. Create a store under this shop
+                        to assign a second location.
+                      </div>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    {effectiveSecondLocationKey && selectedSecondLocationLabel ? (
+                      <>
+                        Multi-location rule: Only products with{' '}
+                        <strong className="text-white">0 quantity</strong> qualify for multiple
+                        locations within the same shop. This product will be visible in both{' '}
+                        <strong className="text-emerald-300">
+                          {createProdPrimaryLocation.label}
+                        </strong>{' '}
+                        and{' '}
+                        <strong className="text-blue-300">{selectedSecondLocationLabel}</strong>{' '}
+                        starting at <strong className="text-white">0</strong> qty (and{' '}
+                        <strong className="text-blue-300">{selectedSecondLocationLabel}</strong>{' '}
+                        stays at <strong className="text-white">0</strong> when this purchase is
+                        saved).
+                      </>
+                    ) : (
+                      <>
+                        Initial stock starts at <strong className="text-white">0</strong> in{' '}
+                        <strong className="text-white">{createProdPrimaryLocation.label}</strong> so
+                        saving this purchase adds the exact purchased quantity without
+                        double-counting.
+                      </>
+                    )}
+                  </p>
+                </div>
 
                 <div className="flex items-center gap-2.5 pt-2">
                   <button
@@ -2845,6 +3101,34 @@ export const AdminPurchases: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={handlePrintPurchasesPdf}
+            disabled={isPrintingPdf}
+            className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600 border border-indigo-500/35 text-indigo-300 hover:text-white font-semibold text-xs transition disabled:opacity-60"
+          >
+            {isPrintingPdf ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Printer className="w-4 h-4" />
+            )}
+            <span>
+              Print (
+              {isGlobalSearchActive
+                ? 'Search'
+                : periodFilter === 'all'
+                  ? 'All'
+                  : periodFilter === 'day'
+                    ? 'Day'
+                    : periodFilter === 'week'
+                      ? 'Week'
+                      : periodFilter === 'month'
+                        ? 'Month'
+                        : 'Custom'}
+              )
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleDownloadPurchasesPdf}
             disabled={isDownloadingPdf}
             className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-600/15 hover:bg-emerald-600 border border-emerald-500/30 text-emerald-300 hover:text-white font-semibold text-xs transition disabled:opacity-60"
@@ -3096,6 +3380,21 @@ export const AdminPurchases: React.FC = () => {
                     <div className="flex items-center gap-1.5 pt-1.5 border-t border-slate-800/60">
                       <button
                         type="button"
+                        onClick={() => handlePrintSinglePurchasePdf(purchase)}
+                        disabled={printingPurchaseId === purchase.id}
+                        className="flex items-center justify-center gap-1 px-2.5 py-2 rounded-lg bg-indigo-500/15 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/30 transition text-[11px] font-semibold disabled:opacity-50"
+                        title="Print Purchase Voucher"
+                      >
+                        {printingPurchaseId === purchase.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Printer className="w-3.5 h-3.5" />
+                        )}
+                        <span>Print</span>
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => handleDownloadSinglePurchasePdf(purchase)}
                         disabled={downloadingPurchaseId === purchase.id}
                         className="flex items-center justify-center gap-1 px-2.5 py-2 rounded-lg bg-emerald-500/10 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/25 transition text-[11px] font-semibold disabled:opacity-50"
@@ -3212,6 +3511,20 @@ export const AdminPurchases: React.FC = () => {
                         </td>
                         <td className="py-3.5 px-4 text-right whitespace-nowrap">
                           <div className="inline-flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handlePrintSinglePurchasePdf(purchase)}
+                              disabled={printingPurchaseId === purchase.id}
+                              className="px-2.5 py-1.5 rounded bg-indigo-500/15 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/30 text-[11px] font-medium transition inline-flex items-center gap-1 disabled:opacity-50"
+                              title="Print Purchase Voucher"
+                            >
+                              {printingPurchaseId === purchase.id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Printer className="w-3 h-3" />
+                              )}
+                              Print
+                            </button>
                             <button
                               type="button"
                               onClick={() => handleDownloadSinglePurchasePdf(purchase)}

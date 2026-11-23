@@ -46,6 +46,13 @@ import { ExcelExportService } from '../../services/excelExportService';
 import { formatCurrency } from '../../utils/formatters';
 import { printStockTransferVoucher } from '../../utils/transferPrint';
 import {
+  downloadInventoryReportPdf,
+  InventoryExportMeta,
+  InventoryExportRow,
+  printInventoryReportPdf,
+  printTransferVoucherPdf,
+} from '../../utils/pdfExport';
+import {
   getAdminManagedShops,
   hasAdminAccess,
   isPlatformAdmin,
@@ -165,6 +172,7 @@ export const AdminStores: React.FC = () => {
   const [sourceLocationKey, setSourceLocationKey] = useState('');
   const [destLocationKey, setDestLocationKey] = useState('');
   const [selectedTransferMap, setSelectedTransferMap] = useState<Record<string, string>>({});
+  const [selectedTransferOrder, setSelectedTransferOrder] = useState<string[]>([]);
   const [selectedPriceMap, setSelectedPriceMap] = useState<Record<string, string>>({});
   const [productSearch, setProductSearch] = useState('');
   const [transferStockedOnly] = useState(true);
@@ -747,7 +755,13 @@ export const AdminStores: React.FC = () => {
       isInvalidPrice: boolean;
     }[] = [];
 
-    for (const [productId, rawQty] of Object.entries(selectedTransferMap)) {
+    const orderedIds = [
+      ...selectedTransferOrder.filter(id => id in selectedTransferMap),
+      ...Object.keys(selectedTransferMap).filter(id => !selectedTransferOrder.includes(id)),
+    ];
+
+    for (const productId of orderedIds) {
+      const rawQty = selectedTransferMap[productId];
       const qtyStr = typeof rawQty === 'string' ? rawQty : String(rawQty ?? '');
       const product = productByIdMap.get(productId);
       if (!product) continue;
@@ -787,6 +801,7 @@ export const AdminStores: React.FC = () => {
     return entries;
   }, [
     selectedTransferMap,
+    selectedTransferOrder,
     selectedPriceMap,
     productByIdMap,
     selectedSourceLocation,
@@ -1238,6 +1253,7 @@ export const AdminStores: React.FC = () => {
     setSourceLocationKey('');
     setDestLocationKey('');
     setSelectedTransferMap({});
+    setSelectedTransferOrder([]);
     setSelectedPriceMap({});
     setProductSearch('');
     setTransferVisibleLimit(STORE_PAGE_SIZE);
@@ -1284,6 +1300,7 @@ export const AdminStores: React.FC = () => {
       priceMap[item.productId] = String(item.unitPrice);
     }
     setSelectedTransferMap(qtyMap);
+    setSelectedTransferOrder(Object.keys(qtyMap));
     setSelectedPriceMap(priceMap);
     setProductSearch('');
     setTransferVisibleLimit(STORE_PAGE_SIZE);
@@ -1303,6 +1320,7 @@ export const AdminStores: React.FC = () => {
     // Keep Location Destination unselected until admin explicitly chooses it
     setDestLocationKey('');
     setSelectedTransferMap({});
+    setSelectedTransferOrder([]);
     setSelectedPriceMap({});
     setProductSearch('');
     setTransferVisibleLimit(STORE_PAGE_SIZE);
@@ -1335,10 +1353,15 @@ export const AdminStores: React.FC = () => {
         });
         return;
       }
-      setSelectedTransferMap(prev => ({
-        ...prev,
-        [product.id]: String(nextQty),
-      }));
+      setSelectedTransferMap(prev => {
+        const rest = { ...prev };
+        delete rest[product.id];
+        return {
+          [product.id]: String(nextQty),
+          ...rest,
+        };
+      });
+      setSelectedTransferOrder(prev => [product.id, ...prev.filter(id => id !== product.id)]);
     } else {
       if (Object.keys(selectedTransferMap).length >= MAX_BATCH_TRANSFER_PRODUCTS) {
         addToast({
@@ -1353,9 +1376,10 @@ export const AdminStores: React.FC = () => {
         [product.id]: pm[product.id] ?? defaultPrice,
       }));
       setSelectedTransferMap(prev => ({
-        ...prev,
         [product.id]: '1',
+        ...prev,
       }));
+      setSelectedTransferOrder(prev => [product.id, ...prev.filter(id => id !== product.id)]);
     }
 
     // Clear search automatically so admin can immediately search the next product without pressing ×
@@ -1534,6 +1558,7 @@ export const AdminStores: React.FC = () => {
       const wasEditing = Boolean(editingTransferId);
       setEditingTransferId(null);
       setSelectedTransferMap({});
+      setSelectedTransferOrder([]);
       setSelectedPriceMap({});
       setProductSearch('');
       setBulkTransferQty('');
@@ -1723,6 +1748,190 @@ export const AdminStores: React.FC = () => {
       });
     } finally {
       setIsCommittingImport(false);
+    }
+  };
+
+  const buildStoreInventoryPdfPayload = (
+    targetStore?: Store
+  ): { rows: InventoryExportRow[]; meta: InventoryExportMeta } => {
+    const shopNameById = new Map<string, string>(
+      accessibleShops.map(s => [s.id, s.name])
+    );
+    const rows: InventoryExportRow[] = [];
+
+    if (targetStore) {
+      const storeProducts = accessibleProducts.filter(p => {
+        if (p.shopId && p.shopId !== targetStore.shopId) return false;
+        const qty = getProductQtyInStore(p, targetStore);
+        return qty > 0 || (p.storeStocks && p.storeStocks[targetStore.id] !== undefined);
+      });
+      const shopName = shopNameById.get(targetStore.shopId) || 'Shop';
+      for (const p of storeProducts) {
+        const qty = Math.max(0, getProductQtyInStore(p, targetStore));
+        const buyPrice = Number(p.purchasePrice || 0);
+        const sellPrice = Number(p.sellingPrice || 0);
+        const minStk = Number(p.minStock || 0);
+        const buyValue = qty * buyPrice;
+        const sellValue = qty * sellPrice;
+        const status: InventoryExportRow['status'] =
+          p.status === 'INACTIVE'
+            ? 'INACTIVE'
+            : qty <= 0
+              ? 'OUT OF STOCK'
+              : qty <= minStk
+                ? 'LOW STOCK'
+                : 'IN STOCK';
+        rows.push({
+          shopName,
+          productName: p.name,
+          variation: p.variation,
+          sku: p.sku || '-',
+          unit: p.unit || 'pcs',
+          shopQty: targetStore.isShopFloor ? qty : 0,
+          storeQty: targetStore.isShopFloor ? 0 : qty,
+          totalQty: qty,
+          activeQty: qty,
+          storeBreakdown: `${targetStore.name}: ${qty}`,
+          purchasePrice: buyPrice,
+          sellingPrice: sellPrice,
+          buyValue,
+          sellValue,
+          potentialProfit: sellValue - buyValue,
+          minStock: minStk,
+          rowScope: targetStore.isShopFloor ? 'SHOP' : 'STORE',
+          status,
+        });
+      }
+      return {
+        rows,
+        meta: {
+          scope: targetStore.isShopFloor ? 'SHOP' : 'STORE',
+          shopLabel: `${targetStore.name} (${shopName})`,
+          searchQuery: invSearch.trim() || undefined,
+        },
+      };
+    }
+
+    for (const g of inventoryStoreGroups) {
+      const shopName = shopNameById.get(g.store.shopId) || 'Shop';
+      for (const p of g.products) {
+        const qty = Math.max(0, getProductQtyInStore(p, g.store));
+        const buyPrice = Number(p.purchasePrice || 0);
+        const sellPrice = Number(p.sellingPrice || 0);
+        const minStk = Number(p.minStock || 0);
+        const buyValue = qty * buyPrice;
+        const sellValue = qty * sellPrice;
+        const status: InventoryExportRow['status'] =
+          p.status === 'INACTIVE'
+            ? 'INACTIVE'
+            : qty <= 0
+              ? 'OUT OF STOCK'
+              : qty <= minStk
+                ? 'LOW STOCK'
+                : 'IN STOCK';
+        rows.push({
+          shopName,
+          productName: p.name,
+          variation: p.variation,
+          sku: p.sku || '-',
+          unit: p.unit || 'pcs',
+          shopQty: g.store.isShopFloor ? qty : 0,
+          storeQty: g.store.isShopFloor ? 0 : qty,
+          totalQty: qty,
+          activeQty: qty,
+          storeBreakdown: `${g.store.name}: ${qty}`,
+          purchasePrice: buyPrice,
+          sellingPrice: sellPrice,
+          buyValue,
+          sellValue,
+          potentialProfit: sellValue - buyValue,
+          minStock: minStk,
+          rowScope: g.store.isShopFloor ? 'SHOP' : 'STORE',
+          status,
+        });
+      }
+    }
+
+    return {
+      rows,
+      meta: {
+        scope: 'STORE',
+        shopLabel: selectedInventoryStore ? selectedInventoryStore.name : 'All Stores',
+        searchQuery: invSearch.trim() || undefined,
+      },
+    };
+  };
+
+  const handlePrintStoreInventory = async (targetStore?: Store) => {
+    const { rows, meta } = buildStoreInventoryPdfPayload(targetStore);
+    if (rows.length === 0) {
+      addToast({
+        type: 'warning',
+        title: 'Nothing to Print',
+        description: targetStore
+          ? `No products available in ${targetStore.name}.`
+          : 'No store products match your current filters.',
+      });
+      return;
+    }
+    const res = await printInventoryReportPdf(rows, settings, meta);
+    if (res.ok) {
+      addToast({
+        type: 'success',
+        title: res.mode === 'fallback_download' ? 'Opened Store Inventory PDF' : 'Print Dialog Opened',
+        description: `Ready to print ${rows.length} product(s) for ${meta.shopLabel}.`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Print Failed',
+        description: res.error || 'Could not open print dialog on this device.',
+      });
+    }
+  };
+
+  const handleDownloadStoreInventoryPdf = async (targetStore?: Store) => {
+    const { rows, meta } = buildStoreInventoryPdfPayload(targetStore);
+    if (rows.length === 0) {
+      addToast({
+        type: 'warning',
+        title: 'Nothing to Export',
+        description: targetStore
+          ? `No products available in ${targetStore.name}.`
+          : 'No store products match your current filters.',
+      });
+      return;
+    }
+    const ok = await downloadInventoryReportPdf(rows, settings, meta);
+    addToast(
+      ok
+        ? {
+            type: 'success',
+            title: 'Store Inventory PDF Downloaded',
+            description: `Saved PDF with ${rows.length} product(s) for ${meta.shopLabel}.`,
+          }
+        : {
+            type: 'error',
+            title: 'PDF Export Failed',
+            description: 'Could not save store inventory PDF on this device.',
+          }
+    );
+  };
+
+  const handleDirectPrintTransfer = async (transfer: StockTransfer) => {
+    const res = await printTransferVoucherPdf(transfer, settings);
+    if (res.ok) {
+      addToast({
+        type: 'success',
+        title: res.mode === 'fallback_download' ? 'Opened Transfer PDF' : 'Print Dialog Opened',
+        description: `Ready to print Transfer ${transfer.transferNumber}.`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Print Failed',
+        description: res.error || 'Could not open print dialog on this device.',
+      });
     }
   };
 
@@ -2059,6 +2268,7 @@ export const AdminStores: React.FC = () => {
     setSelectedTransferMap({
       [product.id]: availableHere > 0 ? '1' : '0',
     });
+    setSelectedTransferOrder([product.id]);
     setSelectedPriceMap({
       [product.id]: String(Number(product.sellingPrice || product.purchasePrice || 0)),
     });
@@ -2090,6 +2300,7 @@ export const AdminStores: React.FC = () => {
           delete next[deletingProduct.id];
           return next;
         });
+        setSelectedTransferOrder(prev => prev.filter(id => id !== deletingProduct.id));
       }
       setDeletingProduct(null);
     } else {
@@ -2343,6 +2554,14 @@ export const AdminStores: React.FC = () => {
                       )}
                       <button
                         type="button"
+                        onClick={() => handlePrintStoreInventory(store)}
+                        className="flex items-center justify-center gap-1 py-2 px-3 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/35 text-indigo-300 font-semibold transition"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>Print</span>
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => handleExportStoreExcel(store)}
                         className="flex items-center justify-center gap-1 py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition"
                       >
@@ -2488,7 +2707,7 @@ export const AdminStores: React.FC = () => {
                 </button>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => openImportModal(selectedInventoryStore?.id)}
@@ -2500,13 +2719,31 @@ export const AdminStores: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  onClick={() => handlePrintStoreInventory(selectedInventoryStore || undefined)}
+                  disabled={inventoryProducts.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 text-[11px] font-semibold transition disabled:opacity-45"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Print</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownloadStoreInventoryPdf(selectedInventoryStore || undefined)}
+                  disabled={inventoryProducts.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/40 text-rose-300 text-[11px] font-semibold transition disabled:opacity-45"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>PDF</span>
+                </button>
+                <button
+                  type="button"
                   onClick={handleExportInventoryExcel}
                   disabled={inventoryProducts.length === 0}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-blue-300 text-[11px] font-semibold transition disabled:opacity-45"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>
-                    Export Excel{selectedInventoryStore ? ` (${selectedInventoryStore.name})` : ''}
+                    Excel{selectedInventoryStore ? ` (${selectedInventoryStore.name})` : ''}
                   </span>
                 </button>
               </div>
@@ -3134,6 +3371,7 @@ export const AdminStores: React.FC = () => {
                         type="button"
                         onClick={() => {
                           setSelectedTransferMap({});
+                          setSelectedTransferOrder([]);
                           setSelectedPriceMap({});
                           setSelectedQueueFilter('');
                           setTransferError('');
@@ -3427,6 +3665,9 @@ export const AdminStores: React.FC = () => {
                                       delete next[entry.product.id];
                                       return next;
                                     });
+                                    setSelectedTransferOrder(prev =>
+                                      prev.filter(id => id !== entry.product.id)
+                                    );
                                     setSelectedPriceMap(prev => {
                                       const next = { ...prev };
                                       delete next[entry.product.id];
@@ -3875,6 +4116,14 @@ export const AdminStores: React.FC = () => {
                             </button>
                             <button
                               type="button"
+                              title="Print Transfer Voucher"
+                              onClick={() => handleDirectPrintTransfer(t)}
+                              className="p-1.5 rounded-lg bg-indigo-600/15 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 transition"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
                               title="Download PDF"
                               onClick={async () => {
                                 const ok = await printStockTransferVoucher(t, settings);
@@ -3894,7 +4143,7 @@ export const AdminStores: React.FC = () => {
                               }}
                               className="p-1.5 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-300 transition"
                             >
-                              <Printer className="w-3.5 h-3.5" />
+                              <Download className="w-3.5 h-3.5" />
                             </button>
                             <button
                               type="button"
@@ -3968,7 +4217,7 @@ export const AdminStores: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-4 gap-1.5 pt-1">
+                    <div className="grid grid-cols-5 gap-1.5 pt-1">
                       <button
                         type="button"
                         onClick={() => {
@@ -3979,6 +4228,14 @@ export const AdminStores: React.FC = () => {
                       >
                         <Eye className="w-3.5 h-3.5" />
                         <span>View</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDirectPrintTransfer(t)}
+                        className="flex items-center justify-center gap-1 py-1.5 rounded-lg bg-indigo-600/15 border border-indigo-500/30 text-indigo-300 text-[11px] font-semibold"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>Print</span>
                       </button>
                       <button
                         type="button"
@@ -4000,7 +4257,7 @@ export const AdminStores: React.FC = () => {
                         }}
                         className="flex items-center justify-center gap-1 py-1.5 rounded-lg bg-emerald-600/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold"
                       >
-                        <Printer className="w-3.5 h-3.5" />
+                        <Download className="w-3.5 h-3.5" />
                         <span>PDF</span>
                       </button>
                       <button
@@ -4017,7 +4274,7 @@ export const AdminStores: React.FC = () => {
                         className="flex items-center justify-center gap-1 py-1.5 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[11px] font-semibold"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
-                        <span>Delete</span>
+                        <span>Del</span>
                       </button>
                     </div>
                   </div>
@@ -4108,7 +4365,15 @@ export const AdminStores: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleDirectPrintTransfer(viewingTransfer)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Print</span>
+              </button>
               <button
                 type="button"
                 onClick={async () => {
@@ -4129,8 +4394,8 @@ export const AdminStores: React.FC = () => {
                 }}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition"
               >
-                <Printer className="w-4 h-4" />
-                <span>Download PDF</span>
+                <Download className="w-4 h-4" />
+                <span>PDF</span>
               </button>
               <button
                 type="button"

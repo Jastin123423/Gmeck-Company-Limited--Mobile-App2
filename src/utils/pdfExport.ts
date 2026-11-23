@@ -14,6 +14,12 @@ import { formatCurrency, formatDateTime } from './formatters';
 import { formatSaleEditDetails, SaleEditsPrintMeta } from './saleEditsPrint';
 import { MovementsPrintMeta } from './movementsPrint';
 import { saveFileCrossPlatform } from './nativeDownload';
+import {
+  printPdfCrossPlatform,
+  PrintOrientation,
+  PrintPaperSize,
+  PrintPdfResult,
+} from './nativePrint';
 
 type RGB = [number, number, number];
 
@@ -91,6 +97,44 @@ export async function triggerPdfDownload(doc: jsPDF, rawFilename: string): Promi
   } catch (err) {
     console.error('[pdfExport] PDF download failed:', err);
     return false;
+  }
+}
+
+export async function triggerPdfPrint(
+  doc: jsPDF,
+  jobName: string,
+  rawFilename: string,
+  options?: {
+    orientation?: PrintOrientation;
+    paperSize?: PrintPaperSize;
+  }
+): Promise<PrintPdfResult> {
+  const filename = sanitizeFilename(rawFilename);
+  try {
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const inferredOrientation: PrintOrientation =
+      options?.orientation || (pageW > pageH ? 'landscape' : 'portrait');
+    const paperSize: PrintPaperSize = options?.paperSize || 'a4';
+
+    const base64Data = doc.output('datauristring');
+    const blob = doc.output('blob');
+    return await printPdfCrossPlatform({
+      jobName: pdfSafe(jobName) || 'Document',
+      fileName: filename,
+      blob,
+      base64Data,
+      orientation: inferredOrientation,
+      paperSize,
+    });
+  } catch (err: any) {
+    console.error('[pdfExport] PDF print failed:', err);
+    return {
+      ok: false,
+      mode: 'failed',
+      jobName,
+      error: err?.message || 'Unable to print PDF document.',
+    };
   }
 }
 
@@ -665,6 +709,27 @@ export async function downloadSalesReportPdf(
   );
 }
 
+export async function printSalesReportPdf(
+  sales: Sale[],
+  settings: BusinessSettings,
+  meta: SalesReportPdfMeta
+): Promise<PrintPdfResult> {
+  const doc = buildSalesReportPdfDoc(sales, settings, meta);
+  const period = resolveSalesPeriodMeta(meta);
+  const dateTag =
+    meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate}_to_${meta.endDate}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `${period.title} - ${meta.shopLabel} (${dateTag})`,
+    `sales_report_${period.key}_${meta.shopLabel}_${dateTag}.pdf`,
+    { orientation: 'landscape', paperSize: 'a4' }
+  );
+}
+
 // =====================================================================
 // 2. SALE EDITS HISTORY PDF (AdminSales.tsx Edit List)
 // =====================================================================
@@ -775,6 +840,22 @@ export async function downloadSaleEditsPdf(
   const doc = buildSaleEditsPdfDoc(requests, salesById, settings, meta);
   const stamp = new Date().toISOString().slice(0, 10);
   return triggerPdfDownload(doc, `sale_edits_history_${stamp}.pdf`);
+}
+
+export async function printSaleEditsPdf(
+  requests: SaleEditRequest[],
+  salesById: Map<string, Sale>,
+  settings: BusinessSettings,
+  meta: SaleEditsPrintMeta
+): Promise<PrintPdfResult> {
+  const doc = buildSaleEditsPdfDoc(requests, salesById, settings, meta);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `Sale Edits History - ${meta.shopLabel} (${stamp})`,
+    `sale_edits_history_${stamp}.pdf`,
+    { orientation: 'landscape', paperSize: 'a4' }
+  );
 }
 
 // =====================================================================
@@ -959,6 +1040,19 @@ export async function downloadTransferVoucherPdf(
   return triggerPdfDownload(doc, `stock_transfer_${transfer.transferNumber}.pdf`);
 }
 
+export async function printTransferVoucherPdf(
+  transfer: StockTransfer,
+  settings: BusinessSettings
+): Promise<PrintPdfResult> {
+  const doc = buildTransferVoucherPdfDoc(transfer, settings);
+  return triggerPdfPrint(
+    doc,
+    `Stock Transfer ${transfer.transferNumber}`,
+    `stock_transfer_${transfer.transferNumber}.pdf`,
+    { orientation: 'portrait', paperSize: 'a4' }
+  );
+}
+
 // =====================================================================
 // 4. STOCK MOVEMENTS REPORT PDF (AdminInventory.tsx)
 // =====================================================================
@@ -1056,15 +1150,30 @@ export async function downloadMovementsReportPdf(
   return triggerPdfDownload(doc, `stock_movements_${stamp}.pdf`);
 }
 
+export async function printMovementsReportPdfDirect(
+  movements: InventoryMovement[],
+  settings: BusinessSettings,
+  meta: MovementsPrintMeta
+): Promise<PrintPdfResult> {
+  const doc = buildMovementsPdfDoc(movements, settings, meta);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `Stock Movements Report (${meta.periodLabel || stamp})`,
+    `stock_movements_${stamp}.pdf`,
+    { orientation: 'landscape', paperSize: 'a4' }
+  );
+}
+
 // =====================================================================
 // 5. LOW STOCK REPORT PDF (AdminInventory.tsx)
 // =====================================================================
-export async function downloadLowStockReportPdf(
+export function buildLowStockReportPdfDoc(
   lowStockProducts: Product[],
   shops: Shop[],
   settings: BusinessSettings,
   scopeLabel: string
-): Promise<boolean> {
+): jsPDF {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Inventory Control';
@@ -1134,18 +1243,44 @@ export async function downloadLowStockReportPdf(
   });
 
   applyPageFooters(doc, `${biz} - Low Stock Report`);
+  return doc;
+}
+
+export async function downloadLowStockReportPdf(
+  lowStockProducts: Product[],
+  shops: Shop[],
+  settings: BusinessSettings,
+  scopeLabel: string
+): Promise<boolean> {
+  const doc = buildLowStockReportPdfDoc(lowStockProducts, shops, settings, scopeLabel);
   const stamp = new Date().toISOString().slice(0, 10);
   return triggerPdfDownload(doc, `low_stock_report_${stamp}.pdf`);
+}
+
+export async function printLowStockReportPdf(
+  lowStockProducts: Product[],
+  shops: Shop[],
+  settings: BusinessSettings,
+  scopeLabel: string
+): Promise<PrintPdfResult> {
+  const doc = buildLowStockReportPdfDoc(lowStockProducts, shops, settings, scopeLabel);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `Low Stock Report - ${scopeLabel} (${stamp})`,
+    `low_stock_report_${stamp}.pdf`,
+    { orientation: 'portrait', paperSize: 'a4' }
+  );
 }
 
 // =====================================================================
 // 6. STOCK LOSS REPORT PDF (AdminInventory.tsx)
 // =====================================================================
-export async function downloadLossReportPdf(
+export function buildLossReportPdfDoc(
   losses: InventoryMovement[],
   settings: BusinessSettings,
   meta: { periodLabel: string; totalLossValue: number; totalLossUnits: number }
-): Promise<boolean> {
+): jsPDF {
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Inventory Control';
@@ -1197,18 +1332,42 @@ export async function downloadLossReportPdf(
   });
 
   applyPageFooters(doc, `${biz} - Stock Loss Report`);
+  return doc;
+}
+
+export async function downloadLossReportPdf(
+  losses: InventoryMovement[],
+  settings: BusinessSettings,
+  meta: { periodLabel: string; totalLossValue: number; totalLossUnits: number }
+): Promise<boolean> {
+  const doc = buildLossReportPdfDoc(losses, settings, meta);
   const stamp = new Date().toISOString().slice(0, 10);
   return triggerPdfDownload(doc, `stock_loss_report_${stamp}.pdf`);
+}
+
+export async function printLossReportPdf(
+  losses: InventoryMovement[],
+  settings: BusinessSettings,
+  meta: { periodLabel: string; totalLossValue: number; totalLossUnits: number }
+): Promise<PrintPdfResult> {
+  const doc = buildLossReportPdfDoc(losses, settings, meta);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `Stock Loss Report (${meta.periodLabel})`,
+    `stock_loss_report_${stamp}.pdf`,
+    { orientation: 'landscape', paperSize: 'a4' }
+  );
 }
 
 // =====================================================================
 // 7. FINANCIAL REPORT PDF (AdminReports.tsx)
 // =====================================================================
-export async function downloadFinancialReportPdf(
+export function buildFinancialReportPdfDoc(
   incomeSummary: any,
   settings: BusinessSettings,
   meta: { shopLabel: string; from?: string; to?: string; periodKey?: string; periodLabel?: string }
-): Promise<boolean> {
+): jsPDF {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Financial Report';
@@ -1359,6 +1518,16 @@ export async function downloadFinancialReportPdf(
   }
 
   applyPageFooters(doc, `${biz} - Financial Report (${periodLabel} | ${meta.shopLabel})`);
+  return doc;
+}
+
+export async function downloadFinancialReportPdf(
+  incomeSummary: any,
+  settings: BusinessSettings,
+  meta: { shopLabel: string; from?: string; to?: string; periodKey?: string; periodLabel?: string }
+): Promise<boolean> {
+  const doc = buildFinancialReportPdfDoc(incomeSummary, settings, meta);
+  const periodKey = meta.periodKey || 'period';
   const dateTag =
     meta.from && meta.to
       ? meta.from === meta.to
@@ -1368,16 +1537,38 @@ export async function downloadFinancialReportPdf(
   return triggerPdfDownload(doc, `financial_report_${periodKey}_${meta.shopLabel}_${dateTag}.pdf`);
 }
 
+export async function printFinancialReportPdf(
+  incomeSummary: any,
+  settings: BusinessSettings,
+  meta: { shopLabel: string; from?: string; to?: string; periodKey?: string; periodLabel?: string }
+): Promise<PrintPdfResult> {
+  const doc = buildFinancialReportPdfDoc(incomeSummary, settings, meta);
+  const periodKey = meta.periodKey || 'period';
+  const periodLabel = meta.periodLabel || 'Selected Period';
+  const dateTag =
+    meta.from && meta.to
+      ? meta.from === meta.to
+        ? meta.from
+        : `${meta.from}_to_${meta.to}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `Financial Report (${periodLabel}) - ${meta.shopLabel}`,
+    `financial_report_${periodKey}_${meta.shopLabel}_${dateTag}.pdf`,
+    { orientation: 'portrait', paperSize: 'a4' }
+  );
+}
+
 // =====================================================================
 // 8. SHOP PROFIT & LOSS PDF (AdminReports.tsx)
 // =====================================================================
-export async function downloadShopProfitLossPdf(
+export function buildShopProfitLossPdfDoc(
   rows: any[],
   totals: any,
   generalCompanyExpenses: number,
   settings: BusinessSettings,
   meta: { from?: string; to?: string; periodLabel: string }
-): Promise<boolean> {
+): jsPDF {
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Business';
@@ -1476,19 +1667,47 @@ export async function downloadShopProfitLossPdf(
   }
 
   applyPageFooters(doc, `${biz} - Shop Profit & Loss Statement`);
+  return doc;
+}
+
+export async function downloadShopProfitLossPdf(
+  rows: any[],
+  totals: any,
+  generalCompanyExpenses: number,
+  settings: BusinessSettings,
+  meta: { from?: string; to?: string; periodLabel: string }
+): Promise<boolean> {
+  const doc = buildShopProfitLossPdfDoc(rows, totals, generalCompanyExpenses, settings, meta);
   const stamp = new Date().toISOString().slice(0, 10);
   return triggerPdfDownload(doc, `shop_profit_loss_${meta.periodLabel}_${stamp}.pdf`);
+}
+
+export async function printShopProfitLossPdf(
+  rows: any[],
+  totals: any,
+  generalCompanyExpenses: number,
+  settings: BusinessSettings,
+  meta: { from?: string; to?: string; periodLabel: string }
+): Promise<PrintPdfResult> {
+  const doc = buildShopProfitLossPdfDoc(rows, totals, generalCompanyExpenses, settings, meta);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `Shop Profit & Loss (${meta.periodLabel})`,
+    `shop_profit_loss_${meta.periodLabel}_${stamp}.pdf`,
+    { orientation: 'landscape', paperSize: 'a4' }
+  );
 }
 
 // =====================================================================
 // 9. PRICE DEVIATIONS AUDIT PDF (AdminReports.tsx)
 // =====================================================================
-export async function downloadPriceDeviationsPdf(
+export function buildPriceDeviationsPdfDoc(
   deviations: any[],
   stats: { belowCount: number; belowCostCount: number; aboveCount: number },
   settings: BusinessSettings,
   meta: { shopLabel: string; from?: string; to?: string; direction: string }
-): Promise<boolean> {
+): jsPDF {
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const symbol = settings?.currencySymbol || 'TSh';
   const biz = settings?.businessName || 'Price Audit';
@@ -1549,17 +1768,43 @@ export async function downloadPriceDeviationsPdf(
   });
 
   applyPageFooters(doc, `${biz} - Price Deviation Audit`);
+  return doc;
+}
+
+export async function downloadPriceDeviationsPdf(
+  deviations: any[],
+  stats: { belowCount: number; belowCostCount: number; aboveCount: number },
+  settings: BusinessSettings,
+  meta: { shopLabel: string; from?: string; to?: string; direction: string }
+): Promise<boolean> {
+  const doc = buildPriceDeviationsPdfDoc(deviations, stats, settings, meta);
   const stamp = new Date().toISOString().slice(0, 10);
   return triggerPdfDownload(doc, `price_deviations_${meta.shopLabel}_${stamp}.pdf`);
+}
+
+export async function printPriceDeviationsPdf(
+  deviations: any[],
+  stats: { belowCount: number; belowCostCount: number; aboveCount: number },
+  settings: BusinessSettings,
+  meta: { shopLabel: string; from?: string; to?: string; direction: string }
+): Promise<PrintPdfResult> {
+  const doc = buildPriceDeviationsPdfDoc(deviations, stats, settings, meta);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `Price Deviation Audit - ${meta.shopLabel}`,
+    `price_deviations_${meta.shopLabel}_${stamp}.pdf`,
+    { orientation: 'landscape', paperSize: 'a4' }
+  );
 }
 
 // =====================================================================
 // 10. POS COMMERCIAL RECEIPT PDF (ReceiptModal.tsx)
 // =====================================================================
-export async function downloadReceiptPdf(
+export function buildReceiptPdfDoc(
   sale: Sale,
   settings: BusinessSettings
-): Promise<boolean> {
+): jsPDF {
   const itemCount = (sale.items || []).length;
   const estimatedHeight = Math.max(150, 105 + itemCount * 9);
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [88, estimatedHeight] });
@@ -1678,7 +1923,28 @@ export async function downloadReceiptPdf(
   doc.setFont('helvetica', 'bold');
   doc.text('*** THANK YOU FOR YOUR BUSINESS ***', center, afterY + 1, { align: 'center' });
 
+  return doc;
+}
+
+export async function downloadReceiptPdf(
+  sale: Sale,
+  settings: BusinessSettings
+): Promise<boolean> {
+  const doc = buildReceiptPdfDoc(sale, settings);
   return triggerPdfDownload(doc, `receipt_${sale.receiptNumber}.pdf`);
+}
+
+export async function printReceiptPdf(
+  sale: Sale,
+  settings: BusinessSettings
+): Promise<PrintPdfResult> {
+  const doc = buildReceiptPdfDoc(sale, settings);
+  return triggerPdfPrint(
+    doc,
+    `Receipt #${sale.receiptNumber}`,
+    `receipt_${sale.receiptNumber}.pdf`,
+    { orientation: 'portrait', paperSize: 'receipt' }
+  );
 }
 
 // =====================================================================
@@ -2099,6 +2365,27 @@ export async function downloadPurchasesReportPdf(
   );
 }
 
+export async function printPurchasesReportPdf(
+  purchases: Purchase[],
+  settings: BusinessSettings,
+  meta: PurchasesReportPdfMeta
+): Promise<PrintPdfResult> {
+  const doc = buildPurchasesReportPdfDoc(purchases, settings, meta);
+  const period = resolvePurchasesPeriodMeta(meta);
+  const dateTag =
+    meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate}_to_${meta.endDate}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `${period.title} - ${meta.shopLabel} (${dateTag})`,
+    `purchases_report_${period.key}_${meta.shopLabel}_${dateTag}.pdf`,
+    { orientation: 'landscape', paperSize: 'a4' }
+  );
+}
+
 // =====================================================================
 // 9. SINGLE PURCHASE ORDER VOUCHER PDF (AdminPurchases.tsx)
 // =====================================================================
@@ -2306,6 +2593,22 @@ export async function downloadSinglePurchasePdf(
   const poTag = purchase.purchaseNumber || purchase.id.slice(0, 8);
   const dateTag = purchase.date || purchase.createdAt.slice(0, 10);
   return triggerPdfDownload(doc, `purchase_${poTag}_${dateTag}.pdf`);
+}
+
+export async function printSinglePurchasePdf(
+  purchase: Purchase,
+  settings: BusinessSettings,
+  resolvedStoreName?: string
+): Promise<PrintPdfResult> {
+  const doc = buildSinglePurchasePdfDoc(purchase, settings, resolvedStoreName);
+  const poTag = purchase.purchaseNumber || purchase.id.slice(0, 8);
+  const dateTag = purchase.date || purchase.createdAt.slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `Purchase Order ${poTag} (${dateTag})`,
+    `purchase_${poTag}_${dateTag}.pdf`,
+    { orientation: 'portrait', paperSize: 'a4' }
+  );
 }
 
 // =====================================================================
@@ -2726,6 +3029,35 @@ export async function downloadInventoryReportPdf(
           ? 'filtered'
           : 'all';
   return triggerPdfDownload(doc, `inventory_${scopeSlug}_${meta.shopLabel}_${stamp}.pdf`);
+}
+
+export async function printInventoryReportPdf(
+  rows: InventoryExportRow[],
+  settings: BusinessSettings,
+  meta: InventoryExportMeta
+): Promise<PrintPdfResult> {
+  const doc = buildInventoryReportPdfDoc(rows, settings, meta);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const scopeSlug =
+    meta.scope === 'SHOP'
+      ? 'shop'
+      : meta.scope === 'STORE'
+        ? 'store'
+        : meta.scope === 'MIXED'
+          ? 'filtered'
+          : 'all';
+  const scopeTitle =
+    meta.scope === 'SHOP'
+      ? 'Shop Inventory'
+      : meta.scope === 'STORE'
+        ? 'Store Inventory'
+        : 'All Inventory';
+  return triggerPdfPrint(
+    doc,
+    `${scopeTitle} - ${meta.shopLabel} (${stamp})`,
+    `inventory_${scopeSlug}_${meta.shopLabel}_${stamp}.pdf`,
+    { orientation: 'landscape', paperSize: 'a4' }
+  );
 }
 
 

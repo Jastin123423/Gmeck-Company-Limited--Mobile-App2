@@ -1,33 +1,67 @@
 import React, { useRef, useState } from 'react';
-import { Printer, Download, Copy, X, Check, Store, Share2, MessageSquare } from 'lucide-react';
+import { Printer, Download, Copy, X, Check, Store, Share2, MessageSquare, FileDown, Loader2 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
-import { downloadReceiptPdf } from '../../utils/pdfExport';
+import { downloadReceiptPdf, printReceiptPdf } from '../../utils/pdfExport';
 import { saveTextFileCrossPlatform } from '../../utils/nativeDownload';
 
 export const ReceiptModal: React.FC = () => {
   const { activeReceipt, closeReceipt, dbState, addToast } = useApp();
   const [copied, setCopied] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
   const printRef = useRef<HTMLDivElement>(null);
 
   if (!activeReceipt) return null;
 
   const settings = dbState.settings;
 
-  const handlePrint = async () => {
-    const ok = await downloadReceiptPdf(activeReceipt, settings);
-    if (ok) {
-      addToast({
-        type: 'success',
-        title: 'Receipt PDF Downloaded',
-        description: `Saved receipt_${activeReceipt.receiptNumber}.pdf to Downloads.`,
-      });
-    } else {
-      addToast({
-        type: 'error',
-        title: 'PDF Failed',
-        description: 'Could not save receipt PDF on this device.',
-      });
+  const handlePrintReceipt = async () => {
+    if (isPrinting) return;
+    setIsPrinting(true);
+    try {
+      const res = await printReceiptPdf(activeReceipt, settings);
+      if (res.ok) {
+        addToast({
+          type: 'success',
+          title: res.mode === 'fallback_download' ? 'Receipt Opened for Print' : 'Print Dialog Opened',
+          description:
+            res.mode === 'fallback_download'
+              ? `Opened receipt_${activeReceipt.receiptNumber}.pdf — select Print from the viewer.`
+              : `Select your printer to print Receipt #${activeReceipt.receiptNumber}.`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Print Failed',
+          description: res.error || 'Could not open print dialog on this device.',
+        });
+      }
+    } finally {
+      setIsPrinting(false);
+    }
+  };
+
+  const handleDownloadPdf = async () => {
+    if (isDownloadingPdf) return;
+    setIsDownloadingPdf(true);
+    try {
+      const ok = await downloadReceiptPdf(activeReceipt, settings);
+      if (ok) {
+        addToast({
+          type: 'success',
+          title: 'Receipt PDF Downloaded',
+          description: `Saved receipt_${activeReceipt.receiptNumber}.pdf to Downloads.`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'PDF Failed',
+          description: 'Could not save receipt PDF on this device.',
+        });
+      }
+    } finally {
+      setIsDownloadingPdf(false);
     }
   };
 
@@ -281,22 +315,35 @@ export const ReceiptModal: React.FC = () => {
             </button>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              id="download-receipt-btn"
-              onClick={handleDownload}
-              className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-750 text-xs font-medium text-slate-200 border border-slate-700 active:scale-95 transition"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download .txt</span>
-            </button>
+          <div className="grid grid-cols-3 gap-2">
             <button
               id="print-receipt-btn"
-              onClick={handlePrint}
-              className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow active:scale-95 transition"
+              type="button"
+              onClick={handlePrintReceipt}
+              disabled={isPrinting}
+              className="flex items-center justify-center gap-1.5 py-2.5 px-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-xs font-bold text-white shadow active:scale-95 transition disabled:opacity-60"
             >
-              <Printer className="w-4 h-4" />
-              <span>Download PDF</span>
+              {isPrinting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Printer className="w-3.5 h-3.5" />}
+              <span>{isPrinting ? 'Printing...' : 'Print'}</span>
+            </button>
+            <button
+              id="download-receipt-pdf-btn"
+              type="button"
+              onClick={handleDownloadPdf}
+              disabled={isDownloadingPdf}
+              className="flex items-center justify-center gap-1.5 py-2.5 px-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-semibold active:scale-95 transition disabled:opacity-60"
+            >
+              {isDownloadingPdf ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
+              <span>PDF</span>
+            </button>
+            <button
+              id="download-receipt-btn"
+              type="button"
+              onClick={handleDownload}
+              className="flex items-center justify-center gap-1.5 py-2.5 px-2.5 rounded-xl bg-slate-800 hover:bg-slate-750 text-xs font-medium text-slate-200 border border-slate-700 active:scale-95 transition"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>.txt</span>
             </button>
           </div>
         </div>

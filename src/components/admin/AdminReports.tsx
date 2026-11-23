@@ -31,6 +31,9 @@ import {
   downloadFinancialReportPdf,
   downloadPriceDeviationsPdf,
   downloadShopProfitLossPdf,
+  printFinancialReportPdf,
+  printPriceDeviationsPdf,
+  printShopProfitLossPdf,
 } from '../../utils/pdfExport';
 import { saveTextFileCrossPlatform } from '../../utils/nativeDownload';
 import {
@@ -259,6 +262,9 @@ export const AdminReports: React.FC = () => {
   const [sellerSearch, setSellerSearch] = useState('');
   const [assistantSearch, setAssistantSearch] = useState('');
   const [isPrinting, setIsPrinting] = useState(false);
+  const [isDirectPrinting, setIsDirectPrinting] = useState(false);
+  const [isDirectPrintingPnl, setIsDirectPrintingPnl] = useState(false);
+  const [isDirectPrintingDeviations, setIsDirectPrintingDeviations] = useState(false);
   const [deviationDirection, setDeviationDirection] = useState<DeviationDirection>('ALL');
 
   // Full-page Assistant Rankings state
@@ -747,10 +753,9 @@ export const AdminReports: React.FC = () => {
   const hiddenDeviationCount = Math.max(0, deviations.length - DEVIATION_DISPLAY_CAP);
 
   // ─────────────────────────────────────────────────────────────
-  // Print Main Report
+  // Download & Print Main Financial Report
   // ─────────────────────────────────────────────────────────────
-  const handlePrintReport = async () => {
-    setIsPrinting(true);
+  const getFinancialPeriodMeta = () => {
     const periodLabelMap: Record<ReportPeriod, { key: string; label: string }> = {
       today: { key: 'day', label: 'Day (Today)' },
       week: { key: 'week', label: 'Week (Last 7 Days)' },
@@ -758,7 +763,12 @@ export const AdminReports: React.FC = () => {
       year: { key: 'year', label: 'Year (This Year)' },
       custom: { key: 'custom', label: 'Custom Range' },
     };
-    const pMeta = periodLabelMap[incomePeriod];
+    return periodLabelMap[incomePeriod];
+  };
+
+  const handlePrintReport = async () => {
+    setIsPrinting(true);
+    const pMeta = getFinancialPeriodMeta();
     const ok = await downloadFinancialReportPdf(incomeSummary, settings, {
       shopLabel: selectedShopName,
       from: incomeRange.from || undefined,
@@ -782,8 +792,38 @@ export const AdminReports: React.FC = () => {
     setIsPrinting(false);
   };
 
+  const handleDirectPrintReport = async () => {
+    if (isDirectPrinting) return;
+    setIsDirectPrinting(true);
+    try {
+      const pMeta = getFinancialPeriodMeta();
+      const res = await printFinancialReportPdf(incomeSummary, settings, {
+        shopLabel: selectedShopName,
+        from: incomeRange.from || undefined,
+        to: incomeRange.to || undefined,
+        periodKey: pMeta.key,
+        periodLabel: pMeta.label,
+      });
+      if (res.ok) {
+        addToast({
+          type: 'success',
+          title: res.mode === 'fallback_download' ? 'Opened Financial PDF' : 'Print Dialog Opened',
+          description: `Ready to print ${pMeta.label} financial report for ${selectedShopName}.`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Print Failed',
+          description: res.error || 'Could not open print dialog on this device.',
+        });
+      }
+    } finally {
+      setIsDirectPrinting(false);
+    }
+  };
+
   // ─────────────────────────────────────────────────────────────
-  // Download Deviations PDF
+  // Download & Print Deviations PDF
   // ─────────────────────────────────────────────────────────────
   const handlePrintDeviations = async () => {
     if (deviations.length === 0) {
@@ -809,6 +849,38 @@ export const AdminReports: React.FC = () => {
         title: 'PDF Export Failed',
         description: 'Could not save price deviations PDF on this device.',
       });
+    }
+  };
+
+  const handleDirectPrintDeviations = async () => {
+    if (isDirectPrintingDeviations) return;
+    if (deviations.length === 0) {
+      addToast({ type: 'info', title: 'No Deviations', description: 'There are no price deviations in the current filter.' });
+      return;
+    }
+    setIsDirectPrintingDeviations(true);
+    try {
+      const res = await printPriceDeviationsPdf(deviations, deviationStats, settings, {
+        shopLabel: selectedShopName,
+        from: deviationRange.from || undefined,
+        to: deviationRange.to || undefined,
+        direction: deviationDirection,
+      });
+      if (res.ok) {
+        addToast({
+          type: 'success',
+          title: res.mode === 'fallback_download' ? 'Opened Deviations PDF' : 'Print Dialog Opened',
+          description: `Ready to print ${deviations.length} price deviation(s).`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Print Failed',
+          description: res.error || 'Could not open print dialog on this device.',
+        });
+      }
+    } finally {
+      setIsDirectPrintingDeviations(false);
     }
   };
 
@@ -942,6 +1014,44 @@ export const AdminReports: React.FC = () => {
         title: 'PDF Export Failed',
         description: 'Could not save Shop Profit & Loss PDF on this device.',
       });
+    }
+  };
+
+  const handleDirectPrintShopProfitLoss = async () => {
+    if (isDirectPrintingPnl) return;
+    const rows = visiblePnlShops;
+    if (rows.length === 0) {
+      addToast({ type: 'info', title: 'Nothing to Print', description: 'No shop profit & loss data available.' });
+      return;
+    }
+    setIsDirectPrintingPnl(true);
+    try {
+      const res = await printShopProfitLossPdf(
+        rows,
+        shopProfitLoss.totals,
+        shopProfitLoss.generalCompanyExpenses,
+        settings,
+        {
+          from: pnlRange.from || undefined,
+          to: pnlRange.to || undefined,
+          periodLabel: pnlPeriod,
+        }
+      );
+      if (res.ok) {
+        addToast({
+          type: 'success',
+          title: res.mode === 'fallback_download' ? 'Opened P&L PDF' : 'Print Dialog Opened',
+          description: `Ready to print Shop Profit & Loss (${rows.length} shop(s)).`,
+        });
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Print Failed',
+          description: res.error || 'Could not open print dialog on this device.',
+        });
+      }
+    } finally {
+      setIsDirectPrintingPnl(false);
     }
   };
 
@@ -1475,22 +1585,34 @@ export const AdminReports: React.FC = () => {
           </select>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="grid grid-cols-3 gap-2">
           <button
-            onClick={handleExportCSV}
-            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold transition active:scale-95"
+            type="button"
+            onClick={handleDirectPrintReport}
+            disabled={isDirectPrinting}
+            className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow transition disabled:opacity-50 active:scale-95"
           >
-            <Download className="w-3.5 h-3.5" />
-            <span>Export CSV</span>
+            <Printer className="w-3.5 h-3.5 shrink-0" />
+            <span>{isDirectPrinting ? 'Printing...' : 'Print'}</span>
           </button>
 
           <button
+            type="button"
             onClick={handlePrintReport}
             disabled={isPrinting}
-            className="flex-1 flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow transition disabled:opacity-50 active:scale-95"
+            className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow transition disabled:opacity-50 active:scale-95"
           >
-            <Printer className="w-3.5 h-3.5" />
-            <span>{isPrinting ? 'Generating...' : 'Download PDF'}</span>
+            <Download className="w-3.5 h-3.5 shrink-0" />
+            <span>{isPrinting ? 'Saving...' : 'PDF'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportCSV}
+            className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold transition active:scale-95"
+          >
+            <Download className="w-3.5 h-3.5 shrink-0" />
+            <span>CSV</span>
           </button>
         </div>
       </div>
@@ -1593,7 +1715,24 @@ export const AdminReports: React.FC = () => {
               </span>
             </button>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleDirectPrintShopProfitLoss}
+                disabled={isDirectPrintingPnl}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold shadow transition disabled:opacity-50"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>{isDirectPrintingPnl ? 'Printing...' : 'Print'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handlePrintShopProfitLoss}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold shadow transition"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>PDF</span>
+              </button>
               <button
                 type="button"
                 onClick={handleExportShopProfitLossCSV}
@@ -1601,14 +1740,6 @@ export const AdminReports: React.FC = () => {
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>CSV</span>
-              </button>
-              <button
-                type="button"
-                onClick={handlePrintShopProfitLoss}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold shadow transition"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                <span>Download P&amp;L PDF</span>
               </button>
             </div>
           </div>
@@ -2183,18 +2314,29 @@ export const AdminReports: React.FC = () => {
             allDeviations.length > 0 ? (
               <div className="flex items-center gap-1.5">
                 <button
+                  type="button"
+                  onClick={handleDirectPrintDeviations}
+                  disabled={isDirectPrintingDeviations}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-semibold shadow transition disabled:opacity-50"
+                >
+                  <Printer className="w-3 h-3" />
+                  <span>{isDirectPrintingDeviations ? '...' : 'Print'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePrintDeviations}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-semibold shadow transition"
+                >
+                  <Download className="w-3 h-3" />
+                  <span>PDF</span>
+                </button>
+                <button
+                  type="button"
                   onClick={handleExportDeviationsCSV}
                   className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[10px] font-semibold transition"
                 >
                   <Download className="w-3 h-3" />
-                  <span>Export</span>
-                </button>
-                <button
-                  onClick={handlePrintDeviations}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-semibold shadow transition"
-                >
-                  <Printer className="w-3 h-3" />
-                  <span>PDF</span>
+                  <span>CSV</span>
                 </button>
               </div>
             ) : null
