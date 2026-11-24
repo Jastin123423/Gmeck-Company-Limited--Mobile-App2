@@ -175,7 +175,6 @@ export const AdminStores: React.FC = () => {
   const [selectedTransferOrder, setSelectedTransferOrder] = useState<string[]>([]);
   const [selectedPriceMap, setSelectedPriceMap] = useState<Record<string, string>>({});
   const [productSearch, setProductSearch] = useState('');
-  const [transferStockedOnly] = useState(true);
   const [transferVisibleLimit, setTransferVisibleLimit] = useState(STORE_PAGE_SIZE);
   const [selectedQueueFilter, setSelectedQueueFilter] = useState('');
   const [selectedQueueVisibleLimit, setSelectedQueueVisibleLimit] = useState(STORE_PAGE_SIZE);
@@ -462,8 +461,63 @@ export const AdminStores: React.FC = () => {
       qtyMap.set(product.id, qtyByStore);
     }
 
-    return { qtyMap, hasFallbackMultiStoreAttribution };
-  }, [accessibleProducts, accessibleStores, dbState.movements, dbState.purchases]);
+    const historyStoresMap = new Map<string, Set<string>>();
+    for (const [pid, wMap] of movementWeightsByProd.entries()) {
+      historyStoresMap.set(pid, new Set(wMap.keys()));
+    }
+
+    const shopFloorHistoryProductIds = new Set<string>();
+    const allFloorStoreIds = new Set(
+      accessibleStores.filter(s => s.isShopFloor).map(s => s.id)
+    );
+    for (const m of dbState.movements || []) {
+      if (!m.productId) continue;
+      if (!m.storeId || allFloorStoreIds.has(m.storeId)) {
+        shopFloorHistoryProductIds.add(m.productId);
+      }
+    }
+    for (const tr of dbState.stockTransfers || []) {
+      if (tr.status !== 'COMPLETED') continue;
+      for (const item of tr.items || []) {
+        if (tr.destType === 'SHOP') {
+          shopFloorHistoryProductIds.add(item.destProductId || item.productId);
+        }
+        if (tr.sourceType === 'SHOP') {
+          shopFloorHistoryProductIds.add(item.productId);
+        }
+        if (tr.destType === 'STORE' && tr.destId) {
+          const pid = item.destProductId || item.productId;
+          let s = historyStoresMap.get(pid);
+          if (!s) {
+            s = new Set<string>();
+            historyStoresMap.set(pid, s);
+          }
+          s.add(tr.destId);
+        }
+        if (tr.sourceType === 'STORE' && tr.sourceId) {
+          let s = historyStoresMap.get(item.productId);
+          if (!s) {
+            s = new Set<string>();
+            historyStoresMap.set(item.productId, s);
+          }
+          s.add(tr.sourceId);
+        }
+      }
+    }
+
+    return {
+      qtyMap,
+      hasFallbackMultiStoreAttribution,
+      historyStoresMap,
+      shopFloorHistoryProductIds,
+    };
+  }, [
+    accessibleProducts,
+    accessibleStores,
+    dbState.movements,
+    dbState.purchases,
+    dbState.stockTransfers,
+  ]);
 
   const getProductQtyInStore = (product: Product, store: Store): number => {
     const cached = productStoreQtyCache.qtyMap.get(product.id);
@@ -696,15 +750,78 @@ export const AdminStores: React.FC = () => {
     return baseAvail;
   };
 
-  // Search-only products belonging to selected Location Source (multi-token match like Purchase search)
+  const isProductAssignedToStore = (product: Product, store: Store): boolean => {
+    if (product.shopId !== store.shopId) return false;
+    if (getProductQtyInStore(product, store) > 0) return true;
+    if (store.isShopFloor) {
+      if (Math.max(0, Number(product.currentStock || 0)) > 0) return true;
+      if (product.customFields?.assignedShopFloor) return true;
+      if (product.storeStocks && store.id in product.storeStocks) return true;
+      if (product.storeDetails && store.id in product.storeDetails) return true;
+      if ((product.historicalUnitsSold || 0) > 0) return true;
+      if (productStoreQtyCache.shopFloorHistoryProductIds.has(product.id)) return true;
+      const hasWarehouse =
+        Math.max(0, Number(product.storeStock || 0)) > 0 ||
+        Boolean(product.storeId && product.storeId !== store.id) ||
+        Object.keys(product.storeStocks || {}).some(sid => sid !== store.id) ||
+        Object.keys(product.storeDetails || {}).some(sid => sid !== store.id);
+      return !hasWarehouse;
+    }
+    if (product.storeId === store.id) return true;
+    if (product.storeStocks && store.id in product.storeStocks) return true;
+    if (product.storeDetails && store.id in product.storeDetails) return true;
+    if (productStoreQtyCache.historyStoresMap.get(product.id)?.has(store.id)) return true;
+    return false;
+  };
+
+  const isProductInSourceLocation = (product: Product): boolean => {
+    if (!selectedSourceLocation) return false;
+    if (product.shopId !== selectedSourceLocation.shopId) return false;
+    if (getSourceAvailableQty(product) > 0) return true;
+
+    if (selectedSourceLocation.type === 'STORE' && selectedSourceStore) {
+      return isProductAssignedToStore(product, selectedSourceStore);
+    }
+
+    // Location Source is SHOP (Shop Floor)
+    const shopFloorStoreIds = new Set(
+      accessibleStores
+        .filter(st => st.shopId === product.shopId && st.isShopFloor)
+        .map(st => st.id)
+    );
+    if (Math.max(0, Number(product.currentStock || 0)) > 0) return true;
+    if (product.customFields?.assignedShopFloor) return true;
+    if (product.storeStocks && Object.keys(product.storeStocks).some(sid => shopFloorStoreIds.has(sid))) {
+      return true;
+    }
+    if (product.storeDetails && Object.keys(product.storeDetails).some(sid => shopFloorStoreIds.has(sid))) {
+      return true;
+    }
+    if ((product.historicalUnitsSold || 0) > 0) return true;
+    if (productStoreQtyCache.shopFloorHistoryProductIds.has(product.id)) return true;
+
+    const shopWarehouseStores = accessibleStores.filter(
+      st => st.shopId === product.shopId && !st.isShopFloor
+    );
+    const hasAnyWarehouseAssignment =
+      Math.max(0, Number(product.storeStock || 0)) > 0 ||
+      shopWarehouseStores.some(
+        st =>
+          product.storeId === st.id ||
+          Boolean(product.storeStocks && st.id in product.storeStocks) ||
+          Boolean(product.storeDetails && st.id in product.storeDetails)
+      );
+    return !hasAnyWarehouseAssignment;
+  };
+
+  // Search-only products belonging to selected Location Source (includes 0-qty products in that location)
   const storeScopedProducts = useMemo(() => {
     const q = productSearch.trim().toLowerCase();
     if (!q || !selectedSourceLocation) return [];
     const tokens = q.split(/\s+/).filter(Boolean);
 
     const filtered = accessibleProducts.filter(p => {
-      if (p.shopId !== selectedSourceLocation.shopId) return false;
-      if (transferStockedOnly && getSourceAvailableQty(p) <= 0) return false;
+      if (!isProductInSourceLocation(p)) return false;
 
       const cf = p.customFields;
       const hay = [
@@ -733,10 +850,10 @@ export const AdminStores: React.FC = () => {
     });
   }, [
     accessibleProducts,
+    accessibleStores,
     selectedSourceLocation,
     selectedSourceStore,
     productSearch,
-    transferStockedOnly,
     productStoreQtyCache,
     editingTransferRecord,
   ]);
@@ -779,11 +896,9 @@ export const AdminStores: React.FC = () => {
       const subtotal = Math.round(safeQty * safePrice * 100) / 100;
 
       const requiresStockCheck = transferStatus === 'COMPLETED';
+      const isEmptyQty = qtyStr.trim() === '';
       const isExceeding = requiresStockCheck && Number.isFinite(parsedQty) && parsedQty > available;
-      const isInvalidQty =
-        !Number.isFinite(parsedQty) ||
-        parsedQty <= 0 ||
-        (requiresStockCheck && available <= 0);
+      const isInvalidQty = isEmptyQty || !Number.isFinite(parsedQty) || parsedQty < 0;
 
       entries.push({
         product,
@@ -1053,10 +1168,14 @@ export const AdminStores: React.FC = () => {
         .filter(p => {
           if (p.shopId !== st.shopId) return false;
           if (!matchesFilters(p)) return false;
-          if (invStockedOnly) {
+          if (q) {
+            if (!isProductAssignedToStore(p, st)) return false;
+          } else if (invStockedOnly) {
             const qtyHere = getProductQtyInStore(p, st);
             const hasDetailsHere = Boolean(p.storeDetails?.[st.id]);
-            if (qtyHere <= 0 && !hasDetailsHere) return false;
+            const hasExplicitKey =
+              p.storeId === st.id || Boolean(p.storeStocks && st.id in p.storeStocks);
+            if (qtyHere <= 0 && !hasDetailsHere && !hasExplicitKey) return false;
           }
           return true;
         })
@@ -1333,17 +1452,29 @@ export const AdminStores: React.FC = () => {
     const defaultPrice = String(Number(product.sellingPrice || product.purchasePrice || 0));
 
     setTransferError('');
-    if (transferStatus === 'COMPLETED' && available <= 0) {
-      addToast({
-        type: 'warning',
-        title: 'Out of Stock at Location From',
-        description: `"${product.name}" currently has 0 units at ${selectedSourceLocation?.name || 'source location'}.`,
-      });
-      return;
-    }
 
     if (product.id in selectedTransferMap) {
       const currentQty = Number(selectedTransferMap[product.id]) || 0;
+      if (transferStatus === 'COMPLETED' && available <= 0) {
+        setSelectedTransferMap(prev => {
+          const rest = { ...prev };
+          delete rest[product.id];
+          return {
+            [product.id]: '0',
+            ...rest,
+          };
+        });
+        setSelectedTransferOrder(prev => [product.id, ...prev.filter(id => id !== product.id)]);
+        addToast({
+          type: 'info',
+          title: 'Zero-Quantity Copy Ready',
+          description: `"${product.name}" is in the list at 0 qty and will be copied to ${selectedDestLocation?.name || 'the destination location'}.`,
+        });
+        setProductSearch('');
+        setTransferVisibleLimit(STORE_PAGE_SIZE);
+        return;
+      }
+
       const nextQty = currentQty + 1;
       if (transferStatus === 'COMPLETED' && nextQty > available) {
         addToast({
@@ -1371,12 +1502,13 @@ export const AdminStores: React.FC = () => {
         });
         return;
       }
+      const initialQtyStr = available > 0 ? '1' : '0';
       setSelectedPriceMap(pm => ({
         ...pm,
         [product.id]: pm[product.id] ?? defaultPrice,
       }));
       setSelectedTransferMap(prev => ({
-        [product.id]: '1',
+        [product.id]: initialQtyStr,
         ...prev,
       }));
       setSelectedTransferOrder(prev => [product.id, ...prev.filter(id => id !== product.id)]);
@@ -1428,8 +1560,8 @@ export const AdminStores: React.FC = () => {
 
   const handleApplyBulkQtyToSelected = () => {
     const qtyNum = Number(bulkTransferQty);
-    if (!Number.isFinite(qtyNum) || qtyNum <= 0) {
-      setTransferError('Enter a valid bulk quantity greater than 0.');
+    if (!Number.isFinite(qtyNum) || qtyNum < 0) {
+      setTransferError('Enter a valid bulk quantity (0 or greater).');
       return;
     }
     setTransferError('');
@@ -1439,7 +1571,7 @@ export const AdminStores: React.FC = () => {
         const prod = productByIdMap.get(pid);
         const avail = prod ? getSourceAvailableQty(prod) : 0;
         const clamped =
-          transferStatus === 'COMPLETED' && avail > 0 ? Math.min(qtyNum, avail) : qtyNum;
+          transferStatus === 'COMPLETED' ? Math.min(qtyNum, Math.max(0, avail)) : qtyNum;
         next[pid] = String(clamped);
       }
       return next;
@@ -1453,7 +1585,7 @@ export const AdminStores: React.FC = () => {
       for (const pid of Object.keys(prev)) {
         const prod = productByIdMap.get(pid);
         const avail = prod ? getSourceAvailableQty(prod) : 0;
-        next[pid] = String(Math.max(1, avail));
+        next[pid] = String(Math.max(0, avail));
       }
       return next;
     });
@@ -1498,11 +1630,13 @@ export const AdminStores: React.FC = () => {
         setTransferError(`Enter a valid price (0 or greater) for "${firstBad.product.name}".`);
       } else if (firstBad.isExceeding) {
         setTransferError(
-          `Quantity for "${firstBad.product.name}" (${firstBad.parsedQty}) exceeds available stock (${firstBad.available} ${firstBad.product.unit || 'pcs'}).`
+          firstBad.available <= 0
+            ? `"${firstBad.product.name}" has 0 available stock. Set quantity to 0 to copy it to ${selectedDestLocation?.name || 'the destination location'}.`
+            : `Quantity for "${firstBad.product.name}" (${firstBad.parsedQty}) exceeds available stock (${firstBad.available} ${firstBad.product.unit || 'pcs'}).`
         );
       } else {
         setTransferError(
-          `Enter a valid quantity greater than 0 for "${firstBad.product.name}".`
+          `Enter a valid quantity (0 or greater) for "${firstBad.product.name}".`
         );
       }
       return;
@@ -3417,20 +3551,18 @@ export const AdminStores: React.FC = () => {
                             const qtyHere = getSourceAvailableQty(p);
                             const existingQtyStr = selectedTransferMap[p.id];
                             const isAdded = p.id in selectedTransferMap;
-                            const isOutOfStock =
-                              transferStatus === 'COMPLETED' && qtyHere <= 0;
+                            const isZeroStock = qtyHere <= 0;
 
                             return (
                               <button
                                 key={p.id}
                                 type="button"
-                                disabled={isOutOfStock}
                                 onClick={() => handleAddTransferProduct(p)}
                                 className={`w-full text-left px-3 py-3 flex items-center justify-between gap-3 transition active:bg-slate-800/80 ${
-                                  isOutOfStock
-                                    ? 'opacity-50 cursor-not-allowed'
-                                    : isAdded
-                                      ? 'bg-blue-950/25 hover:bg-blue-950/40'
+                                  isAdded
+                                    ? 'bg-blue-950/25 hover:bg-blue-950/40'
+                                    : isZeroStock
+                                      ? 'bg-slate-900/40 hover:bg-slate-900/90'
                                       : 'hover:bg-slate-900/80'
                                 }`}
                               >
@@ -3449,10 +3581,15 @@ export const AdminStores: React.FC = () => {
                                         In List ({existingQtyStr})
                                       </span>
                                     )}
+                                    {isZeroStock && (
+                                      <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-semibold">
+                                        0 Stock · Copy
+                                      </span>
+                                    )}
                                   </div>
                                   <div className="flex items-center flex-wrap gap-x-2.5 gap-y-0.5 mt-1 text-[11px] text-slate-400 font-mono">
                                     <span>{p.sku}</span>
-                                    <span className={qtyHere > 0 ? 'text-blue-400' : 'text-rose-400'}>
+                                    <span className={qtyHere > 0 ? 'text-blue-400' : 'text-amber-400 font-semibold'}>
                                       Avail: {qtyHere.toLocaleString()} {p.unit}
                                     </span>
                                     <span className="text-emerald-400/90">
@@ -3466,15 +3603,23 @@ export const AdminStores: React.FC = () => {
 
                                 <span
                                   className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold shrink-0 transition ${
-                                    isOutOfStock
-                                      ? 'bg-slate-900 text-slate-500 border border-slate-800'
-                                      : isAdded
-                                        ? 'bg-blue-600/25 text-blue-200 border border-blue-500/40'
+                                    isAdded
+                                      ? 'bg-blue-600/25 text-blue-200 border border-blue-500/40'
+                                      : isZeroStock
+                                        ? 'bg-indigo-600/80 text-white shadow-sm'
                                         : 'bg-blue-600 text-white shadow-sm'
                                   }`}
                                 >
                                   <Plus className="w-3.5 h-3.5" />
-                                  <span>{isAdded ? '+1' : 'Add'}</span>
+                                  <span>
+                                    {isZeroStock
+                                      ? isAdded
+                                        ? 'Added (0)'
+                                        : 'Copy (0)'
+                                      : isAdded
+                                        ? '+1'
+                                        : 'Add'}
+                                  </span>
                                 </span>
                               </button>
                             );
@@ -3584,6 +3729,11 @@ export const AdminStores: React.FC = () => {
                                   >
                                     {entry.available.toLocaleString()} {entry.product.unit || 'pcs'}
                                   </span>
+                                  {entry.parsedQty === 0 && !entry.isInvalidQty && (
+                                    <span className="ml-1.5 text-indigo-300 font-sans font-medium">
+                                      · Copies product at 0 qty
+                                    </span>
+                                  )}
                                 </div>
                               </div>
 
@@ -3591,10 +3741,10 @@ export const AdminStores: React.FC = () => {
                               <div className="w-[112px] shrink-0 flex items-center gap-1">
                                 <input
                                   type="number"
-                                  min="1"
+                                  min="0"
                                   max={
-                                    transferStatus === 'COMPLETED' && entry.available > 0
-                                      ? entry.available
+                                    transferStatus === 'COMPLETED'
+                                      ? Math.max(0, entry.available)
                                       : undefined
                                   }
                                   inputMode="numeric"
@@ -3617,7 +3767,7 @@ export const AdminStores: React.FC = () => {
                                   onClick={() =>
                                     handleChangeSelectedTransferQty(
                                       entry.product.id,
-                                      String(Math.max(1, entry.available))
+                                      String(Math.max(0, entry.available))
                                     )
                                   }
                                   className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-semibold text-blue-300 shrink-0"

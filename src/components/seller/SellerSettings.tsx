@@ -176,24 +176,30 @@ export const SellerSettings: React.FC = () => {
   return (
     <div id="seller-settings-view" className="flex-1 p-3 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto">
       <div className="mb-4 sm:mb-6 pb-3 sm:pb-4 border-b border-slate-800">
-        <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">Account Preferences</h2>
+        <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+          {shopAdmin ? 'Account Preferences' : 'Color Settings'}
+        </h2>
         <p className="text-[11px] sm:text-xs text-slate-400 mt-0.5">
-          Customize your seller profile appearance and manage local authentication
+          {shopAdmin
+            ? 'Customize your seller profile appearance and manage local authentication'
+            : 'Choose your preferred color theme for your POS register'}
         </p>
       </div>
 
       <div className="max-w-3xl space-y-4 sm:space-y-6">
-        {/* Hidden file input for avatar */}
-        <input
-          ref={avatarInputRef}
-          type="file"
-          accept="image/*"
-          onChange={handleAvatarUpload}
-          className="hidden"
-        />
+        {shopAdmin && (
+          <>
+            {/* Hidden file input for avatar */}
+            <input
+              ref={avatarInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleAvatarUpload}
+              className="hidden"
+            />
 
-        {/* Profile Card with Avatar Upload */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 flex items-center justify-between">
+            {/* Profile Card with Avatar Upload */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 flex items-center justify-between">
           <div className="flex items-center gap-3 sm:gap-4">
             {/* Avatar with upload button */}
             <div className="relative">
@@ -247,7 +253,9 @@ export const SellerSettings: React.FC = () => {
             <Camera className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">{isUploadingAvatar ? 'Uploading...' : 'Change Photo'}</span>
           </button>
-        </div>
+            </div>
+          </>
+        )}
 
         {/* Shop Admin POS Feature: Sales Assistant Toggle */}
         {shopAdmin && (
@@ -342,7 +350,8 @@ export const SellerSettings: React.FC = () => {
           </div>
         </div>
 
-        {/* Change Password */}
+        {/* Change Password (Shop Admin only) */}
+        {shopAdmin && (
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl">
           <div className="flex items-center gap-2 mb-2">
             <KeyRound className="w-5 h-5 text-purple-400" />
@@ -411,6 +420,7 @@ export const SellerSettings: React.FC = () => {
             </button>
           </form>
         </div>
+        )}
       </div>
     </div>
   );

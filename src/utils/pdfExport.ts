@@ -731,6 +731,269 @@ export async function printSalesReportPdf(
 }
 
 // =====================================================================
+// 1B. SOLD PRODUCTS SUMMARY PDF (AdminSales.tsx — Separate Compact Report)
+// Shows ONLY unique sold products in the selected period with:
+// Product Name | Total Remained (Qty) | Total Sold (Qty)
+// =====================================================================
+export interface SoldProductSummaryRow {
+  productName: string;
+  totalRemained: number;
+  totalSold: number;
+  unit?: string;
+}
+
+export interface SoldProductsSummaryPdfMeta {
+  shopLabel: string;
+  startDate?: string;
+  endDate?: string;
+  periodKey?: 'day' | 'week' | 'month' | 'year' | 'custom' | 'search' | string;
+  periodLabel?: string;
+  dateRangeText?: string;
+  sellerLabel?: string;
+  paymentLabel?: string;
+  searchQuery?: string;
+}
+
+function resolveSoldProductsPeriodMeta(meta: SoldProductsSummaryPdfMeta) {
+  const key = (meta.periodKey || '').toLowerCase();
+  const title =
+    key === 'day' || key === 'today'
+      ? 'Daily Sold Products Summary'
+      : key === 'week'
+        ? 'Weekly Sold Products Summary'
+        : key === 'month'
+          ? 'Monthly Sold Products Summary'
+          : key === 'year'
+            ? 'Yearly Sold Products Summary'
+            : key === 'custom'
+              ? 'Custom Period Sold Products Summary'
+              : key === 'search'
+                ? 'Sold Products Summary (Search)'
+                : 'Sold Products Summary';
+
+  const label =
+    meta.periodLabel ||
+    (key === 'day' || key === 'today'
+      ? 'Day (Today)'
+      : key === 'week'
+        ? 'Week (Last 7 Days)'
+        : key === 'month'
+          ? 'Month (This Month)'
+          : key === 'year'
+            ? 'Year (This Year)'
+            : key === 'custom'
+              ? 'Custom Range'
+              : 'Selected Period');
+
+  const rangeText =
+    meta.dateRangeText ||
+    (meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate} to ${meta.endDate}`
+      : `${meta.startDate || 'Beginning'} to ${meta.endDate || 'Present'}`);
+
+  return {
+    key: key || 'period',
+    title,
+    label,
+    rangeText,
+  };
+}
+
+export function buildSoldProductsSummaryPdfDoc(
+  rows: SoldProductSummaryRow[],
+  settings: BusinessSettings,
+  meta: SoldProductsSummaryPdfMeta
+): jsPDF {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const biz = settings?.businessName || 'Sales Control';
+  const period = resolveSoldProductsPeriodMeta(meta);
+
+  const totalSoldUnits = rows.reduce((sum, r) => sum + (Number(r.totalSold) || 0), 0);
+  const totalRemainedUnits = rows.reduce((sum, r) => sum + (Number(r.totalRemained) || 0), 0);
+
+  const activeFilters: string[] = [];
+  if (meta.sellerLabel && meta.sellerLabel !== 'All Sellers') {
+    activeFilters.push(`Seller: ${meta.sellerLabel}`);
+  }
+  if (meta.paymentLabel && meta.paymentLabel !== 'All Payment Methods') {
+    activeFilters.push(`Pay: ${meta.paymentLabel}`);
+  }
+  if (meta.searchQuery?.trim()) {
+    activeFilters.push(`Search: "${meta.searchQuery.trim()}"`);
+  }
+
+  let y = drawBanner(
+    doc,
+    period.title,
+    `${biz}${settings?.tagline ? ` | ${settings.tagline}` : ''}`,
+    [
+      `Period: ${period.label}`,
+      `Date: ${period.rangeText}`,
+      `Generated: ${new Date().toLocaleString()}`,
+    ],
+    COLORS.emerald
+  );
+
+  y = drawMetaStrip(doc, y, [
+    { label: 'Scope / Shop', value: meta.shopLabel },
+    { label: 'Selected Period', value: `${period.label} (${period.rangeText})` },
+    {
+      label: 'Filter Scope',
+      value: activeFilters.length > 0 ? activeFilters.join(' | ') : 'Sold Products Only',
+    },
+  ]);
+
+  y = drawKpiRow(doc, y, [
+    {
+      label: 'Unique Sold Products',
+      value: String(rows.length),
+      color: COLORS.navy,
+    },
+    {
+      label: 'Total Sold (Qty)',
+      value: formatQtyCompact(totalSoldUnits),
+      color: COLORS.emerald,
+    },
+    {
+      label: 'Total Remained (Qty)',
+      value: formatQtyCompact(totalRemainedUnits),
+      color: COLORS.blue,
+    },
+  ]);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(...COLORS.slate900);
+  doc.text(
+    pdfSafe(`Sold Products Stock Summary (${period.label} | ${period.rangeText})`),
+    12,
+    y + 2.5
+  );
+  y += 5;
+
+  const bodyRows =
+    rows.length === 0
+      ? [
+          [
+            '-',
+            `No products were sold during ${period.label} (${period.rangeText})`,
+            '0',
+            '0',
+          ],
+        ]
+      : rows.map((row, idx) => [
+          String(idx + 1),
+          pdfSafe(row.productName),
+          formatQtyCompact(row.totalRemained),
+          formatQtyCompact(row.totalSold),
+        ]);
+
+  autoTable(doc, {
+    startY: y,
+    margin: { left: 12, right: 12, bottom: 15 },
+    rowPageBreak: 'avoid',
+    head: [['#', 'Product Name', 'Total Remained (Qty)', 'Total Sold (Qty)']],
+    body: bodyRows,
+    foot:
+      rows.length > 0
+        ? [
+            [
+              '',
+              `TOTAL (${rows.length} SOLD PRODUCT${rows.length === 1 ? '' : 'S'})`,
+              formatQtyCompact(totalRemainedUnits),
+              formatQtyCompact(totalSoldUnits),
+            ],
+          ]
+        : undefined,
+    styles: {
+      fontSize: 9,
+      cellPadding: { top: 3.2, right: 3.5, bottom: 3.2, left: 3.5 },
+      textColor: COLORS.slate900,
+      overflow: 'linebreak',
+      valign: 'middle',
+      lineColor: COLORS.slate200,
+      lineWidth: 0.25,
+    },
+    headStyles: {
+      fillColor: COLORS.navy,
+      textColor: COLORS.white,
+      fontStyle: 'bold',
+      fontSize: 9,
+      cellPadding: { top: 3.6, right: 3.5, bottom: 3.6, left: 3.5 },
+    },
+    footStyles: {
+      fillColor: COLORS.slate100,
+      textColor: COLORS.slate900,
+      fontStyle: 'bold',
+      fontSize: 9.2,
+    },
+    alternateRowStyles: { fillColor: COLORS.slate50 },
+    columnStyles: {
+      0: { cellWidth: 14, halign: 'center', textColor: COLORS.slate500 },
+      1: { cellWidth: 102, fontStyle: 'bold' },
+      2: { cellWidth: 35, halign: 'right', fontStyle: 'bold', textColor: COLORS.blueDark },
+      3: { cellWidth: 35, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+    },
+    didParseCell: data => {
+      if (data.section === 'body' && data.column.index === 2 && rows.length > 0) {
+        const val = Number(data.cell.raw);
+        if (Number.isFinite(val) && val <= 0) {
+          data.cell.styles.textColor = COLORS.rose;
+        }
+      }
+    },
+  });
+
+  applyPageFooters(
+    doc,
+    `${biz} - ${period.title} (${meta.shopLabel} | ${period.rangeText})`
+  );
+  return doc;
+}
+
+export async function downloadSoldProductsSummaryPdf(
+  rows: SoldProductSummaryRow[],
+  settings: BusinessSettings,
+  meta: SoldProductsSummaryPdfMeta
+): Promise<boolean> {
+  const doc = buildSoldProductsSummaryPdfDoc(rows, settings, meta);
+  const period = resolveSoldProductsPeriodMeta(meta);
+  const dateTag =
+    meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate}_to_${meta.endDate}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfDownload(
+    doc,
+    `sold_products_summary_${period.key}_${meta.shopLabel}_${dateTag}.pdf`
+  );
+}
+
+export async function printSoldProductsSummaryPdf(
+  rows: SoldProductSummaryRow[],
+  settings: BusinessSettings,
+  meta: SoldProductsSummaryPdfMeta
+): Promise<PrintPdfResult> {
+  const doc = buildSoldProductsSummaryPdfDoc(rows, settings, meta);
+  const period = resolveSoldProductsPeriodMeta(meta);
+  const dateTag =
+    meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate}_to_${meta.endDate}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `${period.title} - ${meta.shopLabel} (${dateTag})`,
+    `sold_products_summary_${period.key}_${meta.shopLabel}_${dateTag}.pdf`,
+    { orientation: 'portrait', paperSize: 'a4' }
+  );
+}
+
+// =====================================================================
 // 2. SALE EDITS HISTORY PDF (AdminSales.tsx Edit List)
 // =====================================================================
 export function buildSaleEditsPdfDoc(

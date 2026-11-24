@@ -14,7 +14,8 @@ export class InventoryService {
     newQuantity: number,
     reason: string,
     currentUser: User,
-    movementType: MovementType = 'ADJUSTMENT'
+    movementType: MovementType = 'ADJUSTMENT',
+    storeId?: string
   ): { success: boolean; error?: string; lossValue?: number } {
     const platformAdmin = isPlatformAdmin(currentUser);
     const shopAdmin = isShopAdmin(currentUser);
@@ -43,22 +44,170 @@ export class InventoryService {
         error: 'Permission Denied: You can only adjust stock for products in your managed shop.',
       };
     }
-    const prevQty = prod.currentStock;
-    const diff = newQuantity - prevQty;
+
+    const nowIso = new Date().toISOString();
+    const shop = db.getShops().find(s => s.id === prod.shopId);
+    const safeNewQty = Math.max(0, Number(newQuantity || 0));
+
+    // Warehouse store stock adjustment
+    if (storeId) {
+      const allStores = db.getStores();
+      const targetStore = allStores.find(
+        s => s.id === storeId && s.shopId === prod.shopId && !s.isShopFloor
+      );
+      if (!targetStore) {
+        return { success: false, error: 'Selected store not found for this product.' };
+      }
+
+      const floorStoreIds = new Set(allStores.filter(s => s.isShopFloor).map(s => s.id));
+      const shopWarehouses = allStores
+        .filter(s => s.shopId === prod.shopId && !s.isShopFloor)
+        .sort((a, b) => {
+          if (a.status !== b.status) return a.status === 'ACTIVE' ? -1 : 1;
+          return (a.createdAt || '').localeCompare(b.createdAt || '');
+        });
+      const shopWarehouseIds = new Set(shopWarehouses.map(s => s.id));
+
+      // Seed storeStocks map cleanly (preserving legacy single-store balance if storeStocks was empty)
+      const baseStoreStocks: Record<string, number> = { ...(prod.storeStocks || {}) };
+      const mappedWarehouseSum = Object.entries(baseStoreStocks).reduce(
+        (sum, [sid, q]) => (shopWarehouseIds.has(sid) ? sum + Math.max(0, Number(q || 0)) : sum),
+        0
+      );
+      const rawStoreStock = Math.max(0, Number(prod.storeStock || 0));
+      if (mappedWarehouseSum === 0 && rawStoreStock > 0 && shopWarehouses.length > 0) {
+        const legacyStoreId =
+          prod.storeId && shopWarehouseIds.has(prod.storeId)
+            ? prod.storeId
+            : shopWarehouses[0].id;
+        baseStoreStocks[legacyStoreId] = rawStoreStock;
+      }
+
+      const prevQty =
+        baseStoreStocks[targetStore.id] !== undefined
+          ? Math.max(0, Number(baseStoreStocks[targetStore.id] || 0))
+          : prod.storeDetails?.[targetStore.id] !== undefined
+            ? Math.max(0, Number(prod.storeDetails[targetStore.id].quantity || 0))
+            : 0;
+
+      const diff = safeNewQty - prevQty;
+      if (diff === 0) {
+        return { success: true };
+      }
+
+      const nextStoreStocks: Record<string, number> = {
+        ...baseStoreStocks,
+        [targetStore.id]: safeNewQty,
+      };
+      const nextStoreDetails = prod.storeDetails
+        ? {
+            ...prod.storeDetails,
+            [targetStore.id]: {
+              ...(prod.storeDetails[targetStore.id] || {
+                storeId: targetStore.id,
+                storeName: targetStore.name,
+                unitPurchasePrice: prod.purchasePrice || 0,
+                unitSellingPrice: prod.sellingPrice || 0,
+              }),
+              storeId: targetStore.id,
+              storeName: targetStore.name,
+              quantity: safeNewQty,
+            },
+          }
+        : undefined;
+
+      const nextTotalWarehouseStock = Object.entries(nextStoreStocks).reduce(
+        (sum, [sid, q]) => (floorStoreIds.has(sid) ? sum : sum + Math.max(0, Number(q || 0))),
+        0
+      );
+
+      const updatedProduct = {
+        ...prod,
+        storeStock: nextTotalWarehouseStock,
+        storeStocks: nextStoreStocks,
+        ...(nextStoreDetails ? { storeDetails: nextStoreDetails } : {}),
+        updatedAt: nowIso,
+      };
+      products[prodIndex] = updatedProduct;
+      db.saveProducts(products);
+
+      const costValue = Number((Math.abs(diff) * (prod.purchasePrice || 0)).toFixed(2));
+      const movement: InventoryMovement = {
+        id: generateUUID(),
+        shopId: prod.shopId,
+        shopName: shop?.name || 'Main Shop',
+        storeId: targetStore.id,
+        productId: prod.id,
+        productName: prod.name,
+        previousQty: prevQty,
+        changeQty: diff,
+        newQty: safeNewQty,
+        type: movementType,
+        costValue,
+        reason: `${reason.trim()} [${targetStore.name} · ${shop?.name || 'Shop'}]`,
+        userId: currentUser.id,
+        userName: currentUser.name,
+        createdAt: nowIso,
+      };
+      db.saveMovements([movement, ...db.getMovements()]);
+
+      db.enqueueSyncBatch([
+        {
+          id: generateUUID(),
+          operation: 'UPDATE_PRODUCT',
+          entityType: 'PRODUCT',
+          entityId: updatedProduct.id,
+          payload: updatedProduct,
+          status: 'PENDING',
+          createdAt: nowIso,
+        },
+        {
+          id: generateUUID(),
+          operation: 'STOCK_ADJUSTMENT',
+          entityType: 'INVENTORY',
+          entityId: movement.id,
+          payload: {
+            ...movement,
+            totalStoreStock: nextTotalWarehouseStock,
+            storeStocks: nextStoreStocks,
+            ...(nextStoreDetails ? { storeDetails: nextStoreDetails } : {}),
+          },
+          status: 'PENDING',
+          createdAt: nowIso,
+        },
+      ]);
+
+      db.addAuditLog({
+        id: generateUUID(),
+        userId: currentUser.id,
+        userName: currentUser.name,
+        action: 'STOCK_ADJUSTMENT',
+        details: `Adjusted '${prod.name}' stock in store '${targetStore.name}' from ${prevQty} to ${safeNewQty} (${movementType}: ${reason.trim()}, Cost Impact: ${costValue}) [${shop?.name || 'Shop'}]`,
+        entityType: 'INVENTORY',
+        entityId: prod.id,
+        timestamp: nowIso,
+      });
+
+      return { success: true, lossValue: diff < 0 ? costValue : 0 };
+    }
+
+    // Shop Floor stock adjustment
+    const prevQty = Number(prod.currentStock || 0);
+    const diff = safeNewQty - prevQty;
 
     if (diff === 0) {
       return { success: true };
     }
 
-    const shop = db.getShops().find(s => s.id === prod.shopId);
     const costValue = Number((Math.abs(diff) * (prod.purchasePrice || 0)).toFixed(2));
 
-    const synced = StoreService.applyFloorStockDeltaToProduct(prod, newQuantity);
-    products[prodIndex] = {
+    const synced = StoreService.applyFloorStockDeltaToProduct(prod, safeNewQty);
+    const updatedProduct = {
       ...synced,
-      currentStock: newQuantity,
-      updatedAt: new Date().toISOString(),
+      currentStock: safeNewQty,
+      updatedAt: nowIso,
     };
+    products[prodIndex] = updatedProduct;
     db.saveProducts(products);
 
     const movement: InventoryMovement = {
@@ -69,36 +218,47 @@ export class InventoryService {
       productName: prod.name,
       previousQty: prevQty,
       changeQty: diff,
-      newQty: newQuantity,
+      newQty: safeNewQty,
       type: movementType,
       costValue,
       reason: `${reason.trim()} [${shop?.name || 'Shop'}]`,
       userId: currentUser.id,
       userName: currentUser.name,
-      createdAt: new Date().toISOString(),
+      createdAt: nowIso,
     };
     db.saveMovements([movement, ...db.getMovements()]);
 
-    // Include ALL movement data in sync payload
-    db.enqueueSync({
-      id: generateUUID(),
-      operation: 'STOCK_ADJUSTMENT',
-      entityType: 'INVENTORY',
-      entityId: movement.id,
-      payload: movement,
-      status: 'PENDING',
-      createdAt: new Date().toISOString(),
-    });
+    // Sync updated product (in case floor storeStocks changed) + movement
+    db.enqueueSyncBatch([
+      {
+        id: generateUUID(),
+        operation: 'UPDATE_PRODUCT',
+        entityType: 'PRODUCT',
+        entityId: updatedProduct.id,
+        payload: updatedProduct,
+        status: 'PENDING',
+        createdAt: nowIso,
+      },
+      {
+        id: generateUUID(),
+        operation: 'STOCK_ADJUSTMENT',
+        entityType: 'INVENTORY',
+        entityId: movement.id,
+        payload: movement,
+        status: 'PENDING',
+        createdAt: nowIso,
+      },
+    ]);
 
     db.addAuditLog({
       id: generateUUID(),
       userId: currentUser.id,
       userName: currentUser.name,
       action: 'STOCK_ADJUSTMENT',
-      details: `Adjusted '${prod.name}' stock from ${prevQty} to ${newQuantity} (${movementType}: ${reason.trim()}, Cost Impact: ${costValue}) in [${shop?.name || 'Shop'}]`,
+      details: `Adjusted '${prod.name}' stock from ${prevQty} to ${safeNewQty} (${movementType}: ${reason.trim()}, Cost Impact: ${costValue}) in [${shop?.name || 'Shop'}]`,
       entityType: 'INVENTORY',
       entityId: prod.id,
-      timestamp: new Date().toISOString(),
+      timestamp: nowIso,
     });
 
     return { success: true, lossValue: diff < 0 ? costValue : 0 };

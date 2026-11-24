@@ -6,11 +6,11 @@ import { CloudflareApi } from '../services/cloudflareApi';
 import { User, Sale, ToastMessage, Shop } from '../types';
 import { getColorOption } from '../utils/colors';
 import { generateUUID } from '../utils/crypto';
-import { getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
+import { getShopAdminShopIds, hasAdminAccess, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export type StoresSubTab = 'stores' | 'inventory' | 'transfer' | 'list' | 'transfer_view';
 export type InventoryLocationFilter = 'ALL' | 'SHOP' | 'STORE';
-export type PurchasesSubTab = 'list' | 'add' | 'returns';
+export type PurchasesSubTab = 'list' | 'add' | 'returns' | 'suppliers';
 export type ExpensesSubTab = 'list' | 'add';
 export type ProductsSubTab = 'product_list' | 'add_product' | 'category_list' | 'add_category';
 export type ShopsSubTab = 'list' | 'add';
@@ -90,7 +90,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return null;
   });
   const [dbState, setDbState] = useState<DatabaseState>(() => db.getState());
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    const initialUser = AuthService.getActiveUser() || AuthService.getRememberedUser();
+    if (initialUser && !hasAdminAccess(initialUser)) {
+      return 'new_sale';
+    }
+    return 'dashboard';
+  });
+
+  // Restrict regular sellers strictly to NewSalePOS and Settings
+  useEffect(() => {
+    if (currentUser && !hasAdminAccess(currentUser)) {
+      if (activeTab !== 'new_sale' && activeTab !== 'settings') {
+        setActiveTab('new_sale');
+      }
+    }
+  }, [currentUser, activeTab]);
   const [storesSubTab, setStoresSubTab] = useState<StoresSubTab>('stores');
   const [storesNavTick, setStoresNavTick] = useState<number>(0);
 

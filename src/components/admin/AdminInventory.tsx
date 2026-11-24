@@ -132,6 +132,7 @@ export const AdminInventory: React.FC = () => {
   // Stock Adjustment Modal
   const [isAdjustModalOpen, setIsAdjustModalOpen] = useState(false);
   const [selectedProductId, setSelectedProductId] = useState('');
+  const [selectedAdjustLocationKey, setSelectedAdjustLocationKey] = useState('');
   const [adjustmentCategory, setAdjustmentCategory] = useState<
     'DAMAGED' | 'BROKEN' | 'EXPIRED' | 'LOST' | 'CORRECTION' | 'RESTOCK'
   >('DAMAGED');
@@ -185,9 +186,97 @@ export const AdminInventory: React.FC = () => {
   );
   const visibleProductIds = new Set(visibleProducts.map(p => p.id));
 
+  const allStoresList = dbState.stores || [];
   const floorStoreIdSet = new Set(
-    (dbState.stores || []).filter(st => st.isShopFloor).map(st => st.id)
+    allStoresList.filter(st => st.isShopFloor).map(st => st.id)
   );
+  const warehouseStoresByShop = new Map<string, typeof allStoresList>();
+  for (const st of allStoresList) {
+    if (st.isShopFloor) continue;
+    const arr = warehouseStoresByShop.get(st.shopId) || [];
+    arr.push(st);
+    warehouseStoresByShop.set(st.shopId, arr);
+  }
+  for (const arr of warehouseStoresByShop.values()) {
+    arr.sort((a, b) => {
+      if (a.status !== b.status) return a.status === 'ACTIVE' ? -1 : 1;
+      return (a.createdAt || '').localeCompare(b.createdAt || '') || a.name.localeCompare(b.name);
+    });
+  }
+
+  // Track historical shop-floor & warehouse-store presence so 0-qty products still appear in their locations
+  const shopFloorHistoryProductIds = new Set<string>();
+  const warehouseHistoryStoreIdsByProduct = new Map<string, Set<string>>();
+
+  for (const m of dbState.movements || []) {
+    if (!m.productId) continue;
+    if (m.storeId && !floorStoreIdSet.has(m.storeId)) {
+      if (m.type === 'STORE_TRANSFER' || m.type === 'INITIAL_STOCK' || m.type === 'PURCHASE' || m.type === 'ADJUSTMENT') {
+        let set = warehouseHistoryStoreIdsByProduct.get(m.productId);
+        if (!set) {
+          set = new Set<string>();
+          warehouseHistoryStoreIdsByProduct.set(m.productId, set);
+        }
+        set.add(m.storeId);
+      }
+    } else if (!m.storeId || floorStoreIdSet.has(m.storeId)) {
+      shopFloorHistoryProductIds.add(m.productId);
+    }
+  }
+
+  for (const pur of dbState.purchases || []) {
+    for (const item of pur.items || []) {
+      if (!item.productId) continue;
+      if (pur.storeId && !floorStoreIdSet.has(pur.storeId)) {
+        let set = warehouseHistoryStoreIdsByProduct.get(item.productId);
+        if (!set) {
+          set = new Set<string>();
+          warehouseHistoryStoreIdsByProduct.set(item.productId, set);
+        }
+        set.add(pur.storeId);
+      } else {
+        shopFloorHistoryProductIds.add(item.productId);
+      }
+    }
+  }
+
+  for (const tr of dbState.stockTransfers || []) {
+    if (tr.status !== 'COMPLETED') continue;
+    for (const item of tr.items || []) {
+      if (tr.destType === 'SHOP') {
+        shopFloorHistoryProductIds.add(item.destProductId || item.productId);
+      }
+      if (tr.sourceType === 'SHOP') {
+        shopFloorHistoryProductIds.add(item.productId);
+      }
+      if (tr.destType === 'STORE' && tr.destId && !floorStoreIdSet.has(tr.destId)) {
+        const pid = item.destProductId || item.productId;
+        let set = warehouseHistoryStoreIdsByProduct.get(pid);
+        if (!set) {
+          set = new Set<string>();
+          warehouseHistoryStoreIdsByProduct.set(pid, set);
+        }
+        set.add(tr.destId);
+      }
+      if (tr.sourceType === 'STORE' && tr.sourceId && !floorStoreIdSet.has(tr.sourceId)) {
+        let set = warehouseHistoryStoreIdsByProduct.get(item.productId);
+        if (!set) {
+          set = new Set<string>();
+          warehouseHistoryStoreIdsByProduct.set(item.productId, set);
+        }
+        set.add(tr.sourceId);
+      }
+    }
+  }
+
+  type AdjustmentLocationOption = {
+    key: string;
+    type: 'SHOP' | 'STORE';
+    storeId?: string;
+    label: string;
+    shortLabel: string;
+    currentQty: number;
+  };
 
   const getProductStoreQty = (p: Product): number => {
     if (typeof p.storeStock === 'number' && Number.isFinite(p.storeStock)) {
@@ -203,7 +292,58 @@ export const AdminInventory: React.FC = () => {
     return 0;
   };
 
+  const getWarehouseLocationsForProduct = (p: Product): AdjustmentLocationOption[] => {
+    const shopWarehouses = warehouseStoresByShop.get(p.shopId) || [];
+    if (shopWarehouses.length === 0) return [];
+    const shopWarehouseIdSet = new Set(shopWarehouses.map(s => s.id));
+
+    const mappedWarehouseSum = Object.entries(p.storeStocks || {}).reduce(
+      (sum, [sid, q]) => (shopWarehouseIdSet.has(sid) ? sum + Math.max(0, Number(q || 0)) : sum),
+      0
+    );
+    const rawStoreStock = Math.max(0, Number(p.storeStock || 0));
+    const historyStores = warehouseHistoryStoreIdsByProduct.get(p.id);
+    const results: AdjustmentLocationOption[] = [];
+
+    for (const st of shopWarehouses) {
+      const hasStockKey = Boolean(p.storeStocks && st.id in p.storeStocks);
+      const hasDetailKey = Boolean(p.storeDetails && st.id in p.storeDetails);
+      const isPrimaryStore = p.storeId === st.id;
+      const isLegacyFallback =
+        mappedWarehouseSum === 0 &&
+        rawStoreStock > 0 &&
+        ((p.storeId && shopWarehouseIdSet.has(p.storeId) && p.storeId === st.id) ||
+          (!p.storeId && shopWarehouses[0]?.id === st.id));
+      const hasHistoryHere = Boolean(historyStores?.has(st.id));
+
+      if (!hasStockKey && !hasDetailKey && !isPrimaryStore && !isLegacyFallback && !hasHistoryHere) {
+        continue;
+      }
+
+      let qtyHere = 0;
+      if (hasStockKey) {
+        qtyHere = Math.max(0, Number(p.storeStocks![st.id] || 0));
+      } else if (hasDetailKey) {
+        qtyHere = Math.max(0, Number(p.storeDetails![st.id]?.quantity || 0));
+      } else if (isLegacyFallback) {
+        qtyHere = rawStoreStock;
+      }
+
+      results.push({
+        key: `STORE:${st.id}`,
+        type: 'STORE',
+        storeId: st.id,
+        label: `Store: ${st.name}${st.location ? ` (${st.location})` : ''}`,
+        shortLabel: st.name,
+        currentQty: qtyHere,
+      });
+    }
+
+    return results;
+  };
+
   const hasAssignedWarehouseStore = (p: Product): boolean => {
+    if (getWarehouseLocationsForProduct(p).length > 0) return true;
     if (getProductStoreQty(p) > 0) return true;
     if (p.storeId && !floorStoreIdSet.has(p.storeId)) return true;
     if (p.storeStocks && Object.keys(p.storeStocks).some(sid => !floorStoreIdSet.has(sid))) {
@@ -224,7 +364,34 @@ export const AdminInventory: React.FC = () => {
     if (p.storeDetails && Object.keys(p.storeDetails).some(sid => floorStoreIdSet.has(sid))) {
       return true;
     }
+    if ((p.historicalUnitsSold || 0) > 0) return true;
+    if (shopFloorHistoryProductIds.has(p.id)) return true;
+    // Any product not assigned to any warehouse store belongs to the Shop even when stock is 0
+    if (!hasAssignedWarehouseStore(p)) return true;
     return false;
+  };
+
+  const getProductAdjustmentLocations = (p: Product | undefined): AdjustmentLocationOption[] => {
+    if (!p) return [];
+    const shopObj = allShops.find(s => s.id === p.shopId);
+    const locations: AdjustmentLocationOption[] = [];
+    const warehouseLocations = getWarehouseLocationsForProduct(p);
+
+    if (hasAssignedShopFloor(p) || warehouseLocations.length === 0) {
+      locations.push({
+        key: 'SHOP',
+        type: 'SHOP',
+        label: shopObj ? `Shop: ${shopObj.name}` : 'Shop Floor',
+        shortLabel: shopObj ? `${shopObj.name} (Shop)` : 'Shop',
+        currentQty: Math.max(0, Number(p.currentStock || 0)),
+      });
+    }
+
+    for (const wl of warehouseLocations) {
+      locations.push(wl);
+    }
+
+    return locations;
   };
 
   const getShopLocationFilter = (shopId: string): ShopLocationFilter =>
@@ -364,12 +531,31 @@ export const AdminInventory: React.FC = () => {
   const products = visibleProducts.filter(p => {
     const matchesShop = selectedShopId === 'ALL' || p.shopId === selectedShopId;
     const q = searchQuery.toLowerCase().trim();
-    const matchesSearch =
-      !q ||
-      p.name.toLowerCase().includes(q) ||
-      (p.variation || '').toLowerCase().includes(q) ||
-      p.sku.toLowerCase().includes(q);
-    const matchesLowFilter = !showLowStockOnly || p.currentStock <= p.minStock;
+    const tokens = q ? q.split(/\s+/).filter(Boolean) : [];
+    const cf = p.customFields;
+    const hay = [
+      p.name,
+      p.variation || '',
+      p.sku || '',
+      p.barcode || '',
+      cf?.field1 || '',
+      cf?.field2 || '',
+      cf?.field3 || '',
+      cf?.field4 || '',
+    ]
+      .join(' ')
+      .toLowerCase();
+    const matchesSearch = tokens.length === 0 || tokens.every(t => hay.includes(t));
+
+    const hasValidShop = !!p.shopId && visibleShopIdSet.has(p.shopId);
+    const locFilter: ShopLocationFilter = hasValidShop
+      ? getShopLocationFilter(p.shopId)
+      : inventoryFilter;
+    const shopQty = Math.max(0, Number(p.currentStock || 0));
+    const storeQty = getProductStoreQty(p);
+    const activeQty =
+      locFilter === 'SHOP' ? shopQty : locFilter === 'STORE' ? storeQty : shopQty + storeQty;
+    const matchesLowFilter = !showLowStockOnly || activeQty <= p.minStock;
     return matchesShop && matchesSearch && matchesLowFilter;
   });
 
@@ -429,8 +615,34 @@ export const AdminInventory: React.FC = () => {
   };
 
   const selectedProduct = visibleProducts.find(p => p.id === selectedProductId);
+  const selectedProductLocations = getProductAdjustmentLocations(selectedProduct);
+  const selectedAdjustLocation =
+    selectedProductLocations.length === 1
+      ? selectedProductLocations[0]
+      : selectedProductLocations.find(loc => loc.key === selectedAdjustLocationKey);
   const inputQty = parseInt(quantityInput, 10) || 0;
   const calculatedLossValue = selectedProduct ? inputQty * (selectedProduct.purchasePrice || 0) : 0;
+
+  const openAdjustModalForProduct = (productId: string) => {
+    const targetProd = visibleProducts.find(p => p.id === productId);
+    const locs = getProductAdjustmentLocations(targetProd);
+    setSelectedProductId(productId);
+    setSelectedAdjustLocationKey(locs.length === 1 ? locs[0].key : '');
+    setQuantityInput('0');
+    setAdjustmentType('OUT');
+    setAdjustmentCategory('DAMAGED');
+    setReasonInput('');
+    setModalError('');
+    setIsAdjustModalOpen(true);
+  };
+
+  const handleSelectAdjustProduct = (productId: string) => {
+    const targetProd = visibleProducts.find(p => p.id === productId);
+    const locs = getProductAdjustmentLocations(targetProd);
+    setSelectedProductId(productId);
+    setSelectedAdjustLocationKey(locs.length === 1 ? locs[0].key : '');
+    setModalError('');
+  };
 
   // Loss movements (scoped to visible/managed shops)
   const lossMovements = (dbState.movements || []).filter(
@@ -469,16 +681,41 @@ export const AdminInventory: React.FC = () => {
       return;
     }
 
-    const qty = parseInt(quantityInput, 10) || 0;
-    if (qty <= 0) {
-      setModalError('Quantity must be greater than 0.');
+    const locs = getProductAdjustmentLocations(targetProduct);
+    const targetLocation =
+      locs.length === 1 ? locs[0] : locs.find(loc => loc.key === selectedAdjustLocationKey);
+    if (!targetLocation) {
+      setModalError('Please select which location to apply this stock adjustment to.');
       return;
     }
 
-    let delta = 0;
-    if (adjustmentType === 'IN') delta = qty;
-    else if (adjustmentType === 'OUT') delta = -qty;
-    else if (adjustmentType === 'SET') delta = qty - targetProduct.currentStock;
+    const qty = parseInt(quantityInput, 10);
+    if (!Number.isFinite(qty) || (adjustmentType === 'SET' ? qty < 0 : qty <= 0)) {
+      setModalError(
+        adjustmentType === 'SET'
+          ? 'Exact stock level must be 0 or greater.'
+          : 'Quantity must be greater than 0.'
+      );
+      return;
+    }
+
+    const baseQty = targetLocation.currentQty;
+    let newQty = baseQty;
+    if (adjustmentType === 'IN') {
+      newQty = baseQty + qty;
+    } else if (adjustmentType === 'OUT') {
+      if (qty > baseQty) {
+        setModalError(
+          `Cannot deduct ${qty} ${targetProduct.unit}; only ${baseQty} ${targetProduct.unit} available in ${targetLocation.shortLabel}.`
+        );
+        return;
+      }
+      newQty = baseQty - qty;
+    } else if (adjustmentType === 'SET') {
+      newQty = qty;
+    }
+
+    const delta = newQty - baseQty;
 
     const finalReason = reasonInput.trim()
       ? `[${adjustmentCategory}] ${reasonInput.trim()}`
@@ -486,20 +723,22 @@ export const AdminInventory: React.FC = () => {
 
     const res = InventoryService.adjustStock(
       selectedProductId,
-      targetProduct.currentStock + delta,
+      newQty,
       finalReason,
       currentUser,
-      adjustmentCategory
+      adjustmentCategory,
+      targetLocation.type === 'STORE' ? targetLocation.storeId : undefined
     );
 
     if (res.success) {
       addToast({
         type: 'success',
         title: 'Stock Adjustment Logged',
-        description: `Inventory for '${targetProduct.name}' updated (${delta > 0 ? '+' : ''}${delta} ${targetProduct.unit}).`,
+        description: `Inventory for '${targetProduct.name}' in ${targetLocation.shortLabel} updated (${delta > 0 ? '+' : ''}${delta} ${targetProduct.unit}).`,
       });
       setIsAdjustModalOpen(false);
       setSelectedProductId('');
+      setSelectedAdjustLocationKey('');
       setReasonInput('');
       setQuantityInput('0');
     } else {
@@ -548,7 +787,7 @@ export const AdminInventory: React.FC = () => {
       const shopQty = Math.max(0, Number(p.currentStock || 0));
       const storeQty = getProductStoreQty(p);
 
-      if (mode === 'SHOP' && !(hasAssignedShopFloor(p) || (showLowStockOnly && storeQty === 0))) {
+      if (mode === 'SHOP' && !hasAssignedShopFloor(p)) {
         return;
       }
       if (mode === 'STORE' && !hasAssignedWarehouseStore(p)) {
@@ -1005,12 +1244,7 @@ export const AdminInventory: React.FC = () => {
           </div>
 
           <button
-            onClick={() => {
-              setSelectedProductId(p.id);
-              setQuantityInput('0');
-              setAdjustmentType('OUT');
-              setIsAdjustModalOpen(true);
-            }}
+            onClick={() => openAdjustModalForProduct(p.id)}
             className="px-2.5 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 active:bg-blue-700 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-semibold shrink-0 transition"
           >
             Adjust
@@ -1234,13 +1468,7 @@ export const AdminInventory: React.FC = () => {
 
           <button
             id="stock-adjust-btn"
-            onClick={() => {
-              setSelectedProductId(visibleProducts[0]?.id || '');
-              setQuantityInput('0');
-              setAdjustmentType('OUT');
-              setAdjustmentCategory('DAMAGED');
-              setIsAdjustModalOpen(true);
-            }}
+            onClick={() => openAdjustModalForProduct(visibleProducts[0]?.id || '')}
             className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold text-xs shadow-lg transition"
           >
             <ArrowUpDown className="w-4 h-4" />
@@ -1404,9 +1632,8 @@ export const AdminInventory: React.FC = () => {
 
                 // Filter per shop: ALL (default), SHOP (shop inventory only), STORE (store inventory only)
                 const filteredShopProducts = shopProducts.filter(p => {
-                  const storeQty = getProductStoreQty(p);
                   if (locationFilter === 'SHOP') {
-                    return hasAssignedShopFloor(p) || (showLowStockOnly && storeQty === 0);
+                    return hasAssignedShopFloor(p);
                   }
                   if (locationFilter === 'STORE') {
                     return hasAssignedWarehouseStore(p);
@@ -2233,17 +2460,64 @@ export const AdminInventory: React.FC = () => {
                 <label className="block text-slate-300 font-medium mb-1">Select Product *</label>
                 <select
                   value={selectedProductId}
-                  onChange={e => setSelectedProductId(e.target.value)}
+                  onChange={e => handleSelectAdjustProduct(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                 >
                   <option value="">-- Choose Product --</option>
-                  {visibleProducts.map(p => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} (Current: {p.currentStock} {p.unit})
-                    </option>
-                  ))}
+                  {visibleProducts.map(p => {
+                    const sQty = getProductStoreQty(p);
+                    const hasStore = hasAssignedWarehouseStore(p);
+                    const stockSummary = hasStore
+                      ? `Shop: ${p.currentStock}, Store: ${sQty} ${p.unit}`
+                      : `Current: ${p.currentStock} ${p.unit}`;
+                    return (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                        {p.variation ? ` (${p.variation})` : ''} — {stockSummary}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
+
+              {selectedProduct && selectedProductLocations.length > 1 && (
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1">
+                    Adjustment Location *
+                  </label>
+                  <select
+                    value={selectedAdjustLocationKey}
+                    onChange={e => {
+                      setSelectedAdjustLocationKey(e.target.value);
+                      setModalError('');
+                    }}
+                    required
+                    className="w-full bg-slate-950 border border-blue-500/40 rounded-lg px-3 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="">-- Select Location --</option>
+                    {selectedProductLocations.map(loc => (
+                      <option key={loc.key} value={loc.key}>
+                        {loc.label} (Current: {loc.currentQty} {selectedProduct.unit})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    This product exists in {selectedProductLocations.length} locations. Select which
+                    location to adjust.
+                  </p>
+                </div>
+              )}
+
+              {selectedProduct && selectedAdjustLocation && (
+                <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px]">
+                  <span className="text-slate-400">
+                    Current Stock ({selectedAdjustLocation.shortLabel}):
+                  </span>
+                  <span className="font-mono font-bold text-white">
+                    {selectedAdjustLocation.currentQty} {selectedProduct.unit}
+                  </span>
+                </div>
+              )}
 
               <div>
                 <label className="block text-slate-300 font-medium mb-1">

@@ -199,7 +199,8 @@ export const Header: React.FC<HeaderProps> = ({ onOpenDrawer }) => {
 
         {/* Right side status indicators & user actions */}
         <div className="flex items-center gap-1.5 sm:gap-2">
-          {/* Notification Bell Dropdown */}
+          {/* Notification Bell Dropdown (Admins & Shop Admins only) */}
+          {(isAdmin || isShopAdm) && (
           <div className="relative" ref={notifDropdownRef}>
             <button
               id="header-notification-bell"
@@ -314,6 +315,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenDrawer }) => {
               </div>
             )}
           </div>
+          )}
 
           {/* Sync & Offline Status Badge */}
           <button

@@ -2,14 +2,12 @@ import React from 'react';
 import {
   LayoutDashboard,
   ShoppingCart,
-  Package,
   History,
-  FileText,
   Menu,
   Boxes,
+  Palette,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { DebtService } from '../../services/debtService';
 import { getShopAdminShopIds, hasAdminAccess, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
 
 interface MobileBottomNavProps {
@@ -23,6 +21,60 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
 
   const isSeller = !hasAdminAccess(currentUser);
   const isSellerRole = currentUser.role === 'SELLER';
+
+  // Regular Seller: show ONLY POS, Color Settings, and Menu (no Home/Products/Madeni)
+  if (isSeller) {
+    return (
+      <nav
+        id="mobile-bottom-navigation"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 safe-bottom px-3 py-1 select-none shadow-2xl"
+      >
+        <div className="flex items-center justify-around">
+          <button
+            id="mobile-pos-center-btn"
+            onClick={() => setActiveTab('new_sale')}
+            className={`flex-1 flex flex-col items-center justify-center py-1.5 px-2 rounded-xl font-medium transition ${
+              activeTab === 'new_sale'
+                ? 'text-white'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            style={activeTab === 'new_sale' ? { color: sellerColor.primary } : undefined}
+          >
+            <ShoppingCart
+              className={`w-5 h-5 mb-1 ${activeTab === 'new_sale' ? 'scale-110' : ''} transition-transform`}
+            />
+            <span className="text-[10px] font-semibold tracking-tight leading-none">POS</span>
+          </button>
+
+          <button
+            id="mobile-seller-settings-btn"
+            onClick={() => setActiveTab('settings')}
+            className={`flex-1 flex flex-col items-center justify-center py-1.5 px-2 rounded-xl font-medium transition ${
+              activeTab === 'settings'
+                ? 'text-white'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            style={activeTab === 'settings' ? { color: sellerColor.primary } : undefined}
+          >
+            <Palette
+              className={`w-5 h-5 mb-1 ${activeTab === 'settings' ? 'scale-110' : ''} transition-transform`}
+            />
+            <span className="text-[10px] font-semibold tracking-tight leading-none">Settings</span>
+          </button>
+
+          <button
+            id="mobile-more-menu-btn"
+            onClick={onOpenMenu}
+            className="flex-1 flex flex-col items-center justify-center py-1.5 px-2 rounded-xl font-medium transition text-slate-400 hover:text-slate-200"
+          >
+            <Menu className="w-5 h-5 mb-1" />
+            <span className="text-[10px] tracking-tight leading-none">Menu</span>
+          </button>
+        </div>
+      </nav>
+    );
+  }
+
   const scopedShopIds = isPlatformAdmin(currentUser)
     ? null
     : isShopAdmin(currentUser)
@@ -37,13 +89,18 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
       (!scopedShopIds || scopedShopIds.length === 0 || scopedShopIds.includes(p.shopId))
   ).length;
 
-  // Count overdue debts within user scope
-  const debts = DebtService.getAllDebts(currentUser);
-  const overdueDebtsCount = debts.filter(d => d.status === 'OVERDUE').length;
-
-  const isMoreActive = isSeller
-    ? ['purchases', 'my_sales', 'notifications', 'receipts', 'sales', 'inventory', 'expenses', 'reports', 'shops', 'sellers', 'settings'].includes(activeTab)
-    : ['shops', 'stores', 'sellers', 'purchases', 'expenses', 'reports', 'debts', 'notifications', 'data_management', 'settings'].includes(activeTab);
+  const isMoreActive = [
+    'shops',
+    'stores',
+    'sellers',
+    'purchases',
+    'expenses',
+    'reports',
+    'debts',
+    'notifications',
+    'data_management',
+    'settings',
+  ].includes(activeTab);
 
   return (
     <nav
@@ -64,37 +121,18 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
           <span className="text-[10px] tracking-tight leading-none">Home</span>
         </button>
 
-        {/* Tab 2: Products (Seller) or Sales (Admin) */}
-        {isSeller ? (
-          <button
-            onClick={() => setActiveTab('products')}
-            className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
-              activeTab === 'products'
-                ? 'text-blue-400'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <div className="relative">
-              <Package className={`w-5 h-5 mb-1 ${activeTab === 'products' ? 'scale-110' : ''} transition-transform`} />
-              {lowStockCount > 0 && (
-                <span className="absolute -top-1 -right-2 w-2 h-2 rounded-full bg-amber-500 ring-2 ring-slate-900" />
-              )}
-            </div>
-            <span className="text-[10px] tracking-tight leading-none">Products</span>
-          </button>
-        ) : (
-          <button
-            onClick={() => setActiveTab('sales')}
-            className={`flex-1 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
-              activeTab === 'sales'
-                ? 'text-blue-400'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <History className={`w-5 h-5 mb-1 ${activeTab === 'sales' ? 'scale-110' : ''} transition-transform`} />
-            <span className="text-[10px] tracking-tight leading-none">Sales</span>
-          </button>
-        )}
+        {/* Tab 2: Sales */}
+        <button
+          onClick={() => setActiveTab('sales')}
+          className={`flex-1 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
+            activeTab === 'sales'
+              ? 'text-blue-400'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <History className={`w-5 h-5 mb-1 ${activeTab === 'sales' ? 'scale-110' : ''} transition-transform`} />
+          <span className="text-[10px] tracking-tight leading-none">Sales</span>
+        </button>
 
         {/* Tab 3: CENTER POS ACTION BUTTON (Elevated) */}
         <div className="flex-1 flex items-center justify-center px-1 -mt-4">
@@ -113,42 +151,23 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
           </button>
         </div>
 
-        {/* Tab 4: Debts (Seller) or Inventory/Products (Admin) */}
-        {isSeller ? (
-          <button
-            onClick={() => setActiveTab('debts')}
-            className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
-              activeTab === 'debts'
-                ? 'text-blue-400'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <div className="relative">
-              <FileText className={`w-5 h-5 mb-1 ${activeTab === 'debts' ? 'scale-110' : ''} transition-transform`} />
-              {overdueDebtsCount > 0 && (
-                <span className="absolute -top-1 -right-2 w-2 h-2 rounded-full bg-rose-500 ring-2 ring-slate-900 animate-pulse" />
-              )}
-            </div>
-            <span className="text-[10px] tracking-tight leading-none">Madeni</span>
-          </button>
-        ) : (
-          <button
-            onClick={() => setActiveTab('products')}
-            className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
-              ['products', 'inventory'].includes(activeTab)
-                ? 'text-blue-400'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <div className="relative">
-              <Boxes className={`w-5 h-5 mb-1 ${['products', 'inventory'].includes(activeTab) ? 'scale-110' : ''} transition-transform`} />
-              {lowStockCount > 0 && (
-                <span className="absolute -top-1 -right-2 w-2 h-2 rounded-full bg-amber-500 ring-2 ring-slate-900" />
-              )}
-            </div>
-            <span className="text-[10px] tracking-tight leading-none">Stock</span>
-          </button>
-        )}
+        {/* Tab 4: Stock */}
+        <button
+          onClick={() => setActiveTab('products')}
+          className={`flex-1 relative flex flex-col items-center justify-center py-1.5 px-1 rounded-xl font-medium transition ${
+            ['products', 'inventory'].includes(activeTab)
+              ? 'text-blue-400'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <div className="relative">
+            <Boxes className={`w-5 h-5 mb-1 ${['products', 'inventory'].includes(activeTab) ? 'scale-110' : ''} transition-transform`} />
+            {lowStockCount > 0 && (
+              <span className="absolute -top-1 -right-2 w-2 h-2 rounded-full bg-amber-500 ring-2 ring-slate-900" />
+            )}
+          </div>
+          <span className="text-[10px] tracking-tight leading-none">Stock</span>
+        </button>
 
         {/* Tab 5: More (Menu Drawer trigger) */}
         <button

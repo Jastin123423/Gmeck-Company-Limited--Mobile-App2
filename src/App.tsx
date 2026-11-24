@@ -8,7 +8,7 @@ import { ReceiptModal } from './components/common/ReceiptModal';
 import { ToastContainer } from './components/common/ToastContainer';
 import { WelcomeSplash } from './components/common/WelcomeSplash';
 import { LoginView } from './components/auth/LoginView';
-import { getEffectiveSellerPermissions, isShopAdmin } from './utils/permissions';
+import { getEffectiveSellerPermissions, hasAdminAccess, isShopAdmin } from './utils/permissions';
 
 // Common / Shared Independent Modules
 import { DebtManagement } from './components/debt/DebtManagement';
@@ -45,7 +45,12 @@ const MainLayout: React.FC = () => {
   }
 
   const renderActiveView = () => {
-    // Shared tabs accessible to both roles
+    // Regular Sellers (non-Shop-Admin) only have access to NewSalePOS and Color Settings
+    if (!hasAdminAccess(currentUser)) {
+      return activeTab === 'settings' ? <SellerSettings /> : <NewSalePOS />;
+    }
+
+    // Shared tabs accessible to admin & shop admin roles
     if (activeTab === 'debts') {
       return <DebtManagement />;
     }

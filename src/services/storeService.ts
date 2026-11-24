@@ -868,7 +868,9 @@ export class StoreService {
         };
       }
 
-      // 2. Apply deduction at Source + addition at Destination
+      // 2. Apply deduction at Source + addition at Destination (qty === 0 copies product to Destination with 0 qty)
+      const isZeroCopy = qty === 0;
+
       if (sourceType === 'STORE' && destType === 'STORE' && sourceStore && destStore) {
         // STORE -> STORE (Same shop)
         const srcUpdated = this.upsertStoreStockEntry(
@@ -901,8 +903,8 @@ export class StoreService {
         };
         updatedProductIds.add(srcProduct.id);
 
-        movements.push(
-          {
+        if (isZeroCopy) {
+          movements.push({
             id: generateUUID(),
             shopId: destShopId,
             shopName: destShopName,
@@ -910,33 +912,53 @@ export class StoreService {
             productId: srcProduct.id,
             productName: srcProduct.name,
             previousQty: destBefore,
-            changeQty: qty,
-            newQty: destBefore + qty,
+            changeQty: 0,
+            newQty: destBefore,
             type: 'STORE_TRANSFER',
-            reason: `Transferred IN from ${sourceName} to ${destName}${noteSuffix}`,
+            reason: `Copied product (0 qty) from ${sourceName} to ${destName}${noteSuffix}`,
             referenceId: transferId,
             userId: currentUser.id,
             userName: currentUser.name,
             createdAt: movementCreatedAt,
-          },
-          {
-            id: generateUUID(),
-            shopId: params.sourceShopId,
-            shopName: sourceShopName,
-            storeId: sourceStore.id,
-            productId: srcProduct.id,
-            productName: srcProduct.name,
-            previousQty: sourceAvail,
-            changeQty: -qty,
-            newQty: sourceAvail - qty,
-            type: 'STORE_TRANSFER',
-            reason: `Transferred OUT from ${sourceName} to ${destName}${noteSuffix}`,
-            referenceId: transferId,
-            userId: currentUser.id,
-            userName: currentUser.name,
-            createdAt: movementCreatedAt,
-          }
-        );
+          });
+        } else {
+          movements.push(
+            {
+              id: generateUUID(),
+              shopId: destShopId,
+              shopName: destShopName,
+              storeId: destStore.id,
+              productId: srcProduct.id,
+              productName: srcProduct.name,
+              previousQty: destBefore,
+              changeQty: qty,
+              newQty: destBefore + qty,
+              type: 'STORE_TRANSFER',
+              reason: `Transferred IN from ${sourceName} to ${destName}${noteSuffix}`,
+              referenceId: transferId,
+              userId: currentUser.id,
+              userName: currentUser.name,
+              createdAt: movementCreatedAt,
+            },
+            {
+              id: generateUUID(),
+              shopId: params.sourceShopId,
+              shopName: sourceShopName,
+              storeId: sourceStore.id,
+              productId: srcProduct.id,
+              productName: srcProduct.name,
+              previousQty: sourceAvail,
+              changeQty: -qty,
+              newQty: sourceAvail - qty,
+              type: 'STORE_TRANSFER',
+              reason: `Transferred OUT from ${sourceName} to ${destName}${noteSuffix}`,
+              referenceId: transferId,
+              userId: currentUser.id,
+              userName: currentUser.name,
+              createdAt: movementCreatedAt,
+            }
+          );
+        }
 
         resolvedItems.push({ ...item, destProductId: srcProduct.id });
       } else if (sourceType === 'SHOP' && destType === 'STORE' && destStore) {
@@ -945,8 +967,12 @@ export class StoreService {
         let workingProd: Product = {
           ...srcProduct,
           currentStock: newShopFloorQty,
+          customFields: {
+            ...(srcProduct.customFields || {}),
+            assignedShopFloor: true,
+          },
         };
-        if (srcFloorStore && workingProd.storeStocks) {
+        if (srcFloorStore) {
           const flUpd = this.upsertStoreStockEntry(workingProd, srcFloorStore, newShopFloorQty);
           workingProd = {
             ...workingProd,
@@ -971,8 +997,8 @@ export class StoreService {
         };
         updatedProductIds.add(srcProduct.id);
 
-        movements.push(
-          {
+        if (isZeroCopy) {
+          movements.push({
             id: generateUUID(),
             shopId: destShopId,
             shopName: destShopName,
@@ -980,33 +1006,53 @@ export class StoreService {
             productId: srcProduct.id,
             productName: srcProduct.name,
             previousQty: destBefore,
-            changeQty: qty,
-            newQty: destBefore + qty,
+            changeQty: 0,
+            newQty: destBefore,
             type: 'STORE_TRANSFER',
-            reason: `Transferred IN to ${destName} from ${sourceName}${noteSuffix}`,
+            reason: `Copied product (0 qty) to ${destName} from ${sourceName}${noteSuffix}`,
             referenceId: transferId,
             userId: currentUser.id,
             userName: currentUser.name,
             createdAt: movementCreatedAt,
-          },
-          {
-            id: generateUUID(),
-            shopId: params.sourceShopId,
-            shopName: sourceShopName,
-            storeId: destStore.id,
-            productId: srcProduct.id,
-            productName: srcProduct.name,
-            previousQty: sourceAvail,
-            changeQty: -qty,
-            newQty: newShopFloorQty,
-            type: 'STORE_TRANSFER',
-            reason: `Returned OUT from ${sourceName} to ${destName}${noteSuffix}`,
-            referenceId: transferId,
-            userId: currentUser.id,
-            userName: currentUser.name,
-            createdAt: movementCreatedAt,
-          }
-        );
+          });
+        } else {
+          movements.push(
+            {
+              id: generateUUID(),
+              shopId: destShopId,
+              shopName: destShopName,
+              storeId: destStore.id,
+              productId: srcProduct.id,
+              productName: srcProduct.name,
+              previousQty: destBefore,
+              changeQty: qty,
+              newQty: destBefore + qty,
+              type: 'STORE_TRANSFER',
+              reason: `Transferred IN to ${destName} from ${sourceName}${noteSuffix}`,
+              referenceId: transferId,
+              userId: currentUser.id,
+              userName: currentUser.name,
+              createdAt: movementCreatedAt,
+            },
+            {
+              id: generateUUID(),
+              shopId: params.sourceShopId,
+              shopName: sourceShopName,
+              storeId: destStore.id,
+              productId: srcProduct.id,
+              productName: srcProduct.name,
+              previousQty: sourceAvail,
+              changeQty: -qty,
+              newQty: newShopFloorQty,
+              type: 'STORE_TRANSFER',
+              reason: `Returned OUT from ${sourceName} to ${destName}${noteSuffix}`,
+              referenceId: transferId,
+              userId: currentUser.id,
+              userName: currentUser.name,
+              createdAt: movementCreatedAt,
+            }
+          );
+        }
 
         resolvedItems.push({ ...item, destProductId: srcProduct.id });
       } else if (sourceType === 'STORE' && destType === 'SHOP' && sourceStore) {
@@ -1041,12 +1087,16 @@ export class StoreService {
             storeStock: newWarehouseTotal,
             storeStocks: nextStocks,
             ...(nextDetails ? { storeDetails: nextDetails } : {}),
+            customFields: {
+              ...(srcProduct.customFields || {}),
+              assignedShopFloor: true,
+            },
             updatedAt: nowIso,
           };
           updatedProductIds.add(srcProduct.id);
 
-          movements.push(
-            {
+          if (isZeroCopy) {
+            movements.push({
               id: generateUUID(),
               shopId: destShopId,
               shopName: destShopName,
@@ -1054,33 +1104,53 @@ export class StoreService {
               productId: srcProduct.id,
               productName: srcProduct.name,
               previousQty: currentShopFloor,
-              changeQty: qty,
+              changeQty: 0,
               newQty: newShopFloor,
               type: 'STORE_TRANSFER',
-              reason: `Transferred IN from ${sourceName} to ${destName}${noteSuffix}`,
+              reason: `Copied product (0 qty) from ${sourceName} to ${destName}${noteSuffix}`,
               referenceId: transferId,
               userId: currentUser.id,
               userName: currentUser.name,
               createdAt: movementCreatedAt,
-            },
-            {
-              id: generateUUID(),
-              shopId: params.sourceShopId,
-              shopName: sourceShopName,
-              storeId: sourceStore.id,
-              productId: srcProduct.id,
-              productName: srcProduct.name,
-              previousQty: sourceAvail,
-              changeQty: -qty,
-              newQty: sourceAvail - qty,
-              type: 'STORE_TRANSFER',
-              reason: `Transferred OUT from ${sourceName} to ${destName}${noteSuffix}`,
-              referenceId: transferId,
-              userId: currentUser.id,
-              userName: currentUser.name,
-              createdAt: movementCreatedAt,
-            }
-          );
+            });
+          } else {
+            movements.push(
+              {
+                id: generateUUID(),
+                shopId: destShopId,
+                shopName: destShopName,
+                storeId: sourceStore.id,
+                productId: srcProduct.id,
+                productName: srcProduct.name,
+                previousQty: currentShopFloor,
+                changeQty: qty,
+                newQty: newShopFloor,
+                type: 'STORE_TRANSFER',
+                reason: `Transferred IN from ${sourceName} to ${destName}${noteSuffix}`,
+                referenceId: transferId,
+                userId: currentUser.id,
+                userName: currentUser.name,
+                createdAt: movementCreatedAt,
+              },
+              {
+                id: generateUUID(),
+                shopId: params.sourceShopId,
+                shopName: sourceShopName,
+                storeId: sourceStore.id,
+                productId: srcProduct.id,
+                productName: srcProduct.name,
+                previousQty: sourceAvail,
+                changeQty: -qty,
+                newQty: sourceAvail - qty,
+                type: 'STORE_TRANSFER',
+                reason: `Transferred OUT from ${sourceName} to ${destName}${noteSuffix}`,
+                referenceId: transferId,
+                userId: currentUser.id,
+                userName: currentUser.name,
+                createdAt: movementCreatedAt,
+              }
+            );
+          }
 
           resolvedItems.push({ ...item, destProductId: srcProduct.id });
         } else {
@@ -1132,6 +1202,10 @@ export class StoreService {
               currentStock: destNextQty,
               ...(dpStocks ? { storeStocks: dpStocks } : {}),
               ...(dpDetails ? { storeDetails: dpDetails } : {}),
+              customFields: {
+                ...(dp.customFields || {}),
+                assignedShopFloor: true,
+              },
               updatedAt: nowIso,
             };
             updatedProductIds.add(dp.id);
@@ -1156,7 +1230,12 @@ export class StoreService {
               minStock: srcProduct.minStock,
               unit: srcProduct.unit || 'pcs',
               status: 'ACTIVE',
-              customFields: srcProduct.customFields,
+              ...(srcProduct.images ? { images: srcProduct.images } : {}),
+              ...(srcProduct.imageUrl ? { imageUrl: srcProduct.imageUrl } : {}),
+              customFields: {
+                ...(srcProduct.customFields || {}),
+                assignedShopFloor: true,
+              },
               createdAt: nowIso,
               updatedAt: nowIso,
             };
@@ -1165,8 +1244,8 @@ export class StoreService {
             destProductId = newDestProduct.id;
           }
 
-          movements.push(
-            {
+          if (isZeroCopy) {
+            movements.push({
               id: generateUUID(),
               shopId: destShopId,
               shopName: destShopName,
@@ -1174,33 +1253,53 @@ export class StoreService {
               productId: destProductId,
               productName: srcProduct.name,
               previousQty: destPrevQty,
-              changeQty: qty,
+              changeQty: 0,
               newQty: destNextQty,
               type: 'STORE_TRANSFER',
-              reason: `Transferred IN from ${sourceName} (${sourceShopName})${noteSuffix}`,
+              reason: `Copied product (0 qty) from ${sourceName} (${sourceShopName})${noteSuffix}`,
               referenceId: transferId,
               userId: currentUser.id,
               userName: currentUser.name,
               createdAt: movementCreatedAt,
-            },
-            {
-              id: generateUUID(),
-              shopId: params.sourceShopId,
-              shopName: sourceShopName,
-              storeId: sourceStore.id,
-              productId: srcProduct.id,
-              productName: srcProduct.name,
-              previousQty: sourceAvail,
-              changeQty: -qty,
-              newQty: sourceAvail - qty,
-              type: 'STORE_TRANSFER',
-              reason: `Transferred OUT from ${sourceName} to ${destName}${noteSuffix}`,
-              referenceId: transferId,
-              userId: currentUser.id,
-              userName: currentUser.name,
-              createdAt: movementCreatedAt,
-            }
-          );
+            });
+          } else {
+            movements.push(
+              {
+                id: generateUUID(),
+                shopId: destShopId,
+                shopName: destShopName,
+                storeId: sourceStore.id,
+                productId: destProductId,
+                productName: srcProduct.name,
+                previousQty: destPrevQty,
+                changeQty: qty,
+                newQty: destNextQty,
+                type: 'STORE_TRANSFER',
+                reason: `Transferred IN from ${sourceName} (${sourceShopName})${noteSuffix}`,
+                referenceId: transferId,
+                userId: currentUser.id,
+                userName: currentUser.name,
+                createdAt: movementCreatedAt,
+              },
+              {
+                id: generateUUID(),
+                shopId: params.sourceShopId,
+                shopName: sourceShopName,
+                storeId: sourceStore.id,
+                productId: srcProduct.id,
+                productName: srcProduct.name,
+                previousQty: sourceAvail,
+                changeQty: -qty,
+                newQty: sourceAvail - qty,
+                type: 'STORE_TRANSFER',
+                reason: `Transferred OUT from ${sourceName} to ${destName}${noteSuffix}`,
+                referenceId: transferId,
+                userId: currentUser.id,
+                userName: currentUser.name,
+                createdAt: movementCreatedAt,
+              }
+            );
+          }
 
           resolvedItems.push({ ...item, destProductId });
         }
@@ -1383,11 +1482,11 @@ export class StoreService {
     const mergedByProduct = new Map<string, { qty: number; customPrice?: number }>();
     for (const row of params.items) {
       const q = Number(row.quantity);
-      if (!Number.isFinite(q) || q <= 0) {
+      if (!Number.isFinite(q) || q < 0) {
         const prodName = productById.get(row.productId)?.name || row.productId;
         return {
           success: false,
-          error: `Quantity for "${prodName}" must be greater than 0.`,
+          error: `Quantity for "${prodName}" cannot be negative.`,
         };
       }
       if (row.unitPrice !== undefined && (!Number.isFinite(Number(row.unitPrice)) || Number(row.unitPrice) < 0)) {
@@ -1640,11 +1739,11 @@ export class StoreService {
     const mergedByProduct = new Map<string, { qty: number; customPrice?: number }>();
     for (const row of params.items) {
       const q = Number(row.quantity);
-      if (!Number.isFinite(q) || q <= 0) {
+      if (!Number.isFinite(q) || q < 0) {
         const prodName = productById.get(row.productId)?.name || row.productId;
         return {
           success: false,
-          error: `Quantity for "${prodName}" must be greater than 0.`,
+          error: `Quantity for "${prodName}" cannot be negative.`,
         };
       }
       const existing = mergedByProduct.get(row.productId);
