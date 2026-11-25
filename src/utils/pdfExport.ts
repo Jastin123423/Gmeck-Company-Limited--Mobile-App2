@@ -732,13 +732,13 @@ export async function printSalesReportPdf(
 
 // =====================================================================
 // 1B. SOLD PRODUCTS SUMMARY PDF (AdminSales.tsx — Separate Compact Report)
-// Shows ONLY unique sold products in the selected period with:
-// Product Name | Total Remained (Qty) | Total Sold (Qty)
+// Shows ONLY unique shop products sold in the selected period with:
+// Product Name | Total Remained (Shop Qty) — extended full-width right side for pen notes
 // =====================================================================
 export interface SoldProductSummaryRow {
   productName: string;
   totalRemained: number;
-  totalSold: number;
+  totalSold?: number;
   unit?: string;
 }
 
@@ -810,7 +810,6 @@ export function buildSoldProductsSummaryPdfDoc(
   const biz = settings?.businessName || 'Sales Control';
   const period = resolveSoldProductsPeriodMeta(meta);
 
-  const totalSoldUnits = rows.reduce((sum, r) => sum + (Number(r.totalSold) || 0), 0);
   const totalRemainedUnits = rows.reduce((sum, r) => sum + (Number(r.totalRemained) || 0), 0);
 
   const activeFilters: string[] = [];
@@ -841,23 +840,21 @@ export function buildSoldProductsSummaryPdfDoc(
     { label: 'Selected Period', value: `${period.label} (${period.rangeText})` },
     {
       label: 'Filter Scope',
-      value: activeFilters.length > 0 ? activeFilters.join(' | ') : 'Sold Products Only',
+      value:
+        activeFilters.length > 0
+          ? `${activeFilters.join(' | ')} | Shop Products Only`
+          : 'Shop Products Only (Excl. Stores)',
     },
   ]);
 
   y = drawKpiRow(doc, y, [
     {
-      label: 'Unique Sold Products',
+      label: 'Unique Sold Products (Shop)',
       value: String(rows.length),
       color: COLORS.navy,
     },
     {
-      label: 'Total Sold (Qty)',
-      value: formatQtyCompact(totalSoldUnits),
-      color: COLORS.emerald,
-    },
-    {
-      label: 'Total Remained (Qty)',
+      label: 'Total Remained (Shop Qty)',
       value: formatQtyCompact(totalRemainedUnits),
       color: COLORS.blue,
     },
@@ -867,7 +864,7 @@ export function buildSoldProductsSummaryPdfDoc(
   doc.setFontSize(9.5);
   doc.setTextColor(...COLORS.slate900);
   doc.text(
-    pdfSafe(`Sold Products Stock Summary (${period.label} | ${period.rangeText})`),
+    pdfSafe(`Sold Products - Shop Remaining Stock (${period.label} | ${period.rangeText})`),
     12,
     y + 2.5
   );
@@ -878,8 +875,7 @@ export function buildSoldProductsSummaryPdfDoc(
       ? [
           [
             '-',
-            `No products were sold during ${period.label} (${period.rangeText})`,
-            '0',
+            `No shop products were sold during ${period.label} (${period.rangeText})`,
             '0',
           ],
         ]
@@ -887,14 +883,15 @@ export function buildSoldProductsSummaryPdfDoc(
           String(idx + 1),
           pdfSafe(row.productName),
           formatQtyCompact(row.totalRemained),
-          formatQtyCompact(row.totalSold),
         ]);
 
   autoTable(doc, {
     startY: y,
     margin: { left: 12, right: 12, bottom: 15 },
+    tableWidth: 186,
+    theme: 'grid',
     rowPageBreak: 'avoid',
-    head: [['#', 'Product Name', 'Total Remained (Qty)', 'Total Sold (Qty)']],
+    head: [['#', 'Product Name', 'Total Remained (Qty)']],
     body: bodyRows,
     foot:
       rows.length > 0
@@ -903,13 +900,12 @@ export function buildSoldProductsSummaryPdfDoc(
               '',
               `TOTAL (${rows.length} SOLD PRODUCT${rows.length === 1 ? '' : 'S'})`,
               formatQtyCompact(totalRemainedUnits),
-              formatQtyCompact(totalSoldUnits),
             ],
           ]
         : undefined,
     styles: {
       fontSize: 9,
-      cellPadding: { top: 3.2, right: 3.5, bottom: 3.2, left: 3.5 },
+      cellPadding: { top: 3.8, right: 3.5, bottom: 3.8, left: 4 },
       textColor: COLORS.slate900,
       overflow: 'linebreak',
       valign: 'middle',
@@ -921,22 +917,26 @@ export function buildSoldProductsSummaryPdfDoc(
       textColor: COLORS.white,
       fontStyle: 'bold',
       fontSize: 9,
-      cellPadding: { top: 3.6, right: 3.5, bottom: 3.6, left: 3.5 },
+      halign: 'left',
+      cellPadding: { top: 3.8, right: 3.5, bottom: 3.8, left: 4 },
     },
     footStyles: {
       fillColor: COLORS.slate100,
       textColor: COLORS.slate900,
       fontStyle: 'bold',
       fontSize: 9.2,
+      halign: 'left',
     },
     alternateRowStyles: { fillColor: COLORS.slate50 },
     columnStyles: {
-      0: { cellWidth: 14, halign: 'center', textColor: COLORS.slate500 },
-      1: { cellWidth: 102, fontStyle: 'bold' },
-      2: { cellWidth: 35, halign: 'right', fontStyle: 'bold', textColor: COLORS.blueDark },
-      3: { cellWidth: 35, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+      0: { cellWidth: 13, halign: 'center', textColor: COLORS.slate500 },
+      1: { cellWidth: 93, halign: 'left', fontStyle: 'bold' },
+      2: { cellWidth: 80, halign: 'left', fontStyle: 'bold', textColor: COLORS.blueDark },
     },
     didParseCell: data => {
+      if (data.section === 'head' && data.column.index === 0) {
+        data.cell.styles.halign = 'center';
+      }
       if (data.section === 'body' && data.column.index === 2 && rows.length > 0) {
         const val = Number(data.cell.raw);
         if (Number.isFinite(val) && val <= 0) {

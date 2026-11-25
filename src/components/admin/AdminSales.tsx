@@ -686,28 +686,15 @@ export const AdminSales: React.FC = () => {
     }
   };
 
-  // Unique Sold Products Summary (strictly products sold in the currently selected period)
+  // Unique Sold Products Summary (strictly shop products sold in the currently selected period;
+  // counts ONLY shop floor remaining quantity — never includes warehouse/store stock)
   const soldProductsSummaryRows: SoldProductSummaryRow[] = (() => {
-    const floorStoreIdSet = new Set(
-      (dbState.stores || []).filter(st => st.isShopFloor).map(st => st.id)
-    );
     const productById = new Map<string, Product>(products.map(p => [p.id, p]));
-    const getRemainingQty = (productId?: string): number => {
+    const getShopOnlyRemainingQty = (productId?: string): number => {
       if (!productId) return 0;
       const p = productById.get(productId);
       if (!p) return 0;
-      const floorQty = Math.max(0, Number(p.currentStock) || 0);
-      const storeQty =
-        typeof p.storeStock === 'number' && Number.isFinite(p.storeStock)
-          ? Math.max(0, p.storeStock)
-          : p.storeStocks
-            ? Object.entries(p.storeStocks).reduce(
-                (sum, [sid, q]) =>
-                  floorStoreIdSet.has(sid) ? sum : sum + Math.max(0, Number(q || 0)),
-                0
-              )
-            : 0;
-      return floorQty + storeQty;
+      return Math.max(0, Number(p.currentStock) || 0);
     };
 
     const agg = new Map<string, SoldProductSummaryRow>();
@@ -720,28 +707,23 @@ export const AdminSales: React.FC = () => {
         const key =
           item.productId ||
           `${sale.shopId || ''}::${(item.productName || '').trim().toLowerCase()}`;
-        const existing = agg.get(key);
-        if (existing) {
-          existing.totalSold += qty;
-        } else {
+        if (!agg.has(key)) {
           const baseName = (matchedProd?.name || item.productName || 'Unnamed Product').trim();
           const fullName =
-            matchedProd?.variation && !baseName.toLowerCase().includes(matchedProd.variation.toLowerCase())
+            matchedProd?.variation &&
+            !baseName.toLowerCase().includes(matchedProd.variation.toLowerCase())
               ? `${baseName} (${matchedProd.variation})`
               : baseName;
           agg.set(key, {
             productName: fullName,
-            totalRemained: getRemainingQty(item.productId),
-            totalSold: qty,
+            totalRemained: getShopOnlyRemainingQty(item.productId),
             unit: matchedProd?.unit,
           });
         }
       }
     }
 
-    return Array.from(agg.values()).sort(
-      (a, b) => b.totalSold - a.totalSold || a.productName.localeCompare(b.productName)
-    );
+    return Array.from(agg.values()).sort((a, b) => a.productName.localeCompare(b.productName));
   })();
 
   const buildSoldProductsPdfMeta = () => ({
@@ -769,7 +751,7 @@ export const AdminSales: React.FC = () => {
         addToast({
           type: 'success',
           title: `Sold Products PDF Downloaded (${isSearchingAllDates ? 'Search' : activePeriodMeta.shortLabel})`,
-          description: `Exported ${soldProductsSummaryRows.length} unique sold product(s) with remaining and sold quantities.`,
+          description: `Exported ${soldProductsSummaryRows.length} unique sold shop product(s) with remaining shop quantities.`,
         });
       } else {
         addToast({
@@ -1525,7 +1507,7 @@ export const AdminSales: React.FC = () => {
           </button>
         </div>
 
-        {/* Separate Sold Products Summary PDF & Print (Product Name, Total Remained Qty, Total Sold Qty ONLY) */}
+        {/* Separate Sold Products Summary PDF & Print (Product Name & Shop Remained Qty ONLY) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <button
             id="sales-sold-products-pdf-btn"
