@@ -6,7 +6,11 @@ import { AuthService } from '../../services/authService';
 import { CloudflareApi } from '../../services/cloudflareApi';
 import { db } from '../../db/storage';
 import { SELLER_COLORS } from '../../utils/colors';
-import { isShopAdmin } from '../../utils/permissions';
+import {
+  getShopAdminShopIds,
+  isCustomerDetailsEnabledForShop,
+  isShopAdmin,
+} from '../../utils/permissions';
 
 export const SellerSettings: React.FC = () => {
   const { currentUser, dbState, addToast, sellerColor, refreshUser, updateSettings } = useApp();
@@ -26,8 +30,21 @@ export const SellerSettings: React.FC = () => {
   if (!currentUser) return null;
 
   const shopAdmin = isShopAdmin(currentUser);
+  const managedShopIds = Array.from(
+    new Set([
+      ...getShopAdminShopIds(currentUser),
+      ...(shopAdmin ? currentUser.assignedShopIds || [] : []),
+    ])
+  ).filter(Boolean);
+  const managedShops = (dbState.shops || []).filter(s => managedShopIds.includes(s.id));
+  const managedShopLabel =
+    managedShops.length > 0 ? managedShops.map(s => s.name).join(', ') : 'Duka lako';
+
   const enableSalesAssistant = Boolean(dbState.settings.enableSalesAssistant);
-  const enableCustomerDetails = Boolean(dbState.settings.enableCustomerDetails);
+  const enableCustomerDetails =
+    managedShopIds.length > 0
+      ? managedShopIds.some(sid => isCustomerDetailsEnabledForShop(dbState.settings, sid))
+      : Boolean(dbState.settings.enableCustomerDetails);
 
   const handleToggleSalesAssistant = () => {
     const nextValue = !enableSalesAssistant;
@@ -43,13 +60,21 @@ export const SellerSettings: React.FC = () => {
 
   const handleToggleCustomerDetails = () => {
     const nextValue = !enableCustomerDetails;
-    updateSettings({ enableCustomerDetails: nextValue });
+    if (managedShopIds.length > 0) {
+      const shopPatch: Record<string, boolean> = {};
+      for (const sid of managedShopIds) {
+        shopPatch[sid] = nextValue;
+      }
+      updateSettings({ customerDetailsByShopPatch: shopPatch });
+    } else {
+      updateSettings({ enableCustomerDetails: nextValue });
+    }
     addToast({
       type: nextValue ? 'success' : 'info',
       title: nextValue ? 'Taarifa za Mteja Imewashwa' : 'Taarifa za Mteja Imezimwa',
       description: nextValue
-        ? 'Wauzaji lazima wajaze Jina la Mteja, Namba ya Simu, na kupiga picha (1–3) za bidhaa kabla ya kukamilisha mauzo.'
-        : 'Sehemu ya Taarifa za Mteja na picha imezimwa kwenye New Sale POS.',
+        ? `Wauzaji wote chini ya ${managedShopLabel} sasa watajaza Jina la Mteja, Namba ya Simu na kupiga picha za bidhaa kabla ya kukamilisha mauzo.`
+        : `Sehemu ya Taarifa za Mteja imezimwa kwa wauzaji wote chini ya ${managedShopLabel}.`,
     });
   };
 
@@ -349,7 +374,7 @@ export const SellerSettings: React.FC = () => {
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                    Turn on to require <span className="text-slate-200 font-medium">Jina la Mteja</span>, <span className="text-slate-200 font-medium">Namba ya Simu</span>, and <span className="text-slate-200 font-medium">1–3 product camera photos</span> after Njia ya Malipo before completing an order.
+                    Inapowashwa, <span className="text-emerald-300 font-semibold">wauzaji wote chini ya {managedShopLabel}</span> lazima wajaze <span className="text-slate-200 font-medium">Jina la Mteja</span>, <span className="text-slate-200 font-medium">Namba ya Simu</span>, na kupiga <span className="text-slate-200 font-medium">picha (1–3 kwa bidhaa)</span> kabla ya kukamilisha mauzo.
                   </p>
                 </div>
               </div>

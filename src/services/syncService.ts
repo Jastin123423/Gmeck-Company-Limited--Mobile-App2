@@ -1105,6 +1105,24 @@ export class SyncService {
         mergedSettings.enableSalesAssistant = !!cloudData.settings.enable_sales_assistant;
       if (cloudData.settings.enable_customer_details !== undefined)
         mergedSettings.enableCustomerDetails = !!cloudData.settings.enable_customer_details;
+      if (cloudData.settings.customer_details_by_shop !== undefined) {
+        try {
+          const rawMap =
+            typeof cloudData.settings.customer_details_by_shop === 'string'
+              ? JSON.parse(cloudData.settings.customer_details_by_shop)
+              : cloudData.settings.customer_details_by_shop;
+          if (rawMap && typeof rawMap === 'object' && !Array.isArray(rawMap)) {
+            const cleanMap: Record<string, boolean> = {};
+            for (const [k, v] of Object.entries(rawMap)) {
+              if (k && typeof v === 'boolean') cleanMap[k] = v;
+              else if (k && (v === 1 || v === 0)) cleanMap[k] = v === 1;
+            }
+            mergedSettings.customerDetailsByShop = cleanMap;
+          }
+        } catch {
+          // keep local map if malformed
+        }
+      }
       if (cloudData.settings.receipt_header_note)
         mergedSettings.receiptHeaderNote =
           cloudData.settings.receipt_header_note;

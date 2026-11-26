@@ -330,27 +330,26 @@ export function buildSalesReportPdfDoc(
   const biz = settings?.businessName || 'Sales Control';
   const period = resolveSalesPeriodMeta(meta);
 
-  const completedSales = sales.filter(s => s.status === 'COMPLETED');
-  const voidedCount = sales.length - completedSales.length;
+  // Exclude voided sales completely from all sales PDF & Print documents
+  const completedSales = sales.filter(s => s.status !== 'VOIDED');
 
-  // Aggregate product performance strictly from completed sales in the selected period
-  const productAggMap = new Map<
-    string,
-    {
-      name: string;
-      sku: string;
-      orders: number;
-      qtySold: number;
-      revenue: number;
-      cost: number;
-      profit: number;
-    }
-  >();
+  // Keep each sold product entry separate per sale (do NOT merge same products sold at different times/sales)
+  interface SoldProductEntry {
+    name: string;
+    sku: string;
+    receiptNumber: string;
+    createdAt: string;
+    qtySold: number;
+    unitPrice: number;
+    revenue: number;
+    cost: number;
+    profit: number;
+  }
 
+  const soldProductEntries: SoldProductEntry[] = [];
   let totalUnitsSold = 0;
 
   for (const sale of completedSales) {
-    const seenInSale = new Set<string>();
     for (const item of sale.items || []) {
       const qty = Number(item.quantity) || 0;
       const unitPrice = Number(item.unitPrice) || 0;
@@ -364,35 +363,19 @@ export function buildSalesReportPdfDoc(
 
       totalUnitsSold += qty;
 
-      const prodKey = item.productId || `${item.productName}::${item.sku || ''}`;
-      const existing = productAggMap.get(prodKey);
-      if (existing) {
-        existing.qtySold += qty;
-        existing.revenue += lineTotal;
-        existing.cost += lineCost;
-        existing.profit += lineProfit;
-        if (!seenInSale.has(prodKey)) {
-          existing.orders += 1;
-          seenInSale.add(prodKey);
-        }
-      } else {
-        productAggMap.set(prodKey, {
-          name: item.productName || 'Unnamed Product',
-          sku: item.sku || '-',
-          orders: 1,
-          qtySold: qty,
-          revenue: lineTotal,
-          cost: lineCost,
-          profit: lineProfit,
-        });
-        seenInSale.add(prodKey);
-      }
+      soldProductEntries.push({
+        name: item.productName || 'Unnamed Product',
+        sku: item.sku || '-',
+        receiptNumber: sale.receiptNumber || '-',
+        createdAt: sale.createdAt || '',
+        qtySold: qty,
+        unitPrice,
+        revenue: lineTotal,
+        cost: lineCost,
+        profit: lineProfit,
+      });
     }
   }
-
-  const aggregatedProducts = Array.from(productAggMap.values()).sort(
-    (a, b) => b.revenue - a.revenue || b.qtySold - a.qtySold
-  );
 
   const marginPct =
     meta.totalRevenue > 0
@@ -433,10 +416,7 @@ export function buildSalesReportPdfDoc(
     { label: 'Active Filters', value: filtersSummary },
     {
       label: 'Records',
-      value:
-        voidedCount > 0
-          ? `${completedSales.length} completed, ${voidedCount} voided`
-          : `${completedSales.length} completed sale(s)`,
+      value: `${completedSales.length} completed sale(s)`,
     },
   ]);
 
@@ -453,12 +433,12 @@ export function buildSalesReportPdfDoc(
     },
     {
       label: 'Products Sold',
-      value: `${formatQtyCompact(totalUnitsSold)} units (${aggregatedProducts.length} items)`,
+      value: `${formatQtyCompact(totalUnitsSold)} units (${soldProductEntries.length} items)`,
       color: COLORS.violet,
     },
     {
       label: 'Transactions',
-      value: `${sales.length} total`,
+      value: `${completedSales.length} total`,
       color: COLORS.navy,
     },
   ]);
@@ -475,7 +455,7 @@ export function buildSalesReportPdfDoc(
   y += 5;
 
   const txRows =
-    sales.length === 0
+    completedSales.length === 0
       ? [
           [
             '-',
@@ -487,7 +467,7 @@ export function buildSalesReportPdfDoc(
             '-',
           ],
         ]
-      : sales.map(sale => {
+      : completedSales.map(sale => {
           const items = sale.items || [];
           const productLines =
             items.length === 0
@@ -590,8 +570,8 @@ export function buildSalesReportPdfDoc(
     },
   });
 
-  // Section 2: Professionally Organized Products Sold Breakdown for the Selected Period
-  if (aggregatedProducts.length > 0) {
+  // Section 2: Individual Products Sold List (each sale entry shown separately, never merged across sales)
+  if (soldProductEntries.length > 0) {
     let nextY = getLastTableY(doc, y + 30) + 9;
     const pageH = doc.internal.pageSize.getHeight();
     if (nextY > pageH - 38) {
@@ -604,50 +584,38 @@ export function buildSalesReportPdfDoc(
     doc.setTextColor(...COLORS.slate900);
     doc.text(
       pdfSafe(
-        `2. Products Sold Breakdown - ${period.label} (${aggregatedProducts.length} product(s) | ${formatQtyCompact(totalUnitsSold)} total units)`
+        `2. Products Sold List - ${period.label} (${soldProductEntries.length} item(s) | ${formatQtyCompact(totalUnitsSold)} total units)`
       ),
       12,
       nextY
     );
 
-    const productSummaryRows = aggregatedProducts.map((p, idx) => {
-      const avgUnitPrice = p.qtySold > 0 ? p.revenue / p.qtySold : 0;
+    const productDetailRows = soldProductEntries.map((p, idx) => {
       const itemMargin = p.revenue > 0 ? `${((p.profit / p.revenue) * 100).toFixed(1)}%` : '0.0%';
+      const receiptAndTime = pdfSafeMultiline([
+        `#${p.receiptNumber}`,
+        p.createdAt ? formatDateTime(p.createdAt) : '',
+      ]);
       return [
         String(idx + 1),
         pdfSafe(p.name),
         pdfSafe(p.sku),
-        String(p.orders),
+        receiptAndTime,
         formatQtyCompact(p.qtySold),
-        pdfSafe(formatCurrency(avgUnitPrice, symbol)),
+        pdfSafe(formatCurrency(p.unitPrice, symbol)),
         pdfSafe(formatCurrency(p.revenue, symbol)),
         pdfSafe(`${formatCurrency(p.profit, symbol)} (${itemMargin})`),
       ];
     });
-
-    const totalProductRev = aggregatedProducts.reduce((s, p) => s + p.revenue, 0);
-    const totalProductProfit = aggregatedProducts.reduce((s, p) => s + p.profit, 0);
 
     autoTable(doc, {
       startY: nextY + 3.5,
       margin: { left: 12, right: 12, bottom: 15 },
       rowPageBreak: 'avoid',
       head: [
-        ['#', 'Product Name', 'SKU', 'Sales', 'Qty Sold', 'Avg Price', 'Total Revenue', 'Gross Profit'],
+        ['#', 'Product Name', 'SKU', 'Receipt & Time', 'Qty Sold', 'Unit Price', 'Total Revenue', 'Gross Profit'],
       ],
-      body: productSummaryRows,
-      foot: [
-        [
-          '',
-          `PERIOD TOTAL (${aggregatedProducts.length} PRODUCTS)`,
-          '',
-          String(completedSales.length),
-          formatQtyCompact(totalUnitsSold),
-          '',
-          pdfSafe(formatCurrency(totalProductRev, symbol)),
-          pdfSafe(formatCurrency(totalProductProfit, symbol)),
-        ],
-      ],
+      body: productDetailRows,
       styles: {
         fontSize: 7.8,
         cellPadding: { top: 2.6, right: 2.5, bottom: 2.6, left: 2.5 },
@@ -663,22 +631,16 @@ export function buildSalesReportPdfDoc(
         fontStyle: 'bold',
         fontSize: 7.8,
       },
-      footStyles: {
-        fillColor: COLORS.slate100,
-        textColor: COLORS.slate900,
-        fontStyle: 'bold',
-        fontSize: 8,
-      },
       alternateRowStyles: { fillColor: COLORS.slate50 },
       columnStyles: {
-        0: { cellWidth: 11, halign: 'center', textColor: COLORS.slate500 },
-        1: { cellWidth: 80, fontStyle: 'bold' },
-        2: { cellWidth: 32, textColor: COLORS.slate700 },
-        3: { cellWidth: 18, halign: 'right' },
-        4: { cellWidth: 24, halign: 'right', fontStyle: 'bold', textColor: COLORS.blueDark },
+        0: { cellWidth: 10, halign: 'center', textColor: COLORS.slate500 },
+        1: { cellWidth: 68, fontStyle: 'bold' },
+        2: { cellWidth: 26, textColor: COLORS.slate700 },
+        3: { cellWidth: 43, fontSize: 7.2, textColor: COLORS.slate700 },
+        4: { cellWidth: 20, halign: 'right', fontStyle: 'bold', textColor: COLORS.blueDark },
         5: { cellWidth: 32, halign: 'right' },
         6: { cellWidth: 36, halign: 'right', fontStyle: 'bold' },
-        7: { cellWidth: 40, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
+        7: { cellWidth: 38, halign: 'right', fontStyle: 'bold', textColor: COLORS.emerald },
       },
     });
   }
@@ -810,7 +772,15 @@ export function buildSoldProductsSummaryPdfDoc(
   const biz = settings?.businessName || 'Sales Control';
   const period = resolveSoldProductsPeriodMeta(meta);
 
-  const totalRemainedUnits = rows.reduce((sum, r) => sum + (Number(r.totalRemained) || 0), 0);
+  // Always sort sold products strictly alphabetically (A -> Z, case-insensitive, natural numeric)
+  const sortedRows = [...rows].sort((a, b) =>
+    (a.productName || '').trim().localeCompare((b.productName || '').trim(), undefined, {
+      sensitivity: 'base',
+      numeric: true,
+    })
+  );
+
+  const totalRemainedUnits = sortedRows.reduce((sum, r) => sum + (Number(r.totalRemained) || 0), 0);
 
   const activeFilters: string[] = [];
   if (meta.sellerLabel && meta.sellerLabel !== 'All Sellers') {
@@ -850,7 +820,7 @@ export function buildSoldProductsSummaryPdfDoc(
   y = drawKpiRow(doc, y, [
     {
       label: 'Unique Sold Products (Shop)',
-      value: String(rows.length),
+      value: String(sortedRows.length),
       color: COLORS.navy,
     },
     {
@@ -871,7 +841,7 @@ export function buildSoldProductsSummaryPdfDoc(
   y += 5;
 
   const bodyRows =
-    rows.length === 0
+    sortedRows.length === 0
       ? [
           [
             '-',
@@ -879,7 +849,7 @@ export function buildSoldProductsSummaryPdfDoc(
             '0',
           ],
         ]
-      : rows.map((row, idx) => [
+      : sortedRows.map((row, idx) => [
           String(idx + 1),
           pdfSafe(row.productName),
           formatQtyCompact(row.totalRemained),
@@ -894,11 +864,11 @@ export function buildSoldProductsSummaryPdfDoc(
     head: [['#', 'Product Name', 'Total Remained (Qty)']],
     body: bodyRows,
     foot:
-      rows.length > 0
+      sortedRows.length > 0
         ? [
             [
               '',
-              `TOTAL (${rows.length} SOLD PRODUCT${rows.length === 1 ? '' : 'S'})`,
+              `TOTAL (${sortedRows.length} SOLD PRODUCT${sortedRows.length === 1 ? '' : 'S'})`,
               formatQtyCompact(totalRemainedUnits),
             ],
           ]
@@ -937,7 +907,7 @@ export function buildSoldProductsSummaryPdfDoc(
       if (data.section === 'head' && data.column.index === 0) {
         data.cell.styles.halign = 'center';
       }
-      if (data.section === 'body' && data.column.index === 2 && rows.length > 0) {
+      if (data.section === 'body' && data.column.index === 2 && sortedRows.length > 0) {
         const val = Number(data.cell.raw);
         if (Number.isFinite(val) && val <= 0) {
           data.cell.styles.textColor = COLORS.rose;

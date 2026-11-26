@@ -68,3 +68,21 @@ export function getEffectiveSellerPermissions(user?: User | null): SellerPermiss
   }
   return user.permissions || {};
 }
+
+export function isCustomerDetailsEnabledForShop(
+  settings:
+    | {
+        enableCustomerDetails?: boolean;
+        customerDetailsByShop?: Record<string, boolean>;
+      }
+    | null
+    | undefined,
+  shopId?: string | null
+): boolean {
+  if (!settings) return false;
+  const map = settings.customerDetailsByShop;
+  if (shopId && map && typeof map === 'object' && typeof map[shopId] === 'boolean') {
+    return map[shopId];
+  }
+  return Boolean(settings.enableCustomerDetails);
+}

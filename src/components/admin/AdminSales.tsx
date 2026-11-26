@@ -58,7 +58,6 @@ export const AdminSales: React.FC = () => {
   const [searchCurrentPeriodOnly, setSearchCurrentPeriodOnly] = useState(false);
   const [sellerFilter, setSellerFilter] = useState('ALL');
   const [paymentFilter, setPaymentFilter] = useState('ALL');
-  const [statusFilter, setStatusFilter] = useState('ALL');
   const [shopFilter, setShopFilter] = useState('ALL');
   const [datePreset, setDatePreset] = useState<DatePreset>('TODAY');
 
@@ -166,7 +165,7 @@ export const AdminSales: React.FC = () => {
   // Reset per-group pagination when filters change
   useEffect(() => {
     setGroupVisibleCounts({});
-  }, [searchQuery, searchCurrentPeriodOnly, sellerFilter, paymentFilter, statusFilter, shopFilter, datePreset, startDate, endDate]);
+  }, [searchQuery, searchCurrentPeriodOnly, sellerFilter, paymentFilter, shopFilter, datePreset, startDate, endDate]);
 
   // Reset Edit List pagination when its filters change
   useEffect(() => {
@@ -282,18 +281,19 @@ export const AdminSales: React.FC = () => {
   const effectiveEndDate = datePreset === 'CUSTOM' ? endDate : activePresetRange?.end || endDate;
   const isSearchingAllDates = searchQuery.trim().length > 0 && !searchCurrentPeriodOnly;
 
+  // Voided sales are completely hidden from All Sales Reports (list, KPIs, PDFs, Print & CSV)
   const sales = SalesService.getSales(
     {
       search: searchQuery,
       sellerId: sellerFilter === 'ALL' ? undefined : sellerFilter,
       paymentMethod: paymentFilter === 'ALL' ? undefined : (paymentFilter as any),
-      status: statusFilter === 'ALL' ? undefined : (statusFilter as any),
+      status: 'COMPLETED',
       shopId: shopFilter === 'ALL' ? undefined : shopFilter,
       startDate: isSearchingAllDates ? undefined : effectiveStartDate || undefined,
       endDate: isSearchingAllDates ? undefined : effectiveEndDate || undefined,
     },
     currentUser
-  );
+  ).filter(s => s.status !== 'VOIDED');
 
   const totalVolume = sales.reduce(
     (sum, s) => (s.status === 'COMPLETED' ? sum + s.total : sum),
@@ -620,11 +620,6 @@ export const AdminSales: React.FC = () => {
         ? 'Mobile Money'
         : paymentFilter.charAt(0) + paymentFilter.slice(1).toLowerCase();
 
-  const selectedStatusLabel =
-    statusFilter === 'ALL'
-      ? 'All Statuses'
-      : statusFilter.charAt(0) + statusFilter.slice(1).toLowerCase();
-
   const buildSalesPdfMeta = () => ({
     shopLabel: selectedShopName,
     startDate: isSearchingAllDates ? undefined : effectiveStartDate || undefined,
@@ -635,7 +630,7 @@ export const AdminSales: React.FC = () => {
     dateRangeText: isSearchingAllDates ? 'All Dates' : activePeriodMeta.dateRangeText,
     sellerLabel: selectedSellerLabel,
     paymentLabel: selectedPaymentLabel,
-    statusLabel: selectedStatusLabel,
+    statusLabel: 'Completed',
     searchQuery: searchQuery.trim() || undefined,
     totalRevenue: totalVolume,
     totalProfit,
@@ -723,7 +718,12 @@ export const AdminSales: React.FC = () => {
       }
     }
 
-    return Array.from(agg.values()).sort((a, b) => a.productName.localeCompare(b.productName));
+    return Array.from(agg.values()).sort((a, b) =>
+      a.productName.trim().localeCompare(b.productName.trim(), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      })
+    );
   })();
 
   const buildSoldProductsPdfMeta = () => ({
@@ -840,7 +840,6 @@ export const AdminSales: React.FC = () => {
     searchQuery ||
     sellerFilter !== 'ALL' ||
     paymentFilter !== 'ALL' ||
-    statusFilter !== 'ALL' ||
     shopFilter !== 'ALL' ||
     datePreset !== 'TODAY' ||
     (datePreset === 'CUSTOM' && (startDate || endDate));
@@ -1742,7 +1741,7 @@ export const AdminSales: React.FC = () => {
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           <select
             value={shopFilter}
             onChange={e => setShopFilter(e.target.value)}
@@ -1775,7 +1774,7 @@ export const AdminSales: React.FC = () => {
           <select
             value={paymentFilter}
             onChange={e => setPaymentFilter(e.target.value)}
-            className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500 col-span-2 sm:col-span-1"
           >
             <option value="ALL">All Payment Methods</option>
             <option value="CASH">Cash</option>
@@ -1783,16 +1782,6 @@ export const AdminSales: React.FC = () => {
             <option value="MOBILE_MONEY">Mobile Money</option>
             <option value="BANK">Bank</option>
             <option value="OTHER">Other</option>
-          </select>
-
-          <select
-            value={statusFilter}
-            onChange={e => setStatusFilter(e.target.value)}
-            className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-          >
-            <option value="ALL">All Statuses</option>
-            <option value="COMPLETED">Completed</option>
-            <option value="VOIDED">Voided</option>
           </select>
         </div>
 
@@ -1803,7 +1792,6 @@ export const AdminSales: React.FC = () => {
               setSearchCurrentPeriodOnly(false);
               setSellerFilter('ALL');
               setPaymentFilter('ALL');
-              setStatusFilter('ALL');
               setShopFilter('ALL');
               setDatePreset('TODAY');
               // startDate / endDate auto-updated by useEffect

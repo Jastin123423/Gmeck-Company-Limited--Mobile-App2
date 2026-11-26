@@ -71,6 +71,7 @@ interface AppContextType {
   refreshStoresFromCloud: (showFeedback?: boolean) => Promise<{ success: boolean; count: number; error?: string }>;
   // Settings
   updateSettings: (settings: any) => void;
+  refreshSettingsFromCloud: () => Promise<void>;
   // Seller color theme
   sellerColor: ReturnType<typeof getColorOption>;
 }
@@ -387,6 +388,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  /**
+   * LIGHTWEIGHT SETTINGS REFRESH (1 single D1 row read)
+   * Ensures sellers under a shop immediately pick up Shop Admin toggles (e.g. Taarifa za Mteja)
+   * without waiting for the 15-minute full pull interval.
+   */
+  const refreshSettingsFromCloud = async () => {
+    try {
+      if (!CloudflareApi.isOnline()) return;
+      const res = await CloudflareApi.getSettings();
+      const cloudSettings = res?.settings || res;
+      if (!cloudSettings || typeof cloudSettings !== 'object') return;
+
+      const localSettings = db.getSettings();
+      const merged: any = { ...localSettings };
+      let changed = false;
+
+      if (cloudSettings.enable_sales_assistant !== undefined) {
+        const nextVal = !!cloudSettings.enable_sales_assistant;
+        if (Boolean(localSettings.enableSalesAssistant) !== nextVal) {
+          merged.enableSalesAssistant = nextVal;
+          changed = true;
+        }
+      }
+      if (cloudSettings.enable_customer_details !== undefined) {
+        const nextVal = !!cloudSettings.enable_customer_details;
+        if (Boolean(localSettings.enableCustomerDetails) !== nextVal) {
+          merged.enableCustomerDetails = nextVal;
+          changed = true;
+        }
+      }
+      if (cloudSettings.customer_details_by_shop !== undefined) {
+        try {
+          const parsed =
+            typeof cloudSettings.customer_details_by_shop === 'string'
+              ? JSON.parse(cloudSettings.customer_details_by_shop)
+              : cloudSettings.customer_details_by_shop;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const cleanMap: Record<string, boolean> = {};
+            for (const [k, v] of Object.entries(parsed)) {
+              if (k && typeof v === 'boolean') cleanMap[k] = v;
+              else if (k && (v === 1 || v === 0)) cleanMap[k] = v === 1;
+            }
+            if (JSON.stringify(localSettings.customerDetailsByShop || {}) !== JSON.stringify(cleanMap)) {
+              merged.customerDetailsByShop = cleanMap;
+              changed = true;
+            }
+          }
+        } catch {
+          // ignore malformed map
+        }
+      }
+
+      if (changed) {
+        db.saveSettings(merged);
+        setDbState({ ...db.getState() });
+      }
+    } catch {
+      // Offline or transient error — keep current local settings
+    }
+  };
+
   // 1. FORCE FULL PULL ON FIRST LOAD (for incognito/new devices)
   useEffect(() => {
     const hasSynced = localStorage.getItem('omnibiz_has_synced');
@@ -447,17 +509,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [currentUser]);
 
-  // 3. Pull cloud data every 15 minutes
+  // 3. Pull cloud data every 15 minutes + instant lightweight settings sync on login & app resume
   useEffect(() => {
-    // Pull on login (if user logs in)
     if (currentUser) {
       pullCloudData(false);
+      refreshSettingsFromCloud();
     }
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && currentUser) {
+        refreshSettingsFromCloud();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     // Pull every 15 minutes
     const interval = setInterval(() => pullCloudData(false), PULL_INTERVAL);
 
-    return () => clearInterval(interval);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(interval);
+    };
   }, [currentUser]);
 
   // 4. Push on reconnect
@@ -631,15 +703,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateSettings = (newSettings: any) => {
     const currentSettings = db.getSettings();
-    const updatedSettings = { ...currentSettings, ...newSettings };
+    const { customerDetailsByShopPatch, ...restSettings } = newSettings || {};
+    const mergedShopMap =
+      customerDetailsByShopPatch && typeof customerDetailsByShopPatch === 'object'
+        ? {
+            ...(currentSettings.customerDetailsByShop || {}),
+            ...customerDetailsByShopPatch,
+          }
+        : restSettings.customerDetailsByShop !== undefined
+          ? restSettings.customerDetailsByShop
+          : currentSettings.customerDetailsByShop;
+
+    const updatedSettings = {
+      ...currentSettings,
+      ...restSettings,
+      ...(mergedShopMap !== undefined ? { customerDetailsByShop: mergedShopMap } : {}),
+    };
     db.saveSettings(updatedSettings);
+
+    const syncPayload = customerDetailsByShopPatch
+      ? { ...updatedSettings, customerDetailsByShopPatch }
+      : updatedSettings;
+
+    // Immediately persist to D1 /api/settings when online so all sellers see changes right away
+    if (CloudflareApi.isOnline()) {
+      CloudflareApi.updateSettings(syncPayload).catch(() => {
+        // Fallback handled by sync queue below
+      });
+    }
 
     db.enqueueSync({
       id: generateUUID(),
       operation: 'UPDATE_SETTINGS',
       entityType: 'SETTINGS',
       entityId: 'global',
-      payload: updatedSettings,
+      payload: syncPayload,
       status: 'PENDING',
       createdAt: new Date().toISOString(),
     });
@@ -707,6 +805,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         triggerSync,
         refreshStoresFromCloud,
         updateSettings,
+        refreshSettingsFromCloud,
         sellerColor,
       }}
     >

@@ -418,6 +418,7 @@ export interface BusinessSettings {
   themePrimaryColor?: string;
   enableSalesAssistant?: boolean;
   enableCustomerDetails?: boolean;
+  customerDetailsByShop?: Record<string, boolean>;
 }
 
 export interface CustomerRecordItem {

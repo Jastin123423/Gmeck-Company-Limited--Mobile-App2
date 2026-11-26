@@ -20,6 +20,7 @@ import { AuthService } from '../../services/authService';
 import { StorageService } from '../../db/storage';
 import { CloudflareApi } from '../../services/cloudflareApi';
 import { formatDateTime } from '../../utils/formatters';
+import { isCustomerDetailsEnabledForShop } from '../../utils/permissions';
 
 export const AdminSettings: React.FC = () => {
   const { currentUser, dbState, addToast, updateSettings, refreshUser } = useApp();
@@ -196,13 +197,35 @@ export const AdminSettings: React.FC = () => {
 
   const handleToggleCustomerDetails = () => {
     const nextValue = !enableCustomerDetails;
-    updateSettings({ enableCustomerDetails: nextValue });
+    const allShopPatch: Record<string, boolean> = {};
+    for (const sh of dbState.shops || []) {
+      allShopPatch[sh.id] = nextValue;
+    }
+    updateSettings({
+      enableCustomerDetails: nextValue,
+      customerDetailsByShopPatch: allShopPatch,
+    });
     addToast({
       type: nextValue ? 'success' : 'info',
       title: nextValue ? 'Taarifa za Mteja Imewashwa' : 'Taarifa za Mteja Imezimwa',
       description: nextValue
-        ? 'Wauzaji lazima wajaze Jina la Mteja, Namba ya Simu, na kupiga picha (1–3) za bidhaa kabla ya kukamilisha mauzo.'
-        : 'Sehemu ya Taarifa za Mteja na picha imezimwa kwenye New Sale POS.',
+        ? 'Wauzaji wote kwenye maduka yote lazima wajaze Jina la Mteja, Namba ya Simu, na kupiga picha za bidhaa kabla ya kukamilisha mauzo.'
+        : 'Sehemu ya Taarifa za Mteja na picha imezimwa kwenye maduka yote.',
+    });
+  };
+
+  const handleToggleCustomerDetailsForShop = (shopId: string, shopName: string) => {
+    const currentVal = isCustomerDetailsEnabledForShop(dbState.settings, shopId);
+    const nextVal = !currentVal;
+    updateSettings({
+      customerDetailsByShopPatch: { [shopId]: nextVal },
+    });
+    addToast({
+      type: nextVal ? 'success' : 'info',
+      title: `${shopName}: ${nextVal ? 'ON' : 'OFF'}`,
+      description: nextVal
+        ? `Wauzaji wote chini ya ${shopName} sasa watatumia Taarifa za Mteja.`
+        : `Taarifa za Mteja imezimwa kwa wauzaji wa ${shopName}.`,
     });
   };
 
@@ -469,6 +492,41 @@ export const AdminSettings: React.FC = () => {
               />
             </button>
           </div>
+
+          {(dbState.shops || []).length > 0 && (
+            <div className="mt-4 pt-3.5 border-t border-slate-800/80">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">
+                Hali kwa Kila Duka (Wauzaji wote wa duka husika)
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(dbState.shops || []).map(shop => {
+                  const shopOn = isCustomerDetailsEnabledForShop(dbState.settings, shop.id);
+                  return (
+                    <button
+                      key={shop.id}
+                      type="button"
+                      onClick={() => handleToggleCustomerDetailsForShop(shop.id, shop.name)}
+                      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition active:scale-95 ${
+                        shopOn
+                          ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                      }`}
+                    >
+                      <Store className="w-3.5 h-3.5 shrink-0" />
+                      <span>{shop.name}</span>
+                      <span
+                        className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                          shopOn ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {shopOn ? 'ON' : 'OFF'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Business & POS Configuration */}

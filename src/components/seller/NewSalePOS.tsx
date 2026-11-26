@@ -32,35 +32,53 @@ import { Product, PaymentMethod, CustomerRecord, CustomerRecordItem, Sale } from
 import { formatCurrency } from '../../utils/formatters';
 import { ProductThumbnail } from '../common/ProductThumbnail';
 import { ProductImageViewerModal } from '../common/ProductImageViewerModal';
+import { InAppCameraModal, CameraCapturedPhoto } from '../common/InAppCameraModal';
 import { VoiceSaleService, VoiceSaleResult, VoiceSaleItem } from '../../services/voiceSaleService';
 import { VoiceSalePreview } from '../VoiceSalePreview';
 import { CloudflareApi } from '../../services/cloudflareApi';
 import { db } from '../../db/storage';
 import { generateUUID } from '../../utils/crypto';
+import { isCustomerDetailsEnabledForShop } from '../../utils/permissions';
 
 const PAGE_SIZE = 15;
 const MAX_PHOTOS_PER_PRODUCT = 3;
 const MAX_TOTAL_CUSTOMER_PHOTOS = 24;
+const POS_DRAFT_STORAGE_KEY = 'diocres_pos_active_draft_v1';
 
 interface CapturedCustomerPhoto {
   id: string;
-  file: File;
-  previewUrl: string;
+  dataUrl: string;
   sizeKb: number;
   productId?: string;
   productName?: string;
 }
 
-const canvasToJpegBlob = (canvas: HTMLCanvasElement, quality: number): Promise<Blob | null> =>
-  new Promise(resolve => canvas.toBlob(blob => resolve(blob), 'image/jpeg', quality));
+const estimateDataUrlBytes = (dataUrl: string): number => {
+  const commaIdx = dataUrl.indexOf(',');
+  const base64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+  return Math.round((base64.length * 3) / 4);
+};
 
-const drawResizedToJpeg = async (
+const dataUrlToJpegFile = (dataUrl: string, filename: string): File => {
+  const [header, base64] = dataUrl.split(',');
+  const mimeMatch = /data:(.*?);/.exec(header || '');
+  const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+  const binary = atob(base64 || '');
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new File([bytes], filename, { type: mime });
+};
+
+const drawResizedToJpegDataUrl = (
   source: CanvasImageSource,
   srcWidth: number,
   srcHeight: number,
   maxDim: number,
   quality: number
-): Promise<Blob | null> => {
+): string | null => {
   let width = srcWidth;
   let height = srcHeight;
   if (width > maxDim || height > maxDim) {
@@ -75,16 +93,24 @@ const drawResizedToJpeg = async (
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext('2d', { alpha: false });
-  if (!ctx) return null;
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, width, height);
-  ctx.drawImage(source, 0, 0, width, height);
-  return canvasToJpegBlob(canvas, quality);
+  try {
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) return null;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(source, 0, 0, width, height);
+    return canvas.toDataURL('image/jpeg', quality);
+  } finally {
+    // Immediately release native GPU/RAM canvas buffer to prevent Android WebView OOM
+    canvas.width = 0;
+    canvas.height = 0;
+  }
 };
 
-// Fast client-side compression designed to save mobile data (targets ~50-150 KB JPEG, never uploads raw original)
-const compressCustomerPhoto = async (file: File): Promise<File> => {
+// Memory-safe fast client-side compression (downscales during decode to prevent Android OOM, targets ~50-150 KB JPEG)
+const compressCustomerPhotoToDataUrl = async (
+  file: File
+): Promise<{ dataUrl: string; sizeKb: number }> => {
   let bitmap: ImageBitmap | null = null;
   let fallbackImg: HTMLImageElement | null = null;
   let objectUrl: string | null = null;
@@ -96,12 +122,23 @@ const compressCustomerPhoto = async (file: File): Promise<File> => {
 
     if (typeof createImageBitmap === 'function') {
       try {
-        bitmap = await createImageBitmap(file);
+        // Request downscaled decode first so 12MP-50MP phone photos never allocate massive RGBA buffers
+        bitmap = await createImageBitmap(file, {
+          resizeWidth: 960,
+          resizeQuality: 'medium',
+        } as ImageBitmapOptions);
         source = bitmap;
         srcWidth = bitmap.width;
         srcHeight = bitmap.height;
       } catch {
-        bitmap = null;
+        try {
+          bitmap = await createImageBitmap(file);
+          source = bitmap;
+          srcWidth = bitmap.width;
+          srcHeight = bitmap.height;
+        } catch {
+          bitmap = null;
+        }
       }
     }
 
@@ -119,22 +156,28 @@ const compressCustomerPhoto = async (file: File): Promise<File> => {
     }
 
     // Pass 1: fast 960px longest side @ quality 0.62
-    let blob = await drawResizedToJpeg(source!, srcWidth, srcHeight, 960, 0.62);
-    // Pass 2: if still > 180 KB, shrink quickly to 800px @ quality 0.50 to save mobile data
-    if (blob && blob.size > 180 * 1024) {
-      const tighter = await drawResizedToJpeg(source!, srcWidth, srcHeight, 800, 0.5);
-      if (tighter && tighter.size < blob.size) {
-        blob = tighter;
-      }
-    }
-
-    if (!blob) {
+    let dataUrl = drawResizedToJpegDataUrl(source!, srcWidth, srcHeight, 960, 0.62);
+    if (!dataUrl) {
       throw new Error('Imeshindwa kupunguza ukubwa wa picha.');
     }
 
-    return new File([blob], `customer_item_${Date.now()}.jpg`, {
-      type: 'image/jpeg',
-    });
+    let bytes = estimateDataUrlBytes(dataUrl);
+    // Pass 2: if still > 180 KB, shrink quickly to 800px @ quality 0.50 to save mobile data
+    if (bytes > 180 * 1024) {
+      const tighter = drawResizedToJpegDataUrl(source!, srcWidth, srcHeight, 800, 0.5);
+      if (tighter) {
+        const tighterBytes = estimateDataUrlBytes(tighter);
+        if (tighterBytes < bytes) {
+          dataUrl = tighter;
+          bytes = tighterBytes;
+        }
+      }
+    }
+
+    return {
+      dataUrl,
+      sizeKb: Math.max(1, Math.round(bytes / 1024)),
+    };
   } finally {
     if (bitmap) {
       try {
@@ -142,6 +185,9 @@ const compressCustomerPhoto = async (file: File): Promise<File> => {
       } catch {
         // ignore
       }
+    }
+    if (fallbackImg) {
+      fallbackImg.src = '';
     }
     if (objectUrl) {
       try {
@@ -197,7 +243,17 @@ interface CartItem {
 }
 
 export const NewSalePOS: React.FC = () => {
-  const { currentUser, dbState, addToast, showReceipt, sellerColor, selectedShopId, currentShop, availableShops } = useApp();
+  const {
+    currentUser,
+    dbState,
+    addToast,
+    showReceipt,
+    sellerColor,
+    selectedShopId,
+    currentShop,
+    availableShops,
+    refreshSettingsFromCloud,
+  } = useApp();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [barcodeInput, setBarcodeInput] = useState('');
@@ -219,11 +275,14 @@ export const NewSalePOS: React.FC = () => {
     photos?: boolean;
   }>({});
   const [isCompressingPhoto, setIsCompressingPhoto] = useState(false);
+  const [isCameraModalOpen, setIsCameraModalOpen] = useState(false);
+  const [cameraTarget, setCameraTarget] = useState<{ productId?: string; productName?: string } | null>(null);
   const [processingLabel, setProcessingLabel] = useState<string>('');
   const [previewCustomerPhotoUrl, setPreviewCustomerPhotoUrl] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
+  const draftHydratedRef = useRef(false);
 
   // Sale Date — always defaults to Today; seller can switch to a previous date to record missed sales
   const todayYMD = getLocalTodayYMD();
@@ -267,26 +326,7 @@ export const NewSalePOS: React.FC = () => {
   const assistantInputRef = useRef<HTMLInputElement>(null);
   const customerNameInputRef = useRef<HTMLInputElement>(null);
   const customerPhoneInputRef = useRef<HTMLInputElement>(null);
-  const customerCameraInputRef = useRef<HTMLInputElement>(null);
   const customerPhotosBoxRef = useRef<HTMLDivElement>(null);
-  const customerPhotosRef = useRef<CapturedCustomerPhoto[]>([]);
-  const activeCameraTargetRef = useRef<{ productId?: string; productName?: string } | null>(null);
-
-  useEffect(() => {
-    customerPhotosRef.current = customerPhotos;
-  }, [customerPhotos]);
-
-  useEffect(() => {
-    return () => {
-      customerPhotosRef.current.forEach(p => {
-        try {
-          URL.revokeObjectURL(p.previewUrl);
-        } catch {
-          // ignore
-        }
-      });
-    };
-  }, []);
 
   const barcodeInputRef = useRef<HTMLInputElement>(null);
   const settings = dbState.settings;
@@ -298,11 +338,97 @@ export const NewSalePOS: React.FC = () => {
     dbState.shops[0]?.id ||
     '';
 
+  const isCustomerDetailsActive = isCustomerDetailsEnabledForShop(settings, targetShopId);
+
+  // Immediately sync shop settings from cloud on POS open & periodically so Shop Admin toggles apply to all sellers right away
+  useEffect(() => {
+    refreshSettingsFromCloud();
+    const timer = window.setInterval(() => {
+      refreshSettingsFromCloud();
+    }, 60000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetShopId]);
+
   const products = useMemo(() => {
     return dbState.products.filter(
       p => p.status === 'ACTIVE' && (!targetShopId || p.shopId === targetShopId || !p.shopId)
     );
   }, [dbState.products, targetShopId]);
+
+  // Restore active cart + customer photos draft if Android OS ever reloaded WebView
+  useEffect(() => {
+    if (draftHydratedRef.current || dbState.products.length === 0) return;
+    draftHydratedRef.current = true;
+    try {
+      const raw = sessionStorage.getItem(POS_DRAFT_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return;
+      if (parsed.shopId && targetShopId && parsed.shopId !== targetShopId) return;
+
+      if (Array.isArray(parsed.cart) && parsed.cart.length > 0) {
+        const restoredCart: CartItem[] = [];
+        for (const entry of parsed.cart) {
+          const prod = dbState.products.find(p => p.id === entry.productId && p.status === 'ACTIVE');
+          if (prod) {
+            restoredCart.push({
+              product: prod,
+              quantity: entry.quantity ?? 1,
+              unitPrice: entry.unitPrice ?? prod.sellingPrice,
+              discount: Number(entry.discount) || 0,
+            });
+          }
+        }
+        if (restoredCart.length > 0) setCart(restoredCart);
+      }
+      if (typeof parsed.customerName === 'string') setCustomerName(parsed.customerName);
+      if (typeof parsed.customerPhone === 'string') setCustomerPhone(parsed.customerPhone);
+      if (typeof parsed.assistantName === 'string') setAssistantName(parsed.assistantName);
+      if (typeof parsed.paymentMethod === 'string') setPaymentMethod(parsed.paymentMethod as PaymentMethod);
+      if (Array.isArray(parsed.customerPhotos) && parsed.customerPhotos.length > 0) {
+        const validPhotos = parsed.customerPhotos.filter(
+          (p: any) => p && typeof p.id === 'string' && typeof p.dataUrl === 'string' && p.dataUrl.startsWith('data:image/')
+        );
+        if (validPhotos.length > 0) setCustomerPhotos(validPhotos.slice(0, MAX_TOTAL_CUSTOMER_PHOTOS));
+      }
+    } catch {
+      // ignore corrupted draft
+    }
+  }, [dbState.products, targetShopId]);
+
+  // Persist compact POS draft to sessionStorage so cart & photos survive any unexpected mobile reload
+  useEffect(() => {
+    if (!draftHydratedRef.current) return;
+    try {
+      const hasContent =
+        cart.length > 0 ||
+        customerName.trim().length > 0 ||
+        customerPhone.trim().length > 0 ||
+        customerPhotos.length > 0;
+      if (!hasContent) {
+        sessionStorage.removeItem(POS_DRAFT_STORAGE_KEY);
+        return;
+      }
+      const draft = {
+        shopId: targetShopId,
+        cart: cart.map(i => ({
+          productId: i.product.id,
+          quantity: i.quantity,
+          unitPrice: i.unitPrice,
+          discount: i.discount,
+        })),
+        customerName,
+        customerPhone,
+        assistantName,
+        paymentMethod,
+        customerPhotos,
+      };
+      sessionStorage.setItem(POS_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    } catch {
+      // sessionStorage quota exceeded — keep in memory gracefully
+    }
+  }, [cart, customerName, customerPhone, assistantName, paymentMethod, customerPhotos, targetShopId]);
 
   // ─────────────────────────────────────────────────────────────
   // MOST-SELLING RANK MAP
@@ -792,28 +918,15 @@ export const NewSalePOS: React.FC = () => {
 
   const removeFromCart = (productId: string) => {
     setCart(prev => prev.filter(i => i.product.id !== productId));
-    setCustomerPhotos(prev => {
-      prev
-        .filter(p => p.productId === productId)
-        .forEach(p => {
-          try {
-            URL.revokeObjectURL(p.previewUrl);
-          } catch {
-            // ignore
-          }
-        });
-      return prev.filter(p => p.productId !== productId);
-    });
+    setCustomerPhotos(prev => prev.filter(p => p.productId !== productId));
   };
 
   const clearCart = () => {
-    customerPhotos.forEach(p => {
-      try {
-        URL.revokeObjectURL(p.previewUrl);
-      } catch {
-        // ignore
-      }
-    });
+    try {
+      sessionStorage.removeItem(POS_DRAFT_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
     setCart([]);
     setOverallDiscount(0);
     setAmountReceived('');
@@ -825,7 +938,8 @@ export const NewSalePOS: React.FC = () => {
     setCustomerPhotos([]);
     setCustomerFieldErrors({});
     setPreviewCustomerPhotoUrl(null);
-    activeCameraTargetRef.current = null;
+    setIsCameraModalOpen(false);
+    setCameraTarget(null);
     setCartSearchQuery('');
     setIsMobileCartOpen(false);
   };
@@ -855,7 +969,7 @@ export const NewSalePOS: React.FC = () => {
         });
         return;
       }
-      activeCameraTargetRef.current = { productId: product.id, productName: product.name };
+      setCameraTarget({ productId: product.id, productName: product.name });
     } else {
       // Pick first cart item that still has available photo slots (< 3)
       const nextCartItem = cart.find(
@@ -869,19 +983,43 @@ export const NewSalePOS: React.FC = () => {
         });
         return;
       }
-      activeCameraTargetRef.current = nextCartItem
-        ? { productId: nextCartItem.product.id, productName: nextCartItem.product.name }
-        : null;
+      setCameraTarget(
+        nextCartItem
+          ? { productId: nextCartItem.product.id, productName: nextCartItem.product.name }
+          : null
+      );
     }
 
-    customerCameraInputRef.current?.click();
+    setIsCameraModalOpen(true);
   };
 
-  const handleCustomerCameraCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
+  const handleInAppCameraCapture = (captured: CameraCapturedPhoto) => {
+    const target = cameraTarget;
+    setCustomerPhotos(prev => {
+      if (prev.length >= MAX_TOTAL_CUSTOMER_PHOTOS) return prev;
+      const existingForTarget = target?.productId
+        ? prev.filter(p => p.productId === target.productId).length
+        : prev.filter(p => !p.productId).length;
+      if (existingForTarget >= MAX_PHOTOS_PER_PRODUCT) return prev;
+
+      return [
+        ...prev,
+        {
+          id: generateUUID(),
+          dataUrl: captured.dataUrl,
+          sizeKb: captured.sizeKb,
+          productId: target?.productId,
+          productName: target?.productName,
+        },
+      ];
+    });
+    setCustomerFieldErrors(prev => ({ ...prev, photos: false }));
+  };
+
+  const handleFallbackPhotoFiles = async (files: FileList) => {
     if (!files || files.length === 0) return;
 
-    const target = activeCameraTargetRef.current;
+    const target = cameraTarget;
     const totalRemaining = MAX_TOTAL_CUSTOMER_PHOTOS - customerPhotos.length;
     const targetExistingCount = target?.productId
       ? customerPhotos.filter(p => p.productId === target.productId).length
@@ -897,7 +1035,6 @@ export const NewSalePOS: React.FC = () => {
           ? `Upeo wa picha ${MAX_PHOTOS_PER_PRODUCT} pekee unaruhusiwa kwa "${target.productName}".`
           : `Upeo wa picha ${MAX_PHOTOS_PER_PRODUCT} pekee unaruhusiwa kwa bidhaa moja.`,
       });
-      e.target.value = '';
       return;
     }
 
@@ -909,13 +1046,11 @@ export const NewSalePOS: React.FC = () => {
         if (!rawFile.type.startsWith('image/')) {
           throw new Error('Tafadhali chagua au piga faili la picha pekee.');
         }
-        const compressed = await compressCustomerPhoto(rawFile);
-        const previewUrl = URL.createObjectURL(compressed);
+        const compressed = await compressCustomerPhotoToDataUrl(rawFile);
         newlyCaptured.push({
           id: generateUUID(),
-          file: compressed,
-          previewUrl,
-          sizeKb: Math.max(1, Math.round(compressed.size / 1024)),
+          dataUrl: compressed.dataUrl,
+          sizeKb: compressed.sizeKb,
           productId: target?.productId,
           productName: target?.productName,
         });
@@ -930,27 +1065,15 @@ export const NewSalePOS: React.FC = () => {
       });
     } finally {
       setIsCompressingPhoto(false);
-      activeCameraTargetRef.current = null;
-      e.target.value = '';
     }
   };
 
   const handleRemoveCustomerPhoto = (photoId: string) => {
-    setCustomerPhotos(prev => {
-      const target = prev.find(p => p.id === photoId);
-      if (target) {
-        try {
-          URL.revokeObjectURL(target.previewUrl);
-        } catch {
-          // ignore
-        }
-      }
-      return prev.filter(p => p.id !== photoId);
-    });
+    setCustomerPhotos(prev => prev.filter(p => p.id !== photoId));
   };
 
   const validateCustomerDetailsIfEnabled = (): boolean => {
-    if (!Boolean(settings.enableCustomerDetails)) return true;
+    if (!isCustomerDetailsActive) return true;
 
     const cleanName = customerName.trim();
     const cleanPhone = customerPhone.trim();
@@ -997,13 +1120,17 @@ export const NewSalePOS: React.FC = () => {
   const uploadCustomerPhotosToR2 = async (
     recordId: string
   ): Promise<Array<{ url: string; productId?: string }>> => {
-    if (!Boolean(settings.enableCustomerDetails) || customerPhotos.length === 0) return [];
+    if (!isCustomerDetailsActive || customerPhotos.length === 0) return [];
 
     const uploaded: Array<{ url: string; productId?: string }> = [];
     for (let i = 0; i < customerPhotos.length; i++) {
       setProcessingLabel(`Inapakia picha ${i + 1}/${customerPhotos.length}...`);
       const photo = customerPhotos[i];
-      const uploadRes = await CloudflareApi.uploadCustomerPhoto(photo.file, recordId, i);
+      const fileToUpload = dataUrlToJpegFile(
+        photo.dataUrl,
+        `customer_${recordId}_${i}_${Date.now()}.jpg`
+      );
+      const uploadRes = await CloudflareApi.uploadCustomerPhoto(fileToUpload, recordId, i);
       if (!uploadRes?.success || !uploadRes.url) {
         throw new Error(`Imeshindwa kupakia picha ya ${i + 1} kwenye R2.`);
       }
@@ -1017,7 +1144,7 @@ export const NewSalePOS: React.FC = () => {
     uploadedEntries: Array<{ url: string; productId?: string }>,
     sale: Sale
   ): Promise<CustomerRecord | null> => {
-    if (!Boolean(settings.enableCustomerDetails)) return null;
+    if (!isCustomerDetailsActive) return null;
 
     setProcessingLabel('Inahifadhi taarifa za mteja...');
     const now = new Date().toISOString();
@@ -1208,7 +1335,7 @@ export const NewSalePOS: React.FC = () => {
     setProcessingLabel('');
 
     try {
-      const customerRecordId = Boolean(settings.enableCustomerDetails) ? generateUUID() : '';
+      const customerRecordId = isCustomerDetailsActive ? generateUUID() : '';
       const uploadedEntries = customerRecordId
         ? await uploadCustomerPhotosToR2(customerRecordId)
         : [];
@@ -1539,7 +1666,7 @@ export const NewSalePOS: React.FC = () => {
                 (sellingRef > 0 && unitPriceNum < sellingRef));
             const decimalUnit = isDecimalUnit(item.product.unit);
             const itemPhotos = getProductPhotos(item.product.id);
-            const showProductCamera = Boolean(settings.enableCustomerDetails);
+            const showProductCamera = isCustomerDetailsActive;
             const itemPhotoLimitReached = itemPhotos.length >= MAX_PHOTOS_PER_PRODUCT;
 
             return (
@@ -1668,12 +1795,12 @@ export const NewSalePOS: React.FC = () => {
                       <div key={photo.id} className="relative shrink-0 group">
                         <button
                           type="button"
-                          onClick={() => setPreviewCustomerPhotoUrl(photo.previewUrl)}
+                          onClick={() => setPreviewCustomerPhotoUrl(photo.dataUrl)}
                           className="block rounded-lg overflow-hidden border border-emerald-500/40"
                           title={`Picha ${pIdx + 1} • ${photo.sizeKb} KB`}
                         >
                           <img
-                            src={photo.previewUrl}
+                            src={photo.dataUrl}
                             alt={`${item.product.name} ${pIdx + 1}`}
                             className="w-10 h-10 object-cover"
                           />
@@ -1731,7 +1858,7 @@ export const NewSalePOS: React.FC = () => {
       {(() => {
         const isAssistantEnabled = Boolean(settings.enableSalesAssistant);
         const isAssistantMissing = isAssistantEnabled && !assistantName.trim();
-        const isCustomerDetailsEnabled = Boolean(settings.enableCustomerDetails);
+        const isCustomerDetailsEnabled = isCustomerDetailsActive;
         const isCustomerNameMissing = isCustomerDetailsEnabled && !customerName.trim();
         const isCustomerPhoneMissing = isCustomerDetailsEnabled && !customerPhone.trim();
         const isCustomerPhotosMissing = isCustomerDetailsEnabled && customerPhotos.length === 0;
@@ -1930,16 +2057,8 @@ export const NewSalePOS: React.FC = () => {
               </div>
             </div>
 
-            {/* Camera Input & Capture Trigger (supports up to 3 photos per added product) */}
+            {/* In-App Camera Trigger (supports up to 3 photos per added product without leaving the app) */}
             <div>
-              <input
-                ref={customerCameraInputRef}
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={handleCustomerCameraCapture}
-                className="hidden"
-              />
               {(() => {
                 const maxAllowedForCart = Math.min(
                   MAX_TOTAL_CUSTOMER_PHOTOS,
@@ -2033,12 +2152,12 @@ export const NewSalePOS: React.FC = () => {
                     >
                       <button
                         type="button"
-                        onClick={() => setPreviewCustomerPhotoUrl(photo.previewUrl)}
+                        onClick={() => setPreviewCustomerPhotoUrl(photo.dataUrl)}
                         className="flex items-center gap-2.5 min-w-0 flex-1 text-left"
                         title="Bonyeza kuona picha kubwa"
                       >
                         <img
-                          src={photo.previewUrl}
+                          src={photo.dataUrl}
                           alt={photo.productName ? `${photo.productName} - Picha ${index + 1}` : `Picha ya ${index + 1}`}
                           className="w-11 h-11 rounded-lg object-cover border border-slate-700 shrink-0"
                         />
@@ -2551,7 +2670,7 @@ export const NewSalePOS: React.FC = () => {
             }
 
             if (
-              Boolean(settings.enableCustomerDetails) &&
+              isCustomerDetailsActive &&
               (!customerName.trim() || !customerPhone.trim() || customerPhotos.length === 0)
             ) {
               addDraftToCart(payload.items);
@@ -2568,9 +2687,7 @@ export const NewSalePOS: React.FC = () => {
             setProcessingLabel('');
 
             try {
-              const customerRecordId = Boolean(settings.enableCustomerDetails)
-                ? generateUUID()
-                : '';
+              const customerRecordId = isCustomerDetailsActive ? generateUUID() : '';
               const uploadedEntries = customerRecordId
                 ? await uploadCustomerPhotosToR2(customerRecordId)
                 : [];
@@ -2632,6 +2749,25 @@ export const NewSalePOS: React.FC = () => {
           }}
         />
       )}
+
+      {/* In-App Multi-Photo Live Camera Modal (stays inside WebView — zero Android restart on 2nd/3rd photo) */}
+      <InAppCameraModal
+        isOpen={isCameraModalOpen}
+        productName={cameraTarget?.productName}
+        maxPhotos={MAX_PHOTOS_PER_PRODUCT}
+        existingPhotos={
+          cameraTarget?.productId
+            ? customerPhotos.filter(p => p.productId === cameraTarget.productId)
+            : customerPhotos.filter(p => !p.productId)
+        }
+        onCapture={handleInAppCameraCapture}
+        onRemovePhoto={handleRemoveCustomerPhoto}
+        onFallbackFilePick={handleFallbackPhotoFiles}
+        onClose={() => {
+          setIsCameraModalOpen(false);
+          setCameraTarget(null);
+        }}
+      />
 
       {/* Full-screen Customer Photo Preview Modal */}
       {previewCustomerPhotoUrl && (
