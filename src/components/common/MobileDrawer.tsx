@@ -31,6 +31,7 @@ import {
   FolderPlus,
   FolderTree,
   Truck,
+  Contact,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { PurchaseIcon } from './PurchaseIcon';
@@ -475,6 +476,15 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       icon: Database,
       iconColor: 'text-lime-400',
       iconBg: 'bg-lime-500/15',
+      category: 'system',
+    },
+    {
+      id: 'customers',
+      label: 'Taarifa za Wateja',
+      subtitle: 'Customer Search & Photos',
+      icon: Contact,
+      iconColor: 'text-emerald-400',
+      iconBg: 'bg-emerald-500/15',
       category: 'system',
     },
     {

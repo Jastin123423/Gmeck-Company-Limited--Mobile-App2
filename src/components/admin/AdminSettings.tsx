@@ -37,6 +37,7 @@ export const AdminSettings: React.FC = () => {
   const [receiptHeaderNote, setReceiptHeaderNote] = useState(dbState.settings.receiptHeaderNote);
   const [receiptFooterNote, setReceiptFooterNote] = useState(dbState.settings.receiptFooterNote);
   const enableSalesAssistant = Boolean(dbState.settings.enableSalesAssistant);
+  const enableCustomerDetails = Boolean(dbState.settings.enableCustomerDetails);
 
   // Admin username state
   const [adminUsername, setAdminUsername] = useState(currentUser?.username || 'Admin');
@@ -171,6 +172,7 @@ export const AdminSettings: React.FC = () => {
       receiptHeaderNote,
       receiptFooterNote,
       enableSalesAssistant,
+      enableCustomerDetails,
     });
 
     addToast({
@@ -189,6 +191,18 @@ export const AdminSettings: React.FC = () => {
       description: nextValue
         ? 'Sellers can now enter Jina la Muuzaji at checkout, and Assistant Performance is active in Reports.'
         : 'Sales Assistant feature is turned off across POS and Reports.',
+    });
+  };
+
+  const handleToggleCustomerDetails = () => {
+    const nextValue = !enableCustomerDetails;
+    updateSettings({ enableCustomerDetails: nextValue });
+    addToast({
+      type: nextValue ? 'success' : 'info',
+      title: nextValue ? 'Taarifa za Mteja Imewashwa' : 'Taarifa za Mteja Imezimwa',
+      description: nextValue
+        ? 'Wauzaji lazima wajaze Jina la Mteja, Namba ya Simu, na kupiga picha (1–3) za bidhaa kabla ya kukamilisha mauzo.'
+        : 'Sehemu ya Taarifa za Mteja na picha imezimwa kwenye New Sale POS.',
     });
   };
 
@@ -400,6 +414,57 @@ export const AdminSettings: React.FC = () => {
               <span
                 className={`inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition-transform ${
                   enableSalesAssistant ? 'translate-x-7' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+        </div>
+
+        {/* Taarifa za Mteja (Customer Details & Product Photos) Toggle */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
+                enableCustomerDetails
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                  : 'bg-slate-800 border-slate-700 text-slate-400'
+              }`}>
+                <Camera className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-xs sm:text-sm font-bold text-white uppercase tracking-wider">
+                    Taarifa za Mteja (Customer Details &amp; Photos)
+                  </h3>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${
+                    enableCustomerDetails
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                      : 'bg-slate-800 text-slate-400 border-slate-700'
+                  }`}>
+                    {enableCustomerDetails ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  When enabled, sellers must fill <span className="text-slate-200 font-medium">Jina la Mteja</span>, <span className="text-slate-200 font-medium">Namba ya Simu</span>, and capture up to <span className="text-slate-200 font-medium">3 product photos</span> using the camera after Njia ya Malipo before completing an order.
+                </p>
+              </div>
+            </div>
+
+            <button
+              id="toggle-customer-details-btn"
+              type="button"
+              role="switch"
+              aria-checked={enableCustomerDetails}
+              onClick={handleToggleCustomerDetails}
+              className={`relative inline-flex h-8 w-14 shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/50 self-end sm:self-center ${
+                enableCustomerDetails
+                  ? 'bg-emerald-600 border-emerald-500'
+                  : 'bg-slate-800 border-slate-700'
+              }`}
+            >
+              <span
+                className={`inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition-transform ${
+                  enableCustomerDetails ? 'translate-x-7' : 'translate-x-1'
                 }`}
               />
             </button>

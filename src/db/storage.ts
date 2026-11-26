@@ -18,6 +18,7 @@ import {
   AppNotification,
   SaleEditRequest,
   StockTransfer,
+  CustomerRecord,
 } from '../types';
 import {
   INITIAL_USERS,
@@ -56,6 +57,7 @@ export interface DatabaseState {
   debts: DebtRecord[];
   notifications: AppNotification[];
   saleEditRequests: SaleEditRequest[];
+  customerRecords: CustomerRecord[];
 }
 
 type DBListener = () => void;
@@ -229,6 +231,7 @@ class LocalDatabase {
 
     const debts = this.loadTable<DebtRecord[]>('debts', INITIAL_DEBTS);
     const notifications = this.loadTable<AppNotification[]>('notifications', []);
+    const customerRecords = this.loadTable<CustomerRecord[]>('customer_records', []);
 
     this.memoryCache = {
       shops: shops || [],
@@ -249,6 +252,7 @@ class LocalDatabase {
       debts: debts || [],
       notifications: notifications || [],
       saleEditRequests: saleEditRequests || [],
+      customerRecords: customerRecords || [],
     };
 
     return this.memoryCache;
@@ -627,6 +631,28 @@ class LocalDatabase {
     this.notify();
   }
 
+  // --- Customer Records ---
+  public getCustomerRecords(): CustomerRecord[] {
+    return this.getState().customerRecords || [];
+  }
+
+  public saveCustomerRecords(records: CustomerRecord[]): void {
+    if (!this.memoryCache) this.init();
+    this.memoryCache!.customerRecords = records;
+    this.saveTable('customer_records', records);
+    this.notify();
+  }
+
+  public addCustomerRecord(record: CustomerRecord): void {
+    if (!this.memoryCache) this.init();
+    const current = this.memoryCache!.customerRecords || [];
+    const filtered = current.filter(r => r.id !== record.id);
+    const updated = [record, ...filtered].slice(0, 500);
+    this.memoryCache!.customerRecords = updated;
+    this.saveTable('customer_records', updated);
+    this.notify();
+  }
+
   // --- Backup & Restore ---
   public exportFullBackup(): string {
     const data = this.getState();
@@ -667,6 +693,7 @@ class LocalDatabase {
       this.saveTable('debts', d.debts || INITIAL_DEBTS);
       this.saveTable('notifications', d.notifications || []);
       this.saveTable('sale_edit_requests', d.saleEditRequests || []);
+      this.saveTable('customer_records', d.customerRecords || []);
 
       this.init();
       this.notify();

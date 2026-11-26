@@ -417,6 +417,35 @@ export interface BusinessSettings {
   logoUrl?: string;
   themePrimaryColor?: string;
   enableSalesAssistant?: boolean;
+  enableCustomerDetails?: boolean;
+}
+
+export interface CustomerRecordItem {
+  productId: string;
+  productName: string;
+  variation?: string;
+  sku?: string;
+  unit?: string;
+  quantity: number;
+  purchasePrice: number;
+  unitPrice: number;
+  total: number;
+  imageUrls: string[];
+}
+
+export interface CustomerRecord {
+  id: string;
+  customerName: string;
+  phoneNumber: string;
+  imageUrls: string[];
+  saleId?: string;
+  receiptNumber?: string;
+  shopId?: string;
+  shopName?: string;
+  saleDate?: string;
+  items?: CustomerRecordItem[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AuditLog {
@@ -469,7 +498,9 @@ export type SyncOperation =
   | 'REVIEW_SALE_EDIT_REQUEST'
   | 'CREATE_DEBT'
   | 'UPDATE_DEBT'
-  | 'DELETE_DEBT';
+  | 'DELETE_DEBT'
+  | 'CREATE_CUSTOMER_RECORD'
+  | 'DELETE_CUSTOMER_RECORD';
 
 export interface SyncQueueItem {
   id: string;

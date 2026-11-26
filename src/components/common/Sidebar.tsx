@@ -26,6 +26,7 @@ import {
   FolderPlus,
   FolderTree,
   Truck,
+  Contact,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { PurchaseIcon } from './PurchaseIcon';
@@ -406,6 +407,12 @@ export const Sidebar: React.FC = () => {
       label: 'Shop Import & Export',
       icon: Database,
       iconColor: 'text-lime-400',
+    },
+    {
+      id: 'customers',
+      label: 'Taarifa za Wateja',
+      icon: Contact,
+      iconColor: 'text-emerald-400',
     },
     { id: 'settings', label: 'Account Settings', icon: Settings, iconColor: 'text-sky-300' },
   ];

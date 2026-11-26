@@ -1103,6 +1103,8 @@ export class SyncService {
         mergedSettings.enableTax = !!cloudData.settings.enable_tax;
       if (cloudData.settings.enable_sales_assistant !== undefined)
         mergedSettings.enableSalesAssistant = !!cloudData.settings.enable_sales_assistant;
+      if (cloudData.settings.enable_customer_details !== undefined)
+        mergedSettings.enableCustomerDetails = !!cloudData.settings.enable_customer_details;
       if (cloudData.settings.receipt_header_note)
         mergedSettings.receiptHeaderNote =
           cloudData.settings.receipt_header_note;
@@ -1111,6 +1113,61 @@ export class SyncService {
           cloudData.settings.receipt_footer_note;
 
       db.saveSettings(mergedSettings);
+    }
+
+    // Apply customer records
+    if (Array.isArray(cloudData.customerRecords) && cloudData.customerRecords.length > 0) {
+      const localRecords = db.getCustomerRecords();
+      const mergedMap = new Map(localRecords.map(r => [r.id, r]));
+
+      cloudData.customerRecords.forEach((cr: any) => {
+        if (!cr?.id) return;
+        let parsedUrls: string[] = [];
+        try {
+          parsedUrls =
+            typeof cr.image_urls === 'string'
+              ? JSON.parse(cr.image_urls)
+              : Array.isArray(cr.image_urls)
+                ? cr.image_urls
+                : Array.isArray(cr.imageUrls)
+                  ? cr.imageUrls
+                  : [];
+        } catch {
+          parsedUrls = [];
+        }
+
+        let parsedItems: any[] = [];
+        try {
+          parsedItems =
+            typeof cr.items_json === 'string'
+              ? JSON.parse(cr.items_json)
+              : Array.isArray(cr.items)
+                ? cr.items
+                : [];
+        } catch {
+          parsedItems = [];
+        }
+
+        mergedMap.set(cr.id, {
+          id: cr.id,
+          customerName: cr.customer_name || cr.customerName || '',
+          phoneNumber: cr.phone_number || cr.phoneNumber || '',
+          imageUrls: parsedUrls.filter((u): u is string => typeof u === 'string').slice(0, 24),
+          saleId: cr.sale_id || cr.saleId || undefined,
+          receiptNumber: cr.receipt_number || cr.receiptNumber || undefined,
+          shopId: cr.shop_id || cr.shopId || undefined,
+          shopName: cr.shop_name || cr.shopName || undefined,
+          saleDate: cr.sale_date || cr.saleDate || cr.created_at || cr.createdAt || undefined,
+          items: Array.isArray(parsedItems) ? parsedItems : [],
+          createdAt: cr.created_at || cr.createdAt || new Date().toISOString(),
+          updatedAt: cr.updated_at || cr.updatedAt || new Date().toISOString(),
+        });
+      });
+
+      const mergedList = Array.from(mergedMap.values()).sort((a, b) =>
+        b.createdAt.localeCompare(a.createdAt)
+      );
+      db.saveCustomerRecords(mergedList);
     }
 
     // Apply stock transfers
