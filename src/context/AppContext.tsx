@@ -99,10 +99,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return 'dashboard';
   });
 
-  // Restrict regular sellers strictly to NewSalePOS and Settings
+  // Restrict regular sellers strictly to NewSalePOS, Settings, and Expenses (if granted canRecordExpenses)
   useEffect(() => {
     if (currentUser && !hasAdminAccess(currentUser)) {
-      if (activeTab !== 'new_sale' && activeTab !== 'settings') {
+      const canAddExpenses = Boolean(currentUser.permissions?.canRecordExpenses);
+      const allowed =
+        activeTab === 'new_sale' ||
+        activeTab === 'settings' ||
+        (canAddExpenses && activeTab === 'expenses');
+      if (!allowed) {
         setActiveTab('new_sale');
       }
     }

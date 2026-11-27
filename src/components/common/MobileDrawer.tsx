@@ -197,6 +197,16 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
       category: 'core',
     },
     {
+      id: 'expenses',
+      label: 'Add Expense',
+      subtitle: 'Record Shop Expenses',
+      icon: TrendingDown,
+      iconColor: 'text-rose-400',
+      iconBg: 'bg-rose-500/15',
+      category: 'operations',
+      requiresPermission: 'canRecordExpenses',
+    },
+    {
       id: 'settings',
       label: 'Settings',
       subtitle: 'Theme Colors',
@@ -521,7 +531,11 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
   });
 
   const handleNavClick = (tabId: string) => {
-    setActiveTab(tabId);
+    if (!showAdminMenu && tabId === 'expenses') {
+      openExpensesSubTab('add');
+    } else {
+      setActiveTab(tabId);
+    }
     onClose();
   };
 

@@ -4,7 +4,7 @@ import { generateUUID } from '../utils/crypto';
 import { generateReceiptNumber } from '../utils/formatters';
 import { NotificationService } from './notificationService';
 import { StoreService } from './storeService';
-import { canAccessShopAsAdmin, getShopAdminShopIds, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
+import { canAccessShopAsAdmin, getShopAdminShopIds, hasAdminAccess, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export interface CartItemInput {
   productId: string;
@@ -143,6 +143,12 @@ export class SalesService {
         };
       }
       if (requestedYMD < todayLocalYMD) {
+        if (!hasAdminAccess(currentUser)) {
+          return {
+            success: false,
+            error: 'Permission Denied: Only Admin can record sales for a previous date.',
+          };
+        }
         const [y, m, d] = requestedYMD.split('-').map(Number);
         const backdated = new Date(
           y,

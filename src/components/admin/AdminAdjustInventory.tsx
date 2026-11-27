@@ -758,20 +758,43 @@ export const AdminAdjustInventory: React.FC = () => {
                   const hasMultipleLocations = visibleLocs.length > 1;
                   const isExpanded = expandedProductIds.has(product.id);
                   const singleLoc = visibleLocs.length === 1 ? visibleLocs[0] : null;
-                  const isSingleAdded = singleLoc
-                    ? rows.some(r => r.rowKey === `${product.id}::${singleLoc.key}`)
-                    : false;
+                  const allVisibleAdded =
+                    visibleLocs.length > 0 &&
+                    visibleLocs.every(loc =>
+                      rows.some(r => r.rowKey === `${product.id}::${loc.key}`)
+                    );
                   const addedCountForProduct = visibleLocs.filter(loc =>
                     rows.some(r => r.rowKey === `${product.id}::${loc.key}`)
                   ).length;
+                  const nextUnaddedLoc =
+                    visibleLocs.find(
+                      loc => !rows.some(r => r.rowKey === `${product.id}::${loc.key}`)
+                    ) || visibleLocs[0];
 
                   return (
                     <div
                       key={product.id}
                       className="p-3 sm:px-4 space-y-2.5 hover:bg-slate-900/60 transition-colors"
                     >
-                      {/* Product Info Row */}
-                      <div className="flex items-center justify-between gap-2.5">
+                      {/* Clickable Product Info Row — adds directly to staged list even without picking location first */}
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          if (!allVisibleAdded && nextUnaddedLoc) {
+                            handleAddProductToBatch(product, nextUnaddedLoc.key);
+                          }
+                        }}
+                        onKeyDown={e => {
+                          if ((e.key === 'Enter' || e.key === ' ') && !allVisibleAdded && nextUnaddedLoc) {
+                            e.preventDefault();
+                            handleAddProductToBatch(product, nextUnaddedLoc.key);
+                          }
+                        }}
+                        className={`flex items-center justify-between gap-2.5 rounded-lg transition-colors ${
+                          allVisibleAdded ? 'cursor-default' : 'cursor-pointer'
+                        }`}
+                      >
                         <div className="flex items-center gap-2.5 min-w-0">
                           <ProductThumbnail product={product} size="sm" />
                           <div className="min-w-0">
@@ -793,14 +816,17 @@ export const AdminAdjustInventory: React.FC = () => {
                           </div>
                         </div>
 
-                        {/* Single-location direct Add button */}
-                        {singleLoc && (
+                        {/* Direct Add button (works for both single-location and multi-location products) */}
+                        {singleLoc ? (
                           <button
                             type="button"
-                            onClick={() => handleAddProductToBatch(product, singleLoc.key)}
-                            disabled={isSingleAdded}
+                            onClick={e => {
+                              e.stopPropagation();
+                              handleAddProductToBatch(product, singleLoc.key);
+                            }}
+                            disabled={allVisibleAdded}
                             className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 border shrink-0 transition-all ${
-                              isSingleAdded
+                              allVisibleAdded
                                 ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 cursor-default'
                                 : singleLoc.type === 'STORE'
                                   ? 'bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 border-indigo-500/30'
@@ -822,10 +848,38 @@ export const AdminAdjustInventory: React.FC = () => {
                             >
                               {singleLoc.currentQty}
                             </span>
-                            {isSingleAdded ? (
+                            {allVisibleAdded ? (
                               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                             ) : (
                               <Plus className="w-3.5 h-3.5 shrink-0" />
+                            )}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={e => {
+                              e.stopPropagation();
+                              if (!allVisibleAdded && nextUnaddedLoc) {
+                                handleAddProductToBatch(product, nextUnaddedLoc.key);
+                              }
+                            }}
+                            disabled={allVisibleAdded}
+                            className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 border shrink-0 transition-all ${
+                              allVisibleAdded
+                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 cursor-default'
+                                : 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-500/30'
+                            }`}
+                          >
+                            {allVisibleAdded ? (
+                              <>
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                <span>Added</span>
+                              </>
+                            ) : (
+                              <>
+                                <Plus className="w-3.5 h-3.5 shrink-0" />
+                                <span>Add</span>
+                              </>
                             )}
                           </button>
                         )}

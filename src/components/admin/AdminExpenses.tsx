@@ -218,14 +218,15 @@ export const AdminExpenses: React.FC = () => {
 
   const initAddExpenseForm = () => {
     setEditingExpense(null);
-    const defaultShop =
-      shopAdmin && !platformAdmin
-        ? selectedShopId && selectedShopId !== 'ALL' && managedShopIds.includes(selectedShopId)
-          ? selectedShopId
-          : shops[0]?.id || ''
-        : selectedShopId && selectedShopId !== 'ALL'
-          ? selectedShopId
-          : 'GENERAL';
+    const defaultShop = !platformAdmin
+      ? selectedShopId &&
+        selectedShopId !== 'ALL' &&
+        shops.some(s => s.id === selectedShopId)
+        ? selectedShopId
+        : shops[0]?.id || ''
+      : selectedShopId && selectedShopId !== 'ALL'
+        ? selectedShopId
+        : 'GENERAL';
     setShopIdInput(defaultShop);
     setTitle('');
     setCategory('ELECTRICITY');
@@ -291,8 +292,8 @@ export const AdminExpenses: React.FC = () => {
       return;
     }
 
-    if (shopAdmin && !platformAdmin && (!shopIdInput || shopIdInput === 'GENERAL')) {
-      setFormError('Please select a managed shop for this expense.');
+    if (!platformAdmin && (!shopIdInput || shopIdInput === 'GENERAL')) {
+      setFormError('Please select your shop for this expense.');
       return;
     }
 
@@ -552,15 +553,15 @@ export const AdminExpenses: React.FC = () => {
           >
             <div>
               <label className="block text-slate-300 font-semibold mb-1.5">
-                Shop / Unit {shopAdmin && !platformAdmin ? '*' : ''}
+                Shop / Unit {!platformAdmin ? '*' : ''}
               </label>
               <select
                 value={shopIdInput}
                 onChange={e => setShopIdInput(e.target.value)}
-                required={shopAdmin && !platformAdmin}
+                required={!platformAdmin}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
-                {(!shopAdmin || platformAdmin) && (
+                {platformAdmin && (
                   <option value="GENERAL">🏢 General Company (All Shops)</option>
                 )}
                 {shops.map(s => (

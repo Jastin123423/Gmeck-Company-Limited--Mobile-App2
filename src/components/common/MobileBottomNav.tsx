@@ -6,6 +6,7 @@ import {
   Menu,
   Boxes,
   Palette,
+  TrendingDown,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { getShopAdminShopIds, hasAdminAccess, isPlatformAdmin, isShopAdmin } from '../../utils/permissions';
@@ -15,14 +16,15 @@ interface MobileBottomNavProps {
 }
 
 export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) => {
-  const { currentUser, activeTab, setActiveTab, sellerColor, dbState } = useApp();
+  const { currentUser, activeTab, setActiveTab, openExpensesSubTab, sellerColor, dbState } = useApp();
 
   if (!currentUser) return null;
 
   const isSeller = !hasAdminAccess(currentUser);
   const isSellerRole = currentUser.role === 'SELLER';
+  const sellerCanAddExpenses = Boolean(currentUser.permissions?.canRecordExpenses);
 
-  // Regular Seller: show ONLY POS, Color Settings, and Menu (no Home/Products/Madeni)
+  // Regular Seller: show POS, Expenses (only when granted), Color Settings, and Menu
   if (isSeller) {
     return (
       <nav
@@ -45,6 +47,24 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMenu }) 
             />
             <span className="text-[10px] font-semibold tracking-tight leading-none">POS</span>
           </button>
+
+          {sellerCanAddExpenses && (
+            <button
+              id="mobile-seller-expenses-btn"
+              onClick={() => openExpensesSubTab('add')}
+              className={`flex-1 flex flex-col items-center justify-center py-1.5 px-2 rounded-xl font-medium transition ${
+                activeTab === 'expenses'
+                  ? 'text-white'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              style={activeTab === 'expenses' ? { color: sellerColor.primary } : undefined}
+            >
+              <TrendingDown
+                className={`w-5 h-5 mb-1 ${activeTab === 'expenses' ? 'scale-110' : ''} transition-transform`}
+              />
+              <span className="text-[10px] font-semibold tracking-tight leading-none">Expenses</span>
+            </button>
+          )}
 
           <button
             id="mobile-seller-settings-btn"

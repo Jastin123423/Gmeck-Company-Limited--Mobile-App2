@@ -172,6 +172,13 @@ export const Sidebar: React.FC = () => {
       icon: ShoppingCart,
       iconColor: 'text-emerald-400',
     },
+    {
+      id: 'expenses',
+      label: 'Add Expense',
+      icon: TrendingDown,
+      iconColor: 'text-rose-400',
+      requiresPermission: 'canRecordExpenses',
+    },
     { id: 'settings', label: 'Settings', icon: Settings, iconColor: 'text-sky-300' },
   ];
 
@@ -693,7 +700,13 @@ export const Sidebar: React.FC = () => {
               <button
                 key={item.id}
                 id={`nav-${item.id}`}
-                onClick={() => setActiveTab(item.id)}
+                onClick={() => {
+                  if (!showAdminMenu && item.id === 'expenses') {
+                    openExpensesSubTab('add');
+                  } else {
+                    setActiveTab(item.id);
+                  }
+                }}
                 className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
                   isActive
                     ? 'text-white shadow-sm font-semibold'

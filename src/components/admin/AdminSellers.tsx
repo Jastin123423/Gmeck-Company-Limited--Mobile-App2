@@ -202,7 +202,7 @@ const SellerActionSheet: React.FC<{
           <Item
             icon={<Edit className="w-4 h-4 text-slate-400" />}
             label="Edit Seller"
-            hint={platformAdmin ? 'Name, shops, permissions, color' : 'Name, shops, color'}
+            hint={platformAdmin ? 'Name, shops, permissions, color' : 'Name, shops, expense access, color'}
             onClick={onEdit}
           />
           <Item
@@ -410,7 +410,7 @@ export const AdminSellers: React.FC = () => {
       ? (s.assignedShopIds || []).filter(id => allowedShopIds.includes(id))
       : s.assignedShopIds || [];
     setAssignedShopIds(scopedSelection);
-    setSellerPermissions(platformAdmin ? s.permissions || {} : {});
+    setSellerPermissions(platformAdmin || shopAdm ? { ...(s.permissions || {}) } : {});
     setFormError('');
     setIsEditModalOpen(true);
   };
@@ -432,6 +432,35 @@ export const AdminSellers: React.FC = () => {
     setSellerPermissions(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
+  const handleQuickToggleSellerExpenses = (seller: User) => {
+    const nextAllowed = !seller.permissions?.canRecordExpenses;
+    const res = SellerService.updateSeller(
+      seller.id,
+      {
+        permissions: {
+          ...(seller.permissions || {}),
+          canRecordExpenses: nextAllowed,
+        },
+      },
+      currentUser
+    );
+    if (res.success) {
+      addToast({
+        type: 'success',
+        title: nextAllowed ? 'Expense Access Granted' : 'Expense Access Revoked',
+        description: nextAllowed
+          ? `${seller.name} can now add expenses for their assigned shop.`
+          : `${seller.name} can no longer add shop expenses.`,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Update Failed',
+        description: res.error || 'Could not update expense permission.',
+      });
+    }
+  };
+
   // ── Submit handlers ────────────────────────────────────────
   const handleCreateSeller = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -449,7 +478,11 @@ export const AdminSellers: React.FC = () => {
         password,
         color: selectedColor,
         assignedShopIds,
-        ...(platformAdmin ? { permissions: sellerPermissions } : {}),
+        ...(platformAdmin
+          ? { permissions: sellerPermissions }
+          : shopAdm
+            ? { permissions: { canRecordExpenses: !!sellerPermissions.canRecordExpenses } }
+            : {}),
       },
       currentUser
     );
@@ -474,7 +507,11 @@ export const AdminSellers: React.FC = () => {
         name: name.trim(),
         color: selectedColor,
         assignedShopIds,
-        ...(platformAdmin ? { permissions: sellerPermissions } : {}),
+        ...(platformAdmin
+          ? { permissions: sellerPermissions }
+          : shopAdm
+            ? { permissions: { canRecordExpenses: !!sellerPermissions.canRecordExpenses } }
+            : {}),
       },
       currentUser
     );
@@ -484,7 +521,7 @@ export const AdminSellers: React.FC = () => {
         title: 'Seller Updated',
         description: platformAdmin
           ? `Profile, shop assignments, and permissions for '${name}' updated.`
-          : `Profile and shop assignments for '${name}' updated.`,
+          : `Profile, shop assignments, and expense access for '${name}' updated.`,
       });
       setIsEditModalOpen(false);
     } else {
@@ -654,9 +691,37 @@ export const AdminSellers: React.FC = () => {
                 </div>
               </div>
 
-              {platformAdmin && (
+              {platformAdmin ? (
                 <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} />
-              )}
+              ) : shopAdm ? (
+                <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-950 border border-slate-800 hover:border-lime-500/40 cursor-pointer transition">
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-xs font-semibold text-slate-100">
+                      Allow Adding Shop Expenses
+                    </span>
+                    <span className="block text-[10px] text-slate-400 mt-0.5">
+                      Grants this seller access to record expenses for their assigned shop.
+                    </span>
+                  </span>
+                  <span
+                    className={`relative shrink-0 w-10 h-5 rounded-full transition-colors ${
+                      sellerPermissions.canRecordExpenses ? 'bg-emerald-600' : 'bg-slate-700'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!sellerPermissions.canRecordExpenses}
+                      onChange={() => togglePermission('canRecordExpenses')}
+                      className="sr-only"
+                    />
+                    <span
+                      className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                        sellerPermissions.canRecordExpenses ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </span>
+                </label>
+              ) : null}
 
               <div>
                 <label className="block text-slate-300 font-medium mb-1.5">
@@ -849,8 +914,8 @@ export const AdminSellers: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Permission badges — strictly visible to Platform Admin only */}
-                {platformAdmin && (
+                {/* Permission badges — full selector for Platform Admin, Add Expenses toggle for Shop Admin */}
+                {platformAdmin ? (
                   <div className="mb-3">
                     <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider block mb-1.5 flex items-center gap-1">
                       <Shield className="w-3 h-3 text-blue-400" />
@@ -871,7 +936,34 @@ export const AdminSellers: React.FC = () => {
                       )}
                     </div>
                   </div>
-                )}
+                ) : shopAdm && !isShopAdmin(seller) ? (
+                  <div className="mb-3 flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800/90">
+                    <div className="min-w-0">
+                      <span className="block text-[11px] font-semibold text-slate-200 leading-tight">
+                        Add Shop Expenses
+                      </span>
+                      <span className="block text-[10px] text-slate-500 leading-tight mt-0.5">
+                        {seller.permissions?.canRecordExpenses
+                          ? 'Allowed to record shop expenses'
+                          : 'POS & Settings only'}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleQuickToggleSellerExpenses(seller)}
+                      aria-label={`Toggle expense access for ${seller.name}`}
+                      className={`relative shrink-0 w-10 h-5 rounded-full transition-colors ${
+                        seller.permissions?.canRecordExpenses ? 'bg-emerald-600' : 'bg-slate-700'
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                          seller.permissions?.canRecordExpenses ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                ) : null}
 
                 {/* Meta stats */}
                 <div className="p-3 rounded-xl bg-slate-950 border border-slate-800/80 space-y-1.5 text-xs mb-3.5 sm:mb-4">
@@ -1021,9 +1113,37 @@ export const AdminSellers: React.FC = () => {
                 </div>
               </div>
 
-              {platformAdmin && (
+              {platformAdmin ? (
                 <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} />
-              )}
+              ) : shopAdm ? (
+                <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-950 border border-slate-800 hover:border-emerald-500/40 cursor-pointer transition">
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-xs font-semibold text-slate-100">
+                      Allow Adding Shop Expenses
+                    </span>
+                    <span className="block text-[10px] text-slate-400 mt-0.5">
+                      Grants this seller access to record expenses for their assigned shop.
+                    </span>
+                  </span>
+                  <span
+                    className={`relative shrink-0 w-10 h-5 rounded-full transition-colors ${
+                      sellerPermissions.canRecordExpenses ? 'bg-emerald-600' : 'bg-slate-700'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!sellerPermissions.canRecordExpenses}
+                      onChange={() => togglePermission('canRecordExpenses')}
+                      className="sr-only"
+                    />
+                    <span
+                      className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                        sellerPermissions.canRecordExpenses ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </span>
+                </label>
+              ) : null}
 
               <div>
                 <label className="block text-slate-300 font-medium mb-1.5">Signature Color Theme</label>
@@ -1100,9 +1220,37 @@ export const AdminSellers: React.FC = () => {
                   )}
               </div>
 
-              {platformAdmin && (
+              {platformAdmin ? (
                 <PermissionsSelector permissions={sellerPermissions} onToggle={togglePermission} />
-              )}
+              ) : shopAdm ? (
+                <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-950 border border-slate-800 hover:border-emerald-500/40 cursor-pointer transition">
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-xs font-semibold text-slate-100">
+                      Allow Adding Shop Expenses
+                    </span>
+                    <span className="block text-[10px] text-slate-400 mt-0.5">
+                      Grants this seller access to record expenses for their assigned shop.
+                    </span>
+                  </span>
+                  <span
+                    className={`relative shrink-0 w-10 h-5 rounded-full transition-colors ${
+                      sellerPermissions.canRecordExpenses ? 'bg-emerald-600' : 'bg-slate-700'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!sellerPermissions.canRecordExpenses}
+                      onChange={() => togglePermission('canRecordExpenses')}
+                      className="sr-only"
+                    />
+                    <span
+                      className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                        sellerPermissions.canRecordExpenses ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </span>
+                </label>
+              ) : null}
 
               <div>
                 <label className="block text-slate-300 font-medium mb-1.5">Signature Color Theme</label>

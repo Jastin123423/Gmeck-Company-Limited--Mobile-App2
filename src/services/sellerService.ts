@@ -71,7 +71,11 @@ export class SellerService {
     // Scope shop assignments & permissions when created by a Shop Admin or delegated seller
     let finalAssignedShopIds: string[] =
       params.assignedShopIds && params.assignedShopIds.length > 0 ? [...params.assignedShopIds] : [];
-    const finalPermissions: SellerPermissions = platformAdmin ? { ...(params.permissions || {}) } : {};
+    const finalPermissions: SellerPermissions = platformAdmin
+      ? { ...(params.permissions || {}) }
+      : shopAdmin && params.permissions?.canRecordExpenses
+        ? { canRecordExpenses: true }
+        : {};
 
     if (!platformAdmin) {
       if (shopAdmin) {
@@ -227,6 +231,14 @@ export class SellerService {
       } else {
         delete nextPerms.shopAdminShopIds;
       }
+      seller.permissions = nextPerms;
+    } else if (
+      shopAdmin &&
+      params.permissions !== undefined &&
+      params.permissions.canRecordExpenses !== undefined
+    ) {
+      const nextPerms: SellerPermissions = { ...(seller.permissions || {}) };
+      nextPerms.canRecordExpenses = Boolean(params.permissions.canRecordExpenses);
       seller.permissions = nextPerms;
     }
 

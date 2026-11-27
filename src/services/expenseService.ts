@@ -71,6 +71,28 @@ export class ExpenseService {
       }
       shopName = shop.name;
       finalShopId = shop.id;
+    } else if (!platformAdmin) {
+      const assignedShopIds = currentUser.assignedShopIds || [];
+      const resolvedShopId = requestedShopId || (assignedShopIds.length === 1 ? assignedShopIds[0] : undefined);
+      if (params.isCompanyExpense || params.shopId === 'GENERAL' || !resolvedShopId) {
+        return {
+          success: false,
+          error: 'Please select your assigned shop for this expense.',
+        };
+      }
+      if (!assignedShopIds.includes(resolvedShopId)) {
+        return {
+          success: false,
+          error: 'Permission Denied: You can only record expenses for your assigned shop.',
+        };
+      }
+      isCompany = false;
+      const shop = db.getShops().find(s => s.id === resolvedShopId);
+      if (!shop) {
+        return { success: false, error: 'Selected shop does not exist.' };
+      }
+      shopName = shop.name;
+      finalShopId = shop.id;
     } else if (!isCompany && requestedShopId) {
       const shop = db.getShops().find(s => s.id === requestedShopId);
       if (!shop) {
@@ -364,6 +386,9 @@ export class ExpenseService {
     if (currentUser && !isPlatformAdmin(currentUser) && isShopAdmin(currentUser)) {
       const managedShopIds = getShopAdminShopIds(currentUser);
       list = list.filter(e => !!e.shopId && managedShopIds.includes(e.shopId));
+    } else if (currentUser && !isPlatformAdmin(currentUser)) {
+      const assignedShopIds = currentUser.assignedShopIds || [];
+      list = list.filter(e => !!e.shopId && assignedShopIds.includes(e.shopId));
     }
 
     if (filter?.shopId && filter.shopId !== 'ALL') {
