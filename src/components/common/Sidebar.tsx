@@ -27,6 +27,7 @@ import {
   FolderTree,
   Truck,
   Contact,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { PurchaseIcon } from './PurchaseIcon';
@@ -343,6 +344,18 @@ export const Sidebar: React.FC = () => {
           icon: Warehouse,
           iconColor: 'text-indigo-400',
         },
+        {
+          id: 'ADJUST',
+          label: 'Adjust Inventory',
+          icon: SlidersHorizontal,
+          iconColor: 'text-amber-400',
+        },
+        {
+          id: 'ADJUSTMENT_LIST',
+          label: 'Adjustment List',
+          icon: ClipboardList,
+          iconColor: 'text-cyan-400',
+        },
       ],
     },
     {
@@ -622,7 +635,9 @@ export const Sidebar: React.FC = () => {
                                     child.id as 'stores' | 'inventory' | 'transfer' | 'list'
                                   );
                                 } else if (item.id === 'inventory') {
-                                  openInventoryFilter(child.id as 'ALL' | 'SHOP' | 'STORE');
+                                  openInventoryFilter(
+                                    child.id as 'ALL' | 'SHOP' | 'STORE' | 'ADJUST' | 'ADJUSTMENT_LIST'
+                                  );
                                 } else if (item.id === 'purchases') {
                                   openPurchasesSubTab(
                                     child.id as 'add' | 'list' | 'returns' | 'suppliers'

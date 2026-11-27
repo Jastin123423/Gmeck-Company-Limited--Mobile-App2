@@ -9,7 +9,7 @@ import { generateUUID } from '../utils/crypto';
 import { getShopAdminShopIds, hasAdminAccess, isPlatformAdmin, isShopAdmin } from '../utils/permissions';
 
 export type StoresSubTab = 'stores' | 'inventory' | 'transfer' | 'list' | 'transfer_view';
-export type InventoryLocationFilter = 'ALL' | 'SHOP' | 'STORE';
+export type InventoryLocationFilter = 'ALL' | 'SHOP' | 'STORE' | 'ADJUST' | 'ADJUSTMENT_LIST';
 export type PurchasesSubTab = 'list' | 'add' | 'returns' | 'suppliers';
 export type ExpensesSubTab = 'list' | 'add';
 export type ProductsSubTab = 'product_list' | 'add_product' | 'category_list' | 'add_category';

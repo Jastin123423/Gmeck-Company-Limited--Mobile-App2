@@ -32,6 +32,7 @@ import {
   FolderTree,
   Truck,
   Contact,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { PurchaseIcon } from './PurchaseIcon';
@@ -394,6 +395,18 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
           icon: Warehouse,
           iconColor: 'text-indigo-400',
         },
+        {
+          id: 'ADJUST',
+          label: 'Adjust Inventory',
+          icon: SlidersHorizontal,
+          iconColor: 'text-amber-400',
+        },
+        {
+          id: 'ADJUSTMENT_LIST',
+          label: 'Adjustment List',
+          icon: ClipboardList,
+          iconColor: 'text-cyan-400',
+        },
       ],
     },
     {
@@ -522,7 +535,9 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
     } else if (parentId === 'stores') {
       openStoresSubTab(childId as 'stores' | 'inventory' | 'transfer' | 'list');
     } else if (parentId === 'inventory') {
-      openInventoryFilter(childId as 'ALL' | 'SHOP' | 'STORE');
+      openInventoryFilter(
+        childId as 'ALL' | 'SHOP' | 'STORE' | 'ADJUST' | 'ADJUSTMENT_LIST'
+      );
     } else if (parentId === 'purchases') {
       openPurchasesSubTab(childId as 'add' | 'list' | 'returns' | 'suppliers');
     } else if (parentId === 'expenses') {

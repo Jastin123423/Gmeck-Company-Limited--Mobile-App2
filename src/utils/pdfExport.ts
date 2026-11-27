@@ -3293,4 +3293,373 @@ export async function printInventoryReportPdf(
   );
 }
 
+// =====================================================================
+// 17. STOCK ADJUSTMENTS REPORT PDF & PRINT (AdminAdjustmentList.tsx)
+// Period-aware executive audit report: Daily / Weekly / Monthly / Custom
+// =====================================================================
+export type AdjustmentReportPeriod = 'DAY' | 'WEEK' | 'MONTH' | 'CUSTOM';
+
+export interface AdjustmentPdfRow {
+  createdAt: string;
+  productName: string;
+  sku?: string;
+  locationLabel: string;
+  shopName: string;
+  locationType: 'SHOP' | 'STORE';
+  type: string;
+  previousQty: number;
+  changeQty: number;
+  newQty: number;
+  unit?: string;
+  costValue: number;
+  reason: string;
+  userName: string;
+}
+
+export interface AdjustmentsReportPdfMeta {
+  period: AdjustmentReportPeriod;
+  startDate?: string;
+  endDate?: string;
+  locationLabel: string;
+  categoryLabel: string;
+  directionLabel?: string;
+  searchQuery?: string;
+  preparedBy?: string;
+}
+
+function resolveAdjustmentPeriodMeta(meta: AdjustmentsReportPdfMeta) {
+  const title =
+    meta.period === 'DAY'
+      ? 'Daily Stock Adjustment Report'
+      : meta.period === 'WEEK'
+        ? 'Weekly Stock Adjustment Report'
+        : meta.period === 'MONTH'
+          ? 'Monthly Stock Adjustment Report'
+          : 'Custom Period Stock Adjustment Report';
+
+  const shortKey =
+    meta.period === 'DAY'
+      ? 'daily'
+      : meta.period === 'WEEK'
+        ? 'weekly'
+        : meta.period === 'MONTH'
+          ? 'monthly'
+          : 'custom';
+
+  const label =
+    meta.period === 'DAY'
+      ? 'Daily (Today)'
+      : meta.period === 'WEEK'
+        ? 'Weekly (Last 7 Days)'
+        : meta.period === 'MONTH'
+          ? 'Monthly (This Month)'
+          : 'Custom Date Range';
+
+  const rangeText =
+    meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate} to ${meta.endDate}`
+      : meta.startDate || meta.endDate || new Date().toISOString().slice(0, 10);
+
+  return { title, shortKey, label, rangeText };
+}
+
+export function buildAdjustmentsReportPdfDoc(
+  rows: AdjustmentPdfRow[],
+  settings: BusinessSettings,
+  meta: AdjustmentsReportPdfMeta
+): jsPDF {
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  const symbol = settings?.currencySymbol || 'TSh';
+  const biz = settings?.businessName || 'Inventory Control';
+  const period = resolveAdjustmentPeriodMeta(meta);
+
+  const totalAdded = rows
+    .filter(r => r.changeQty > 0)
+    .reduce((sum, r) => sum + r.changeQty, 0);
+  const totalDeducted = rows
+    .filter(r => r.changeQty < 0)
+    .reduce((sum, r) => sum + Math.abs(r.changeQty), 0);
+  const netChange = totalAdded - totalDeducted;
+  const totalCostImpact = rows.reduce((sum, r) => sum + (Number(r.costValue) || 0), 0);
+  const uniqueProductsCount = new Set(
+    rows.map(r => `${r.productName.toLowerCase()}::${r.sku || ''}`)
+  ).size;
+
+  const filterParts: string[] = [];
+  if (meta.categoryLabel && meta.categoryLabel !== 'All Categories') {
+    filterParts.push(`Category: ${meta.categoryLabel}`);
+  }
+  if (meta.directionLabel && meta.directionLabel !== 'All Directions') {
+    filterParts.push(`Direction: ${meta.directionLabel}`);
+  }
+  if (meta.searchQuery?.trim()) {
+    filterParts.push(`Search: "${meta.searchQuery.trim()}"`);
+  }
+
+  let y = drawBanner(
+    doc,
+    period.title,
+    `${biz}${settings?.tagline ? ` | ${settings.tagline}` : ''}`,
+    [
+      `Report Type: ${period.label}`,
+      `Date Range: ${period.rangeText}`,
+      `Generated: ${new Date().toLocaleString()}`,
+    ],
+    COLORS.navy
+  );
+
+  y = drawMetaStrip(doc, y, [
+    { label: 'Business Location', value: meta.locationLabel || 'All Locations (Shop & Stores)' },
+    { label: 'Report Period', value: `${period.label} (${period.rangeText})` },
+    {
+      label: 'Active Filters',
+      value: filterParts.length > 0 ? filterParts.join(' | ') : 'All Adjustment Categories',
+    },
+    {
+      label: 'Audit Summary',
+      value: `${rows.length} adjustment(s) | ${uniqueProductsCount} product(s)`,
+    },
+  ]);
+
+  y = drawKpiRow(doc, y, [
+    {
+      label: 'Total Adjustments',
+      value: `${rows.length.toLocaleString()} (${uniqueProductsCount} items)`,
+      color: COLORS.blueDark,
+    },
+    {
+      label: 'Stock Added (+)',
+      value: `+${formatQtyCompact(totalAdded)} units`,
+      color: COLORS.emerald,
+    },
+    {
+      label: 'Stock Deducted (-)',
+      value: `-${formatQtyCompact(totalDeducted)} units`,
+      color: COLORS.rose,
+    },
+    {
+      label: 'Total Cost Impact',
+      value: formatCurrency(totalCostImpact, symbol),
+      color: COLORS.violet,
+    },
+  ]);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(...COLORS.slate900);
+  doc.text(
+    pdfSafe(`Stock Adjustment Register - ${period.label} (${period.rangeText})`),
+    12,
+    y + 2.5
+  );
+  y += 5;
+
+  const bodyRows =
+    rows.length === 0
+      ? [
+          [
+            '-',
+            '-',
+            `No stock adjustments recorded for ${period.label} (${period.rangeText}).`,
+            '-',
+            '-',
+            '-',
+            '-',
+            '-',
+            '-',
+          ],
+        ]
+      : rows.map((row, idx) => {
+          const productCell = pdfSafeMultiline([
+            row.productName,
+            row.sku ? `SKU: ${row.sku}` : '',
+          ]);
+          const locationCell = pdfSafeMultiline([
+            row.locationType === 'STORE' ? `Store: ${row.locationLabel}` : `Shop: ${row.locationLabel}`,
+            row.locationType === 'STORE' && row.shopName ? `(${row.shopName})` : '',
+          ]);
+          const cleanReason = (row.reason || '')
+            .replace(/\s*\[[^\]]+\]\s*$/g, '')
+            .trim();
+          const reasonAndUserCell = pdfSafeMultiline([
+            cleanReason || 'Stock adjustment',
+            `By: ${row.userName || 'Staff'}`,
+          ]);
+          const changeText =
+            row.changeQty > 0
+              ? `+${formatQtyCompact(row.changeQty)}`
+              : formatQtyCompact(row.changeQty);
+          const balanceText = `${formatQtyCompact(row.previousQty)} -> ${formatQtyCompact(row.newQty)}${
+            row.unit ? ` ${row.unit}` : ''
+          }`;
+          return [
+            String(idx + 1),
+            pdfSafe(formatDateTime(row.createdAt)),
+            productCell,
+            locationCell,
+            pdfSafe(row.type),
+            pdfSafe(balanceText),
+            pdfSafe(changeText),
+            pdfSafe(formatCurrency(row.costValue || 0, symbol)),
+            reasonAndUserCell,
+          ];
+        });
+
+  autoTable(doc, {
+    startY: y,
+    margin: { left: 12, right: 12, bottom: 16 },
+    rowPageBreak: 'avoid',
+    head: [
+      [
+        '#',
+        'Date & Time',
+        'Product',
+        'Location',
+        'Category',
+        'Before -> After',
+        'Change',
+        'Cost Impact',
+        'Reason & Adjusted By',
+      ],
+    ],
+    body: bodyRows,
+    foot:
+      rows.length > 0
+        ? [
+            [
+              '',
+              '',
+              `SUMMARY (${rows.length} ADJUSTMENT${rows.length === 1 ? '' : 'S'})`,
+              '',
+              '',
+              `+${formatQtyCompact(totalAdded)} / -${formatQtyCompact(totalDeducted)}`,
+              `${netChange > 0 ? '+' : ''}${formatQtyCompact(netChange)}`,
+              pdfSafe(formatCurrency(totalCostImpact, symbol)),
+              meta.preparedBy ? `Prepared by: ${pdfSafe(meta.preparedBy)}` : '',
+            ],
+          ]
+        : undefined,
+    styles: {
+      fontSize: 7.5,
+      cellPadding: { top: 2.6, right: 2.3, bottom: 2.6, left: 2.3 },
+      textColor: COLORS.slate900,
+      overflow: 'linebreak',
+      valign: 'middle',
+      lineColor: COLORS.slate200,
+      lineWidth: 0.2,
+    },
+    headStyles: {
+      fillColor: COLORS.navy,
+      textColor: COLORS.white,
+      fontStyle: 'bold',
+      fontSize: 7.6,
+      cellPadding: { top: 3, right: 2.3, bottom: 3, left: 2.3 },
+    },
+    footStyles: {
+      fillColor: COLORS.slate100,
+      textColor: COLORS.slate900,
+      fontStyle: 'bold',
+      fontSize: 7.8,
+    },
+    alternateRowStyles: { fillColor: COLORS.slate50 },
+    columnStyles: {
+      0: { cellWidth: 10, halign: 'center', textColor: COLORS.slate500 },
+      1: { cellWidth: 30, fontSize: 7.1, textColor: COLORS.slate700 },
+      2: { cellWidth: 48, fontStyle: 'bold' },
+      3: { cellWidth: 36, fontSize: 7.2 },
+      4: { cellWidth: 24, halign: 'center', fontStyle: 'bold', fontSize: 7.2 },
+      5: { cellWidth: 25, halign: 'center', fontSize: 7.3 },
+      6: { cellWidth: 18, halign: 'right', fontStyle: 'bold' },
+      7: { cellWidth: 26, halign: 'right', fontStyle: 'bold' },
+      8: { cellWidth: 56, fontSize: 7.2, textColor: COLORS.slate700 },
+    },
+    didParseCell: data => {
+      if (data.section === 'body' && data.column.index === 6 && rows.length > 0) {
+        const txt = String(data.cell.raw || '');
+        data.cell.styles.textColor = txt.startsWith('+') ? COLORS.emerald : COLORS.rose;
+      }
+      if (data.section === 'body' && data.column.index === 4 && rows.length > 0) {
+        const cat = String(data.cell.raw || '').toUpperCase();
+        if (['DAMAGED', 'BROKEN', 'EXPIRED', 'LOST'].includes(cat)) {
+          data.cell.styles.textColor = COLORS.rose;
+        } else {
+          data.cell.styles.textColor = COLORS.amber;
+        }
+      }
+    },
+  });
+
+  // Verification / Sign-off block if space permits
+  const afterTableY = getLastTableY(doc, y + 30) + 8;
+  const pageH = doc.internal.pageSize.getHeight();
+  const pageW = doc.internal.pageSize.getWidth();
+  if (afterTableY + 18 < pageH - 12) {
+    const colW = (pageW - 24 - 16) / 3;
+    const labels = [
+      `Prepared By: ${pdfSafe(meta.preparedBy || '______________________')}`,
+      'Verified By (Supervisor / Admin): ______________________',
+      'Signature & Date: ______________________',
+    ];
+    labels.forEach((lbl, i) => {
+      const x = 12 + i * (colW + 8);
+      doc.setDrawColor(...COLORS.slate200);
+      doc.setLineWidth(0.3);
+      doc.line(x, afterTableY + 10, x + colW, afterTableY + 10);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.2);
+      doc.setTextColor(...COLORS.slate500);
+      doc.text(lbl, x, afterTableY + 14.5, { maxWidth: colW });
+    });
+  }
+
+  applyPageFooters(
+    doc,
+    `${biz} - ${period.title} (${meta.locationLabel || 'All Locations'} | ${period.rangeText})`
+  );
+  return doc;
+}
+
+export async function downloadAdjustmentsReportPdf(
+  rows: AdjustmentPdfRow[],
+  settings: BusinessSettings,
+  meta: AdjustmentsReportPdfMeta
+): Promise<boolean> {
+  const doc = buildAdjustmentsReportPdfDoc(rows, settings, meta);
+  const period = resolveAdjustmentPeriodMeta(meta);
+  const dateTag =
+    meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate}_to_${meta.endDate}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfDownload(
+    doc,
+    `${period.shortKey}_stock_adjustments_${meta.locationLabel || 'all'}_${dateTag}.pdf`
+  );
+}
+
+export async function printAdjustmentsReportPdf(
+  rows: AdjustmentPdfRow[],
+  settings: BusinessSettings,
+  meta: AdjustmentsReportPdfMeta
+): Promise<PrintPdfResult> {
+  const doc = buildAdjustmentsReportPdfDoc(rows, settings, meta);
+  const period = resolveAdjustmentPeriodMeta(meta);
+  const dateTag =
+    meta.startDate && meta.endDate
+      ? meta.startDate === meta.endDate
+        ? meta.startDate
+        : `${meta.startDate}_to_${meta.endDate}`
+      : new Date().toISOString().slice(0, 10);
+  return triggerPdfPrint(
+    doc,
+    `${period.title} - ${meta.locationLabel || 'All Locations'} (${dateTag})`,
+    `${period.shortKey}_stock_adjustments_${meta.locationLabel || 'all'}_${dateTag}.pdf`,
+    { orientation: 'landscape', paperSize: 'a4' }
+  );
+}
+
+
 

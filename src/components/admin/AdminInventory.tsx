@@ -47,6 +47,8 @@ import {
   isPlatformAdmin,
   isShopAdmin,
 } from '../../utils/permissions';
+import { AdminAdjustInventory } from './AdminAdjustInventory';
+import { AdminAdjustmentList } from './AdminAdjustmentList';
 
 const PAGE_SIZE = 10;
 
@@ -170,6 +172,16 @@ export const AdminInventory: React.FC = () => {
 
   if (!currentUser) return null;
   if (!hasAdminAccess(currentUser) && !currentUser.permissions?.canManageInventory) return null;
+
+  if (inventoryFilter === 'ADJUST') {
+    return <AdminAdjustInventory />;
+  }
+  if (inventoryFilter === 'ADJUSTMENT_LIST') {
+    return <AdminAdjustmentList />;
+  }
+
+  const baseInventoryScope: ShopLocationFilter =
+    inventoryFilter === 'SHOP' || inventoryFilter === 'STORE' ? inventoryFilter : 'ALL';
 
   const platformAdmin = isPlatformAdmin(currentUser);
   const shopAdmin = isShopAdmin(currentUser);
@@ -395,7 +407,7 @@ export const AdminInventory: React.FC = () => {
   };
 
   const getShopLocationFilter = (shopId: string): ShopLocationFilter =>
-    shopLocationFilters[shopId] ?? inventoryFilter;
+    shopLocationFilters[shopId] ?? baseInventoryScope;
 
   const handleSetShopLocationFilter = (shopId: string, next: ShopLocationFilter) => {
     setShopLocationFilters(prev => ({
@@ -425,7 +437,7 @@ export const AdminInventory: React.FC = () => {
       const hasValidShop = !!p.shopId && visibleShopIdSet.has(p.shopId);
       const locFilter: ShopLocationFilter = hasValidShop
         ? getShopLocationFilter(p.shopId)
-        : inventoryFilter;
+        : baseInventoryScope;
       activeScopeSet.add(locFilter);
 
       const shopQty = Math.max(0, Number(p.currentStock || 0));
@@ -485,7 +497,7 @@ export const AdminInventory: React.FC = () => {
       ? Array.from(activeScopeSet)[0]
       : activeScopeSet.size > 1
         ? 'MIXED'
-        : inventoryFilter;
+        : baseInventoryScope;
 
   const valuationScopeLabel =
     activeValuationScope === 'SHOP'
@@ -550,7 +562,7 @@ export const AdminInventory: React.FC = () => {
     const hasValidShop = !!p.shopId && visibleShopIdSet.has(p.shopId);
     const locFilter: ShopLocationFilter = hasValidShop
       ? getShopLocationFilter(p.shopId)
-      : inventoryFilter;
+      : baseInventoryScope;
     const shopQty = Math.max(0, Number(p.currentStock || 0));
     const storeQty = getProductStoreQty(p);
     const activeQty =
@@ -863,8 +875,8 @@ export const AdminInventory: React.FC = () => {
     });
 
     if (productsWithNoShop.length > 0) {
-      scopesUsed.add(inventoryFilter);
-      productsWithNoShop.forEach(p => appendProductRow(p, 'Unassigned', inventoryFilter));
+      scopesUsed.add(baseInventoryScope);
+      productsWithNoShop.forEach(p => appendProductRow(p, 'Unassigned', baseInventoryScope));
     }
 
     const resolvedScope: InventoryExportScope =
