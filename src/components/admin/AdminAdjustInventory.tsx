@@ -13,6 +13,7 @@ import {
   X,
   ArrowRight,
   RotateCcw,
+  ChevronDown,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { InventoryService } from '../../services/inventoryService';
@@ -67,6 +68,7 @@ export const AdminAdjustInventory: React.FC = () => {
   const [batchCategory, setBatchCategory] = useState<AdjustmentCategory>('CORRECTION');
   const [batchReason, setBatchReason] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [expandedProductIds, setExpandedProductIds] = useState<Set<string>>(() => new Set());
   const [rows, setRows] = useState<BatchAdjustmentRow[]>([]);
   const [formError, setFormError] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -144,7 +146,74 @@ export const AdminAdjustInventory: React.FC = () => {
     [visibleProducts]
   );
 
-  // Resolve ALL adjustable locations (Shop Floor + ALL Stores under that product's shop) with exact live quantities
+  const floorStoreIdSet = useMemo(
+    () => new Set(allStores.filter(st => st.isShopFloor).map(st => st.id)),
+    [allStores]
+  );
+
+  // Track historical shop-floor & warehouse-store presence so 0-qty products still appear in their actual locations
+  const { shopFloorHistoryProductIds, warehouseHistoryStoreIdsByProduct } = useMemo(() => {
+    const shopHistory = new Set<string>();
+    const storeHistory = new Map<string, Set<string>>();
+
+    const addStoreHist = (pid: string, sid: string) => {
+      let set = storeHistory.get(pid);
+      if (!set) {
+        set = new Set<string>();
+        storeHistory.set(pid, set);
+      }
+      set.add(sid);
+    };
+
+    for (const m of dbState.movements || []) {
+      if (!m.productId) continue;
+      if (m.storeId && !floorStoreIdSet.has(m.storeId)) {
+        if (
+          m.type === 'STORE_TRANSFER' ||
+          m.type === 'INITIAL_STOCK' ||
+          m.type === 'PURCHASE' ||
+          m.type === 'ADJUSTMENT' ||
+          m.type === 'CORRECTION'
+        ) {
+          addStoreHist(m.productId, m.storeId);
+        }
+      } else {
+        shopHistory.add(m.productId);
+      }
+    }
+
+    for (const pur of dbState.purchases || []) {
+      for (const item of pur.items || []) {
+        if (!item.productId) continue;
+        if (pur.storeId && !floorStoreIdSet.has(pur.storeId)) {
+          addStoreHist(item.productId, pur.storeId);
+        } else {
+          shopHistory.add(item.productId);
+        }
+      }
+    }
+
+    for (const tr of dbState.stockTransfers || []) {
+      if (tr.status !== 'COMPLETED') continue;
+      for (const item of tr.items || []) {
+        if (tr.destType === 'SHOP') shopHistory.add(item.destProductId || item.productId);
+        if (tr.sourceType === 'SHOP') shopHistory.add(item.productId);
+        if (tr.destType === 'STORE' && tr.destId && !floorStoreIdSet.has(tr.destId)) {
+          addStoreHist(item.destProductId || item.productId, tr.destId);
+        }
+        if (tr.sourceType === 'STORE' && tr.sourceId && !floorStoreIdSet.has(tr.sourceId)) {
+          addStoreHist(item.productId, tr.sourceId);
+        }
+      }
+    }
+
+    return {
+      shopFloorHistoryProductIds: shopHistory,
+      warehouseHistoryStoreIdsByProduct: storeHistory,
+    };
+  }, [dbState.movements, dbState.purchases, dbState.stockTransfers, floorStoreIdSet]);
+
+  // Resolve exact locations where a product exists (Shop Floor and/or Warehouse Stores, including 0-stock locations)
   const getLocationsForProduct = (p: Product): LocationChoice[] => {
     const shopName = shopNameById.get(p.shopId) || 'Shop';
     const shopStores = warehouseStoresByShop.get(p.shopId) || [];
@@ -155,27 +224,31 @@ export const AdminAdjustInventory: React.FC = () => {
       0
     );
     const rawStoreStock = Math.max(0, Number(p.storeStock || 0));
+    const historyStores = warehouseHistoryStoreIdsByProduct.get(p.id);
 
-    const locations: LocationChoice[] = [
-      {
-        key: `SHOP:${p.shopId}`,
-        type: 'SHOP',
-        shopId: p.shopId,
-        shopName,
-        label: `Shop: ${shopName}`,
-        shortLabel: `${shopName} (Shop)`,
-        currentQty: Math.max(0, Number(p.currentStock || 0)),
-      },
-    ];
-
+    const warehouseLocations: LocationChoice[] = [];
     for (const st of shopStores) {
       const hasStockKey = Boolean(p.storeStocks && st.id in p.storeStocks);
       const hasDetailKey = Boolean(p.storeDetails && st.id in p.storeDetails);
+      const isPrimaryStore = p.storeId === st.id;
       const isLegacyFallback =
         mappedWarehouseSum === 0 &&
         rawStoreStock > 0 &&
         ((p.storeId && shopWarehouseIdSet.has(p.storeId) && p.storeId === st.id) ||
           (!p.storeId && shopStores[0]?.id === st.id));
+      const hasHistoryHere = Boolean(historyStores?.has(st.id));
+      const isExplicitlySelectedFilter = selectedLocationFilter === `STORE:${st.id}`;
+
+      if (
+        !hasStockKey &&
+        !hasDetailKey &&
+        !isPrimaryStore &&
+        !isLegacyFallback &&
+        !hasHistoryHere &&
+        !isExplicitlySelectedFilter
+      ) {
+        continue;
+      }
 
       const qty = hasStockKey
         ? Math.max(0, Number(p.storeStocks?.[st.id] || 0))
@@ -185,7 +258,7 @@ export const AdminAdjustInventory: React.FC = () => {
             ? rawStoreStock
             : 0;
 
-      locations.push({
+      warehouseLocations.push({
         key: `STORE:${st.id}`,
         type: 'STORE',
         shopId: p.shopId,
@@ -198,12 +271,37 @@ export const AdminAdjustInventory: React.FC = () => {
       });
     }
 
+    const hasShopFloor =
+      Math.max(0, Number(p.currentStock || 0)) > 0 ||
+      shopFloorHistoryProductIds.has(p.id) ||
+      warehouseLocations.length === 0 ||
+      selectedLocationFilter === `SHOP:${p.shopId}`;
+
+    const locations: LocationChoice[] = [];
+    if (hasShopFloor) {
+      locations.push({
+        key: `SHOP:${p.shopId}`,
+        type: 'SHOP',
+        shopId: p.shopId,
+        shopName,
+        label: `Shop: ${shopName}`,
+        shortLabel: `${shopName} (Shop)`,
+        currentQty: Math.max(0, Number(p.currentStock || 0)),
+      });
+    }
+    for (const wl of warehouseLocations) {
+      locations.push(wl);
+    }
+
     return locations;
   };
 
-  // Search products (includes 0-stock products across Shop & Stores!)
+  // Search products — stays hidden until user actually types a search query (includes 0-stock products)
+  const trimmedSearch = searchQuery.trim();
   const searchResults = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = trimmedSearch.toLowerCase();
+    if (!q) return [];
+
     const activeFilterOpt =
       selectedLocationFilter === 'ALL'
         ? null
@@ -213,7 +311,6 @@ export const AdminAdjustInventory: React.FC = () => {
       if (activeFilterOpt && p.shopId !== activeFilterOpt.shopId) {
         return false;
       }
-      if (!q) return true;
       return (
         p.name.toLowerCase().includes(q) ||
         (p.sku && p.sku.toLowerCase().includes(q)) ||
@@ -225,8 +322,20 @@ export const AdminAdjustInventory: React.FC = () => {
 
     return filtered
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
-      .slice(0, q ? 25 : 12);
-  }, [visibleProducts, searchQuery, selectedLocationFilter, businessLocationOptions]);
+      .slice(0, 25);
+  }, [visibleProducts, trimmedSearch, selectedLocationFilter, businessLocationOptions]);
+
+  const toggleProductLocationMenu = (productId: string) => {
+    setExpandedProductIds(prev => {
+      const next = new Set(prev);
+      if (next.has(productId)) {
+        next.delete(productId);
+      } else {
+        next.add(productId);
+      }
+      return next;
+    });
+  };
 
   if (!currentUser) return null;
   if (!hasAdminAccess(currentUser) && !currentUser.permissions?.canManageInventory) return null;
@@ -605,7 +714,7 @@ export const AdminAdjustInventory: React.FC = () => {
               Search & Add Products to Adjust (Includes 0-Stock Products)
             </label>
             <span className="text-[11px] text-slate-400">
-              Click any product location pill to add it to the adjustment table below
+              Type a product name or SKU to search and add it below
             </span>
           </div>
 
@@ -621,7 +730,10 @@ export const AdminAdjustInventory: React.FC = () => {
             {searchQuery && (
               <button
                 type="button"
-                onClick={() => setSearchQuery('')}
+                onClick={() => {
+                  setSearchQuery('');
+                  setExpandedProductIds(new Set());
+                }}
                 className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-white"
               >
                 <X className="w-4 h-4" />
@@ -629,95 +741,186 @@ export const AdminAdjustInventory: React.FC = () => {
             )}
           </div>
 
-          {/* Product Picker Results */}
-          <div className="max-h-64 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/70 divide-y divide-slate-800/70">
-            {searchResults.length === 0 ? (
-              <div className="p-6 text-center text-xs text-slate-500">
-                No products matched "{searchQuery}". Try a different name, SKU, or select All Locations.
-              </div>
-            ) : (
-              searchResults.map(product => {
-                const locs = getLocationsForProduct(product);
-                const visibleLocs =
-                  selectedLocationFilter === 'ALL'
-                    ? locs
-                    : locs.filter(l => l.key === selectedLocationFilter);
+          {/* Product Picker Results — shown ONLY after user searches */}
+          {trimmedSearch.length > 0 && (
+            <div className="max-h-80 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/70 divide-y divide-slate-800/70">
+              {searchResults.length === 0 ? (
+                <div className="p-6 text-center text-xs text-slate-500">
+                  No products matched "{trimmedSearch}". Try a different name, SKU, or select All Locations.
+                </div>
+              ) : (
+                searchResults.map(product => {
+                  const locs = getLocationsForProduct(product);
+                  const visibleLocs =
+                    selectedLocationFilter === 'ALL'
+                      ? locs
+                      : locs.filter(l => l.key === selectedLocationFilter);
+                  const hasMultipleLocations = visibleLocs.length > 1;
+                  const isExpanded = expandedProductIds.has(product.id);
+                  const singleLoc = visibleLocs.length === 1 ? visibleLocs[0] : null;
+                  const isSingleAdded = singleLoc
+                    ? rows.some(r => r.rowKey === `${product.id}::${singleLoc.key}`)
+                    : false;
+                  const addedCountForProduct = visibleLocs.filter(loc =>
+                    rows.some(r => r.rowKey === `${product.id}::${loc.key}`)
+                  ).length;
 
-                return (
-                  <div
-                    key={product.id}
-                    className="p-2.5 sm:px-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 hover:bg-slate-900/70 transition-colors"
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <ProductThumbnail product={product} size="sm" />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-xs sm:text-sm font-bold text-white truncate">
-                            {product.name}
-                          </span>
-                          {product.variation && (
-                            <span className="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/25 text-[10px] font-semibold">
-                              {product.variation}
-                            </span>
-                          )}
+                  return (
+                    <div
+                      key={product.id}
+                      className="p-3 sm:px-4 space-y-2.5 hover:bg-slate-900/60 transition-colors"
+                    >
+                      {/* Product Info Row */}
+                      <div className="flex items-center justify-between gap-2.5">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <ProductThumbnail product={product} size="sm" />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs sm:text-sm font-bold text-white truncate">
+                                {product.name}
+                              </span>
+                              {product.variation && (
+                                <span className="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/25 text-[10px] font-semibold">
+                                  {product.variation}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-slate-400 flex items-center gap-2 flex-wrap">
+                              <span>SKU: {product.sku || '-'}</span>
+                              <span>•</span>
+                              <span>Buy: {formatCurrency(product.purchasePrice || 0, symbol)}</span>
+                            </div>
+                          </div>
                         </div>
-                        <div className="text-[11px] text-slate-400 flex items-center gap-2 flex-wrap">
-                          <span>SKU: {product.sku || '-'}</span>
-                          <span>•</span>
-                          <span>Buy: {formatCurrency(product.purchasePrice || 0, symbol)}</span>
-                        </div>
-                      </div>
-                    </div>
 
-                    {/* One-click Add buttons per location (Shop & each Store) */}
-                    <div className="flex items-center gap-1.5 flex-wrap justify-start sm:justify-end">
-                      {visibleLocs.map(loc => {
-                        const isAdded = rows.some(
-                          r => r.rowKey === `${product.id}::${loc.key}`
-                        );
-                        return (
+                        {/* Single-location direct Add button */}
+                        {singleLoc && (
                           <button
-                            key={loc.key}
                             type="button"
-                            onClick={() => handleAddProductToBatch(product, loc.key)}
-                            disabled={isAdded}
-                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 border transition-all ${
-                              isAdded
+                            onClick={() => handleAddProductToBatch(product, singleLoc.key)}
+                            disabled={isSingleAdded}
+                            className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 border shrink-0 transition-all ${
+                              isSingleAdded
                                 ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 cursor-default'
-                                : loc.type === 'STORE'
+                                : singleLoc.type === 'STORE'
                                   ? 'bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 border-indigo-500/30'
                                   : 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-500/30'
                             }`}
                           >
-                            {loc.type === 'STORE' ? (
+                            {singleLoc.type === 'STORE' ? (
                               <Warehouse className="w-3 h-3 shrink-0" />
                             ) : (
                               <Store className="w-3 h-3 shrink-0" />
                             )}
-                            <span className="truncate max-w-[140px]">{loc.shortLabel}</span>
+                            <span className="truncate max-w-[140px]">{singleLoc.shortLabel}</span>
                             <span
                               className={`px-1 py-0.2 rounded text-[10px] font-bold ${
-                                loc.currentQty <= 0
+                                singleLoc.currentQty <= 0
                                   ? 'bg-rose-500/20 text-rose-300'
                                   : 'bg-slate-900/70 text-slate-200'
                               }`}
                             >
-                              {loc.currentQty}
+                              {singleLoc.currentQty}
                             </span>
-                            {isAdded ? (
+                            {isSingleAdded ? (
                               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                             ) : (
                               <Plus className="w-3.5 h-3.5 shrink-0" />
                             )}
                           </button>
-                        );
-                      })}
+                        )}
+                      </div>
+
+                      {/* Multi-location: "Adjustment Location" label + Collapsible menu with V icon */}
+                      {hasMultipleLocations && (
+                        <div className="pt-1 space-y-1.5">
+                          <div className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+                            Adjustment Location
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => toggleProductLocationMenu(product.id)}
+                            className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800/90 border border-slate-700/80 flex items-center justify-between gap-2 text-xs font-semibold text-slate-200 transition-colors"
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              <span className="truncate">
+                                Select Location ({visibleLocs.length} locations available)
+                              </span>
+                              {addedCountForProduct > 0 && (
+                                <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold shrink-0">
+                                  {addedCountForProduct} added
+                                </span>
+                              )}
+                            </span>
+                            <ChevronDown
+                              className={`w-4 h-4 text-amber-400 shrink-0 transition-transform duration-200 ${
+                                isExpanded ? 'rotate-180' : ''
+                              }`}
+                            />
+                          </button>
+
+                          {isExpanded && (
+                            <div className="rounded-xl border border-slate-800 bg-slate-900/90 divide-y divide-slate-800/70 overflow-hidden">
+                              {visibleLocs.map(loc => {
+                                const isAdded = rows.some(
+                                  r => r.rowKey === `${product.id}::${loc.key}`
+                                );
+                                return (
+                                  <button
+                                    key={loc.key}
+                                    type="button"
+                                    onClick={() => handleAddProductToBatch(product, loc.key)}
+                                    disabled={isAdded}
+                                    className={`w-full px-3 py-2.5 flex items-center justify-between gap-2 text-left text-xs transition-colors ${
+                                      isAdded
+                                        ? 'bg-emerald-500/10 text-emerald-300 cursor-default'
+                                        : 'hover:bg-slate-800/80 text-slate-200'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      {loc.type === 'STORE' ? (
+                                        <Warehouse className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                                      ) : (
+                                        <Store className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                      )}
+                                      <span className="font-semibold truncate">{loc.label}</span>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <span
+                                        className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${
+                                          loc.currentQty <= 0
+                                            ? 'bg-rose-500/15 text-rose-300 border border-rose-500/25'
+                                            : 'bg-slate-950 text-slate-200 border border-slate-700'
+                                        }`}
+                                      >
+                                        Qty: {loc.currentQty}
+                                      </span>
+                                      {isAdded ? (
+                                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-400">
+                                          <CheckCircle2 className="w-3.5 h-3.5" />
+                                          Added
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-600/20 text-amber-300 border border-amber-500/30 text-[11px] font-bold">
+                                          <Plus className="w-3 h-3" />
+                                          Add
+                                        </span>
+                                      )}
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
+                  );
+                })
+              )}
+            </div>
+          )}
         </div>
       </div>
 
